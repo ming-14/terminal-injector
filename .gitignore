@@ -1,0 +1,85 @@
+# === CMake 构建 ===
+build/
+out/
+cmake-build-*/
+
+# === MSVC / Visual Studio ===
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.res
+*.manifest
+*.vcxproj.user
+*.suo
+*.sln.docstates
+.vs/
+ipch/
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# === C/C++ 编译产物 ===
+*.o
+*.a
+*.so
+*.dylib
+*.d
+*.ko
+*.elf
+*.bin
+*.map
+*.gch
+*.pch
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+*.spec
+*.egg-info/
+*.egg
+.eggs/
+dist/
+venv/
+.env
+
+# === 调试 / 日志 ===
+debug/
+logs/
+*.log
+.dbg/
+
+# === IDE / 编辑器 ===
+.idea/
+.vscode/
+.trae/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# === 系统文件 ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# === Agent 工具 ===
+.agents/
+
+# === 文档产物 ===
+docs/*_result.txt
+docs/*_output.txt

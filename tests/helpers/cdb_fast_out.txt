@@ -1,0 +1,174 @@
+Opened log file 'c:\Users\rikka\Desktop\terminal-injector\tests\helpers\cdb_fast_out.txt'
+
+Microsoft (R) Windows Debugger Version 10.0.19041.5609 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+*** wait with pending attach
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\atlmfc.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\concurrency.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\cpp_rest.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\stl.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Data.Json.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Media.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\windows.natvis'
+NatVis script successfully loaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\winrt.natvis'
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+OK                                             c:\Users\rikka\Desktop\terminal-injector\build\bin\Release
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols
+OK                                             c:\Users\rikka\Desktop\terminal-injector\build\bin\Release
+Symbol search path is: srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols;c:\Users\rikka\Desktop\terminal-injector\build\bin\Release
+Executable search path is: c:\Users\rikka\Desktop\terminal-injector\build\bin\Release
+ModLoad: 00007ff6`51580000 00007ff6`515e7000   C:\Windows\SYSTEM32\cmd.exe
+ModLoad: 00007fff`e5e50000 00007fff`e6048000   C:\Windows\SYSTEM32\ntdll.dll
+ModLoad: 00007fff`e5780000 00007fff`e5842000   C:\Windows\System32\KERNEL32.DLL
+ModLoad: 00007fff`e3790000 00007fff`e3a86000   C:\Windows\System32\KERNELBASE.dll
+ModLoad: 00007fff`e5b20000 00007fff`e5bbe000   C:\Windows\System32\msvcrt.dll
+ModLoad: 00007fff`e3f80000 00007fff`e42d4000   C:\Windows\System32\combase.dll
+ModLoad: 00007fff`e3b90000 00007fff`e3c90000   C:\Windows\System32\ucrtbase.dll
+ModLoad: 00007fff`e5a00000 00007fff`e5b20000   C:\Windows\System32\RPCRT4.dll
+ModLoad: 00007fff`b95b0000 00007fff`b95e5000   C:\Windows\SYSTEM32\winbrand.dll
+ModLoad: 00007fff`e3d10000 00007fff`e3d37000   C:\Windows\System32\bcrypt.dll
+ModLoad: 00007fff`85da0000 00007fff`85e18000   C:\Users\rikka\Desktop\TERMIN~1\build\bin\Release\injected.dll
+ModLoad: 00007fff`e5850000 00007fff`e59f1000   C:\Windows\System32\USER32.dll
+ModLoad: 00007fff`e34e0000 00007fff`e3502000   C:\Windows\System32\win32u.dll
+ModLoad: 00007fff`e49d0000 00007fff`e49fb000   C:\Windows\System32\GDI32.dll
+ModLoad: 00007fff`e3670000 00007fff`e3789000   C:\Windows\System32\gdi32full.dll
+ModLoad: 00007fff`e3dd0000 00007fff`e3e6d000   C:\Windows\System32\msvcp_win.dll
+ModLoad: 00007fff`89f00000 00007fff`89f9d000   C:\Windows\SYSTEM32\MSVCP140.dll
+ModLoad: 00007fff`c58e0000 00007fff`c590c000   C:\Windows\SYSTEM32\VCRUNTIME140.dll
+ModLoad: 00007fff`c7100000 00007fff`c710c000   C:\Windows\SYSTEM32\VCRUNTIME140_1.dll
+ModLoad: 00007fff`e4340000 00007fff`e436f000   C:\Windows\System32\IMM32.DLL
+(f80.c40): Break instruction exception - code 80000003 (first chance)
+ntdll!DbgBreakPoint:
+00007fff`e5ef10d0 cc              int     3
+0:006> ~;~*kp;?? g_initialized;?? g_initInProgress;qd
+   0  Id: f80.1ff8 Suspend: 1 Teb: 000000a6`06717000 Unfrozen
+   1  Id: f80.690 Suspend: 2 Teb: 000000a6`06719000 Unfrozen
+   2  Id: f80.b9c Suspend: 2 Teb: 000000a6`0671b000 Unfrozen
+   3  Id: f80.2460 Suspend: 1 Teb: 000000a6`0671d000 Unfrozen
+   4  Id: f80.1fdc Suspend: 1 Teb: 000000a6`0671f000 Unfrozen
+   5  Id: f80.1f34 Suspend: 1 Teb: 000000a6`06721000 Unfrozen
+.  6  Id: f80.c40 Suspend: 1 Teb: 000000a6`06723000 Unfrozen
+
+   0  Id: f80.1ff8 Suspend: 1 Teb: 000000a6`06717000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`068ff668 00007fff`e37da5f1 ntdll!NtDeviceIoControlFile+0x14
+000000a6`068ff670 00007fff`e38af1ab KERNELBASE!WriteConsoleW+0x191
+000000a6`068ff7d0 00007fff`e38af23a KERNELBASE!ReadConsoleA+0x1cb
+000000a6`068ff920 00007ff6`515a8027 KERNELBASE!ReadConsoleW+0x1a
+000000a6`068ff960 00007ff6`5159d31b cmd+0x28027
+000000a6`068ffa30 00007ff6`5158f438 cmd+0x1d31b
+000000a6`068ffa90 00007ff6`5158e626 cmd+0xf438
+000000a6`068ffb00 00007ff6`5158e073 cmd+0xe626
+000000a6`068ffb30 00007ff6`5159eba6 cmd+0xe073
+000000a6`068ffb70 00007ff6`51598ecd cmd+0x1eba6
+000000a6`068ffc10 00007fff`e5797374 cmd+0x18ecd
+000000a6`068ffc50 00007fff`e5e9cc91 KERNEL32!BaseThreadInitThunk+0x14
+000000a6`068ffc80 00000000`00000000 ntdll!RtlUserThreadStart+0x21
+
+   1  Id: f80.690 Suspend: 2 Teb: 000000a6`06719000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`069ff698 00007fff`e5e9d407 ntdll!ZwWaitForWorkViaWorkerFactory+0x14
+000000a6`069ff6a0 00007fff`e5797374 ntdll!TpReleaseCleanupGroupMembers+0x747
+000000a6`069ff9a0 00007fff`e5e9cc91 KERNEL32!BaseThreadInitThunk+0x14
+000000a6`069ff9d0 00000000`00000000 ntdll!RtlUserThreadStart+0x21
+
+   2  Id: f80.b9c Suspend: 2 Teb: 000000a6`0671b000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`06aff858 00007fff`e5e9d407 ntdll!ZwWaitForWorkViaWorkerFactory+0x14
+000000a6`06aff860 00007fff`e5797374 ntdll!TpReleaseCleanupGroupMembers+0x747
+000000a6`06affb60 00007fff`e5e9cc91 KERNEL32!BaseThreadInitThunk+0x14
+000000a6`06affb90 00000000`00000000 ntdll!RtlUserThreadStart+0x21
+
+   3  Id: f80.2460 Suspend: 1 Teb: 000000a6`0671d000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`06bfc7e0 00007fff`e5ea1afc ntdll!DbgPrint+0x27b
+000000a6`06bfca40 00007fff`e37b5567 ntdll!DbgPrint+0x3c
+000000a6`06bfca80 00007fff`e37c2573 KERNELBASE!OutputDebugStringA+0x1a7
+*** WARNING: Unable to verify checksum for C:\Users\rikka\Desktop\TERMIN~1\build\bin\Release\injected.dll
+000000a6`06bfcd60 00007fff`85dc36c7 KERNELBASE!OutputDebugStringW+0xc3
+000000a6`06bfcdd0 00007fff`85dc317a injected!terminjector::Logger::Log+0x1e7
+000000a6`06bff640 00007fff`85dba184 injected!terminjector::Logger::Info+0x2a
+000000a6`06bff670 00007fff`85dc6bb5 injected!terminjector::hooks::CloseHandle_Detour(void * h = 0x00000000`00000178)+0x64
+000000a6`06bff6a0 00007fff`85dc6c4c injected!std::vector<unsigned char,std::allocator<unsigned char> >::resize+0x295
+000000a6`06bff6e0 00007fff`85da22b3 injected!std::vector<unsigned char,std::allocator<unsigned char> >::resize+0x32c
+000000a6`06bff740 00007fff`85da118e injected!terminjector::HookManager::InstallAll(void)+0x123
+000000a6`06bff7a0 00007fff`85dfb8b6 injected!DllMain(struct HINSTANCE__ * hModule = <Value unavailable error>, unsigned long reason = <Value unavailable error>, void * __formal = 0x00000000`00000000)+0x7e
+000000a6`06bff7e0 00007fff`e5e69a1d injected!dllmain_dispatch(struct HINSTANCE__ * instance = 0x00007fff`85da0000, unsigned long reason = 1, void * reserved = 0x00000000`00000000)+0x96
+000000a6`06bff840 00007fff`e5ebd2f7 ntdll!RtlActivateActivationContextUnsafeFast+0x11d
+000000a6`06bff8b0 00007fff`e5ebd08a ntdll!LdrGetProcedureAddressEx+0x2d7
+000000a6`06bffa00 00007fff`e5e8d947 ntdll!LdrGetProcedureAddressEx+0x6a
+000000a6`06bffa40 00007fff`e5e6fbae ntdll!RtlSwitchedVVI+0xd07
+000000a6`06bffa80 00007fff`e5e673e4 ntdll!RtlGetFullPathName_UstrEx+0x231e
+000000a6`06bffb00 00007fff`e5e66af4 ntdll!RtlDosPathNameToNtPathName_U+0xd4
+000000a6`06bffcb0 00007fff`e37bdb72 ntdll!LdrLoadDll+0xe4
+000000a6`06bffda0 00007fff`e5797374 KERNELBASE!LoadLibraryExW+0x162
+000000a6`06bffe10 00007fff`e5e9cc91 KERNEL32!BaseThreadInitThunk+0x14
+000000a6`06bffe40 00000000`00000000 ntdll!RtlUserThreadStart+0x21
+
+   4  Id: f80.1fdc Suspend: 1 Teb: 000000a6`0671f000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`06cff198 00007fff`e5eb0022 ntdll!ZwWaitForSingleObject+0x14
+000000a6`06cff1a0 00007fff`e5e677c3 ntdll!RtlUnlockHeap+0x622
+000000a6`06cff1e0 00007fff`e5ec6094 ntdll!LdrShutdownThread+0x373
+000000a6`06cff2c0 00007fff`e5ec5c73 ntdll!LdrInitializeThunk+0x484
+000000a6`06cff360 00007fff`e5ec5c1e ntdll!LdrInitializeThunk+0x63
+000000a6`06cff390 00000000`00000000 ntdll!LdrInitializeThunk+0xe
+
+   5  Id: f80.1f34 Suspend: 1 Teb: 000000a6`06721000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`06dff0f8 00007fff`e5eb0022 ntdll!ZwWaitForSingleObject+0x14
+000000a6`06dff100 00007fff`e5e677c3 ntdll!RtlUnlockHeap+0x622
+000000a6`06dff140 00007fff`e5ec6094 ntdll!LdrShutdownThread+0x373
+000000a6`06dff220 00007fff`e5ec5c73 ntdll!LdrInitializeThunk+0x484
+000000a6`06dff2c0 00007fff`e5ec5c1e ntdll!LdrInitializeThunk+0x63
+000000a6`06dff2f0 00000000`00000000 ntdll!LdrInitializeThunk+0xe
+
+#  6  Id: f80.c40 Suspend: 1 Teb: 000000a6`06723000 Unfrozen
+Child-SP          RetAddr           Call Site
+000000a6`06effb28 00007fff`e5f1cb3e ntdll!DbgBreakPoint
+000000a6`06effb30 00007fff`e5797374 ntdll!DbgUiRemoteBreakin+0x4e
+000000a6`06effb60 00007fff`e5e9cc91 KERNEL32!BaseThreadInitThunk+0x14
+000000a6`06effb90 00000000`00000000 ntdll!RtlUserThreadStart+0x21
+*************************************************************************
+***                                                                   ***
+***                                                                   ***
+***    Either you specified an unqualified symbol, or your debugger   ***
+***    doesn't have full symbol information.  Unqualified symbol      ***
+***    resolution is turned off by default. Please either specify a   ***
+***    fully qualified symbol module!symbolname, or enable resolution ***
+***    of unqualified symbols by typing ".symopt- 100". Note that     ***
+***    enabling unqualified symbol resolution with network symbol     ***
+***    server shares in the symbol path may cause the debugger to     ***
+***    appear to hang for long periods of time when an incorrect      ***
+***    symbol name is typed or the network symbol server is down.     ***
+***                                                                   ***
+***    For some commands to work properly, your symbol path           ***
+***    must point to .pdb files that have full type information.      ***
+***                                                                   ***
+***    Certain .pdb files (such as the public OS symbols) do not      ***
+***    contain the required information.  Contact the group that      ***
+***    provided you with these symbols if you need this command to    ***
+***    work.                                                          ***
+***                                                                   ***
+***    Type referenced: g_initialized                                 ***
+***                                                                   ***
+*************************************************************************
+Couldn't resolve error at 'g_initialized;?? g_initInProgress;qd'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\stl.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\windows.natvis'
+NatVis script unloaded from 'c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609\Visualizers\winrt.natvis'

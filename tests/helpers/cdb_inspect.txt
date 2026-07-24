@@ -1,0 +1,9 @@
+.echo === Threads ===
+~
+.echo === All thread stacks ===
+~*kp
+.echo === Loaded modules (injected) ===
+lm m injected*
+.echo === Analyze ===
+!analyze -v
+q
