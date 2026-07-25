@@ -130,10 +130,13 @@ void VtPassThrough::ForwardPipeToStdout(ITransport& transport,
             // 只在失败时取 GetLastError：成功时 GetLastError 返回的是
             // 上一次失败遗留的错误码（可能是 ERROR_INVALID_HANDLE=6），造成误导
             DWORD err = ok ? 0 : GetLastError();
-            // Phase 8：记录前 32 字节十六进制，便于测试验证 OSC/Alt Buffer 等序列
-            // 用固定缓冲区避免 std::string 分配（高频路径）
-            char hexBuf[33 * 3 + 8] = {0};
-            size_t hexLen = payload.size() < 32 ? payload.size() : 32;
+            // Phase 8：记录前 N 字节十六进制，便于测试验证 OSC/Alt Buffer 等序列
+            // Phase 10 任务5：BatchSender 合并后单包可能包含多个语义单元
+            // （回显 + OSC + prompt），32 字节不足以覆盖 OSC 序列位置，提到 256
+            // 256 字节覆盖绝大多数控制序列（OSC/CSI/SGR），日志开销可控（~768 字符）
+            constexpr size_t kHexDumpMax = 256;
+            char hexBuf[kHexDumpMax * 3 + 8] = {0};
+            size_t hexLen = payload.size() < kHexDumpMax ? payload.size() : kHexDumpMax;
             size_t pos = 0;
             for (size_t i = 0; i < hexLen; ++i) {
                 pos += std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos,
@@ -141,7 +144,7 @@ void VtPassThrough::ForwardPipeToStdout(ITransport& transport,
             }
             LOG_INFO("pipe→stdout: VtOutput len=%zu written=%lu ok=%d err=%lu hex[%zu]=%s%s",
                      payload.size(), written, ok, err, hexLen, hexBuf,
-                     payload.size() > 32 ? "..." : "");
+                     payload.size() > kHexDumpMax ? "..." : "");
         } else {
             // 非 VtOutput 消息：交给 handler 处理（如 ChildProcessNotify）
             if (handler) {

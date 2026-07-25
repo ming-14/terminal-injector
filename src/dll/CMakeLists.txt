@@ -5,12 +5,14 @@
 # Phase 6：增加 VtToInputRecord（VT→INPUT_RECORD 翻译）+ InputHooks（输入 API Hook）
 # Phase 8：增加 FontHooks（字体缓存）+ WaitHooks（Wait 句柄假映射）
 # Phase 9：增加 ProtectionHooks（防越狱）+ HandleRegistry（假句柄管理）
-# Phase 10：增加 StatePoller（后台状态轮询线程）
+# Phase 10：增加 StatePoller（后台状态轮询线程）+ BatchSender（VtOutput 小包合并）
+# Phase 11：增加 Unloader（管道断开/Shutdown 触发主动卸载）
 add_library(injected_dll SHARED
     dllmain.cpp
     HookManager.cpp
     LazyInit.cpp
     DllRecvLoop.cpp
+    Unloader.cpp
     state/StateSnapshot.cpp
     state/ConsoleState.cpp
     state/HandleRegistry.cpp
@@ -30,6 +32,7 @@ add_library(injected_dll SHARED
     hooks/FontHooks.cpp
     hooks/WaitHooks.cpp
     hooks/ProtectionHooks.cpp
+    BatchSender.cpp
     lineedit/LineEditor.cpp
     lineedit/TabCompleter.cpp
     ${CMAKE_SOURCE_DIR}/third_party/wcwidth/wcwidth.c

@@ -215,11 +215,16 @@ bool Mediator::Handshake() {
                  payload.size(), sizeof(hello));
     }
     LOG_INFO("Handshake: Hello received, pid=%u bitness=%u cols=%u rows=%u "
-             "winRows=%u mode=0x%04x cp=%u/%u cursor=(%u,%u)",
+             "winRows=%u mode=0x%04x cp=%u/%u cursor=(%u,%u) dllBase=0x%llx",
              hello.targetPid, hello.targetBitness,
              hello.bufferCols, hello.bufferRows, hello.windowRows,
              hello.consoleMode, hello.consoleCp, hello.consoleOutputCp,
-             hello.cursorX, hello.cursorY);
+             hello.cursorX, hello.cursorY,
+             static_cast<unsigned long long>(hello.dllBase));
+
+    // Phase 11：保存 injected.dll 基址
+    // 收到 UnloadComplete 时据此远程调 FreeLibrary(dllBase) 触发 DETACH
+    m_dllBase = hello.dllBase;
 
     // 把目标快照状态应用到 WT（窗口尺寸）
     ApplySnapshotToWt(hello);
@@ -280,14 +285,26 @@ void Mediator::BridgeLoop() {
     // stdin→pipe 独立线程（ReadFile 阻塞，pipe 断开时主线程退出，
     // 进程结束会强制终止此线程；Phase 10 用 CancelIoEx 优雅唤醒）
     // Phase 12+：通过 RouteInput 路由回调，把输入分发到活跃子进程或父进程
+    // Phase 11：stdin EOF（WT tab 关闭）时主动发 Shutdown 给 DLL，触发 DLL 自卸载
+    //           否则 mediator 进程退出后管道断开，DLL 才被动感知（延迟且依赖进程退出）
     std::thread stdinThread([this]() {
         VtPassThrough::ForwardStdinToPipe(
             [this](const uint8_t* data, size_t len) { RouteInput(data, len); });
+        // stdin EOF：WT 已关闭，通知 DLL 主动卸载
+        // DLL 收到 Shutdown → Unloader::RequestUnload → FreeLibraryAndExitThread
+        // → DLL 卸载 → pipe 断开 → 主线程 ForwardPipeToStdout 退出
+        if (m_transport && m_transport->IsConnected()) {
+            auto pkt = protocol::Serialize(protocol::MessageType::Shutdown, nullptr, 0);
+            const int sent = m_transport->Send(pkt.data(), pkt.size());
+            LOG_INFO("Shutdown sent to DLL on stdin EOF, sent=%d/%zu",
+                     sent, pkt.size());
+        }
     });
 
     // 主线程：pipe→stdout（阻塞循环，pipe 断开时返回）
     // Phase 12：非 VtOutput 消息交给 handler 处理（如 ChildProcessNotify）
     // Phase 6+：处理 ModeChange，发 VT 鼠标报告请求给 WT
+    // Phase 11：处理 UnloadComplete，远程调 FreeLibrary 触发 DLL DETACH
     VtPassThrough::ForwardPipeToStdout(*m_transport,
         [this](protocol::MessageType type, const std::vector<uint8_t>& payload) {
             if (type == protocol::MessageType::ChildProcessNotify) {
@@ -305,6 +322,10 @@ void Mediator::BridgeLoop() {
                     std::memcpy(&mc, payload.data(), sizeof(mc));
                     OnModeChange(mc.inputMode, mc.outputMode);
                 }
+            } else if (type == protocol::MessageType::UnloadComplete) {
+                // Phase 11：DLL 已完成 DoUnload，请求远程 FreeLibrary 触发 DETACH
+                // 无 payload，直接调 OnUnloadComplete（用 m_dllBase 远程调 FreeLibrary）
+                OnUnloadComplete();
             } else {
                 LOG_INFO("BridgeLoop: unhandled msg type=0x%08X len=%zu",
                          static_cast<uint32_t>(type), payload.size());
@@ -396,11 +417,13 @@ void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid) {
     // VtOutput 回调：子进程输出写到 WT stdout（与父进程输出合并）
     // ChildNotify 回调：子进程创建孙进程时递归创建 ChildSession
     // Exit 回调：子进程退出时同步 ConPTY 光标给父进程 DLL（OnChildExit）
+    // ModeChange 回调：子进程 SetConsoleMode 时发 VT 鼠标报告启用/禁用序列给 WT
     auto session = std::make_shared<ChildSession>(
         childPid,
         [this](const uint8_t* data, size_t len) { WriteChildVtOutput(data, len); },
         [this](uint32_t cp, uint32_t pp) { OnChildProcessNotify(cp, pp); },
-        [this](uint32_t cp) { OnChildExit(cp); });
+        [this](uint32_t cp) { OnChildExit(cp); },
+        [this](uint32_t in, uint32_t out) { OnModeChange(in, out); });
     session->Start();
 
     // 加入会话列表（线程安全）
@@ -494,6 +517,100 @@ void Mediator::RouteInput(const uint8_t* data, size_t len) {
     const int sent = m_transport->Send(pkt.data(), pkt.size());
     LOG_INFO("RouteInput: routed to parent, len=%zu sent=%d/%zu",
              len, sent, pkt.size());
+}
+
+// ============================================================
+// Phase 11：DLL 远程卸载
+// ============================================================
+
+// 收到 DLL 的 UnloadComplete 后，在目标进程中创建远程线程调用
+// FreeLibrary(dllBase)，把 LoadCount 从 1 减到 0 触发 DLL_PROCESS_DETACH。
+//
+// 为什么需要远程线程（不能让 DLL 自己 FreeLibrary）：
+//   DLL 的 DoUnload 线程曾在 injected.dll 代码中执行，LDR 为其持有
+//   LdrpThreadBlob 引用，即使线程退出 LoadCount 也不会归零（实测减到 1）。
+//   远程线程由 LDR 全新创建，从未进入 injected.dll 代码，不持有 ThreadBlob，
+//   其调用 FreeLibrary 会让 LoadCount 真正归零，触发 DETACH。
+//
+// FreeLibrary 地址解析：
+//   kernel32.dll 是系统 DLL，Windows 在所有 64 位进程中共享同一基址
+//   （ASLR 仅在启动时随机一次，系统 DLL 在所有进程中相同）。
+//   因此 mediator 进程的 kernel32!FreeLibrary 地址等于目标进程中的地址。
+void Mediator::OnUnloadComplete() {
+    LOG_INFO("OnUnloadComplete: received, targetPid=%u dllBase=0x%llx",
+             m_targetPid, static_cast<unsigned long long>(m_dllBase));
+
+    if (m_dllBase == 0) {
+        LOG_ERROR("OnUnloadComplete: dllBase is 0 (Hello 未上报?), skip remote FreeLibrary");
+        return;
+    }
+
+    // 1. 打开目标进程（需 VM_OPERATION 才能创建远程线程）
+    //    权限：
+    //      PROCESS_CREATE_THREAD  - 创建远程线程
+    //      PROCESS_QUERY_INFORMATION - 后续 GetExitCodeThread 等
+    //      PROCESS_VM_OPERATION  - WriteProcessMemory（CreateRemoteThread 隐式需要）
+    //      PROCESS_VM_WRITE      - 写入远程线程参数（HMODULE）
+    //      PROCESS_VM_READ       - 读取远程内存（备用）
+    DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                   PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+    HANDLE hProc = OpenProcess(access, FALSE, m_targetPid);
+    if (!hProc) {
+        LOG_ERROR("OnUnloadComplete: OpenProcess failed pid=%u err=%lu",
+                  m_targetPid, GetLastError());
+        return;
+    }
+
+    // 2. 取 kernel32!FreeLibrary 地址
+    //    系统共享基址保证此地址在目标进程中也是 FreeLibrary
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hKernel32) {
+        LOG_ERROR("OnUnloadComplete: GetModuleHandleW(kernel32) failed err=%lu",
+                  GetLastError());
+        CloseHandle(hProc);
+        return;
+    }
+    auto pFreeLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(hKernel32, "FreeLibrary"));
+    if (!pFreeLibrary) {
+        LOG_ERROR("OnUnloadComplete: GetProcAddress(FreeLibrary) failed err=%lu",
+                  GetLastError());
+        CloseHandle(hProc);
+        return;
+    }
+
+    // 3. 创建远程线程调 FreeLibrary(dllBase)
+    //    FreeLibrary 签名：BOOL WINAPI FreeLibrary(HMODULE hLibModule)
+    //    与 LPTHREAD_START_ROUTINE 的单参数 stdcall 签名兼容
+    //    HMODULE 在 64 位是 8 字节，与 LPVOID 等宽，可直接传
+    HANDLE hThread = CreateRemoteThread(
+        hProc, nullptr, 0,
+        pFreeLibrary,
+        reinterpret_cast<LPVOID>(static_cast<uintptr_t>(m_dllBase)),
+        0, nullptr);
+    if (!hThread) {
+        LOG_ERROR("OnUnloadComplete: CreateRemoteThread failed pid=%u dllBase=0x%llx err=%lu",
+                  m_targetPid,
+                  static_cast<unsigned long long>(m_dllBase),
+                  GetLastError());
+        CloseHandle(hProc);
+        return;
+    }
+
+    // 4. 等待远程 FreeLibrary 返回（最多 5 秒）
+    //    FreeLibrary 会触发 DLL_PROCESS_DETACH（DllMain 中 MH_Uninitialize 等）
+    //    正常应在毫秒级完成；超时视为异常（DETACH 卡死或 Loader Lock）
+    DWORD waitRet = WaitForSingleObject(hThread, 5000);
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+    // FreeLibrary 返回非零表示成功（BOOL TRUE）
+    LOG_INFO("OnUnloadComplete: remote FreeLibrary returned, wait=%lu exitCode=%lu "
+             "(nonzero=success) dllBase=0x%llx",
+             waitRet, exitCode,
+             static_cast<unsigned long long>(m_dllBase));
+
+    CloseHandle(hThread);
+    CloseHandle(hProc);
 }
 
 } // namespace terminjector

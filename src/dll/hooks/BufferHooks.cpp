@@ -12,6 +12,7 @@
 // 通过 ResizeNotify 通知 DLL（反向同步），此处仅维护缓存一致性
 #include "BufferHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../state/HandleRegistry.h"
@@ -42,6 +43,7 @@ DEFINE_ORIG_PTR(CreateConsoleScreenBuffer, HANDLE WINAPI(
 // WT 侧的真实尺寸由 mediator WtSizeWatcher 监听并反向同步
 BOOL WINAPI SetConsoleScreenBufferSize_Detour(HANDLE hConsoleOutput, COORD dwSize) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return SetConsoleScreenBufferSize_orig(hConsoleOutput, dwSize);
@@ -65,6 +67,7 @@ BOOL WINAPI SetConsoleScreenBufferSize_Detour(HANDLE hConsoleOutput, COORD dwSiz
 BOOL WINAPI SetConsoleWindowInfo_Detour(HANDLE hConsoleOutput, BOOL bAbsolute,
                                         const SMALL_RECT* lpConsoleWindow) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || lpConsoleWindow == nullptr) {
         return SetConsoleWindowInfo_orig(hConsoleOutput, bAbsolute, lpConsoleWindow);
@@ -93,6 +96,7 @@ BOOL WINAPI SetConsoleWindowInfo_Detour(HANDLE hConsoleOutput, BOOL bAbsolute,
 // 返回缓存值（与 FillScreenBufferInfo 中 dwMaximumWindowSize 一致）
 COORD WINAPI GetLargestConsoleWindowSize_Detour(HANDLE hConsoleOutput) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return GetLargestConsoleWindowSize_orig(hConsoleOutput);
@@ -123,6 +127,7 @@ COORD WINAPI GetLargestConsoleWindowSize_Detour(HANDLE hConsoleOutput) {
 //   （DLL 已用 VT 序列让 WT 切，ConHost 切不切无关紧要）
 BOOL WINAPI SetConsoleActiveScreenBuffer_Detour(HANDLE h) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleActiveScreenBuffer_orig(h);
@@ -155,6 +160,7 @@ HANDLE WINAPI CreateConsoleScreenBuffer_Detour(
     DWORD access, DWORD share, const SECURITY_ATTRIBUTES* sa,
     DWORD flags, LPVOID data) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return CreateConsoleScreenBuffer_orig(access, share, sa, flags, data);

@@ -52,11 +52,13 @@ bool GetWtCursorPos(uint16_t& cursorX, uint16_t& cursorY) {
 ChildSession::ChildSession(uint32_t childPid,
                            VtOutputCallback    onVtOutput,
                            ChildNotifyCallback onChildNotify,
-                           ExitCallback        onExit)
+                           ExitCallback        onExit,
+                           ModeChangeCallback  onModeChange)
     : m_childPid(childPid)
     , m_onVtOutput(std::move(onVtOutput))
     , m_onChildNotify(std::move(onChildNotify))
-    , m_onExit(std::move(onExit)) {
+    , m_onExit(std::move(onExit))
+    , m_onModeChange(std::move(onModeChange)) {
 }
 
 ChildSession::~ChildSession() {
@@ -237,8 +239,23 @@ void ChildSession::RecvLoop() {
                 m_running = false;
                 break;
 
+            case MessageType::ModeChange: {
+                // 子进程 SetConsoleMode → DLL 发 ModeChange
+                // 转发 mediator 的 OnModeChange：发 VT 鼠标报告启用/禁用序列给 WT
+                // 不转发的后果：子进程启用 ENABLE_MOUSE_INPUT 时 WT 不开鼠标报告，
+                // 鼠标事件不发 SGR 1006 序列，子进程 ReadConsoleInputW 永远阻塞
+                if (m_onModeChange && payload.size() >= sizeof(ModeChangePayload)) {
+                    ModeChangePayload mc{};
+                    std::memcpy(&mc, payload.data(), sizeof(mc));
+                    LOG_INFO("ChildSession RecvLoop: ModeChange inputMode=0x%lx outputMode=0x%lx, pid=%u",
+                             mc.inputMode, mc.outputMode, m_childPid);
+                    m_onModeChange(mc.inputMode, mc.outputMode);
+                }
+                break;
+            }
+
             default:
-                // 其他消息（ModeChange/CpChange/Ping/Pong 等）暂不处理
+                // 其他消息（CpChange/Ping/Pong 等）暂不处理
                 LOG_INFO("ChildSession RecvLoop: unhandled msg type=0x%08X len=%zu, pid=%u",
                          static_cast<uint32_t>(type), payload.size(), m_childPid);
                 break;

@@ -15,6 +15,7 @@
 // 部分 Windows 版本可能不导出此函数，GetProcAddress 返回 nullptr 时跳过 Hook。
 #include "WaitHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/InputQueue.h"
 #include "../state/HandleRegistry.h"
@@ -50,6 +51,7 @@ DEFINE_ORIG_PTR(GetConsoleInputWaitHandle, HANDLE WINAPI());
 // 不调原 API：原 API 返回 ConHost 内核事件，永远不会被置位（输入走管道）
 HANDLE WINAPI GetConsoleInputWaitHandle_Detour() {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleInputWaitHandle_orig();

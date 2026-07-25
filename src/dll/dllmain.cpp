@@ -30,6 +30,7 @@
 #include "hooks/WaitHooks.h"     // Phase 8：Wait 句柄假映射
 #include "hooks/ProtectionHooks.h"  // Phase 9：防越狱 + CloseHandle 静默
 #include "state/StatePoller.h"     // Phase 10：后台状态轮询
+#include "BatchSender.h"           // Phase 10 任务5：VtOutput 小包合并
 #include "exports.h"
 
 namespace {
@@ -132,6 +133,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             // Phase 10：先停止 StatePoller 轮询线程，避免线程在 transport/Hook
             // 释放后仍调 SendToMediator / CallRealGetConsoleScreenBufferInfo
             terminjector::StatePoller::Instance().Stop();
+
+            // Phase 10 任务5：停止 BatchSender flush 线程
+            // 必须在 ReleaseMediatorTransport 之前调用：Shutdown 会做最终 flush，
+            // flush 需要 transport 仍可用，否则缓冲区数据丢失
+            // join 线程后还有一次 FlushLocked 兜底（防 join 期间新数据入队）
+            terminjector::BatchSender::Instance().Shutdown();
 
             // Phase 5：先停止接收线程，再卸载 Hook 与 transport
             terminjector::StopDllRecvLoop();

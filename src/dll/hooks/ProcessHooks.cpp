@@ -15,6 +15,7 @@
 //   - 注入失败降级：子进程不被注入，输出走 ConHost（与无注入时一致）
 #include "ProcessHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "protocol/Message.h"
 #include "logging/Logger.h"
@@ -182,6 +183,8 @@ BOOL WINAPI CreateProcessW_Detour(LPCWSTR lpApplicationName, LPWSTR lpCommandLin
     LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInfo) {
 
     ENSURE_INITIALIZED();
+    ASSERT_IN_HOOK();          // 关键 Detour：子进程注入复杂路径，重入风险
+    HookReentryGuard guard;
 
     // 重入保护：防止 Detour 内部间接递归
     if (t_inCreateProcess) {
@@ -223,6 +226,7 @@ BOOL WINAPI CreateProcessA_Detour(LPCSTR lpApplicationName, LPSTR lpCommandLine,
     LPSTARTUPINFOA lpStartupInfo, LPPROCESS_INFORMATION lpProcessInfo) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     // 重入保护
     if (t_inCreateProcess) {

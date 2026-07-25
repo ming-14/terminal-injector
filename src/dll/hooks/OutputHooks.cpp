@@ -20,6 +20,7 @@
 //       故必须 Hook WriteFile 才能拦截 cmd 输出
 #include "OutputHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../translator/ConsoleToVt.h"
@@ -96,6 +97,8 @@ BOOL WINAPI WriteConsoleW_Detour(
 
     // 懒加载触发（首个 Hook 调用初始化 Logger/Connect/State）
     ENSURE_INITIALIZED();
+    ASSERT_IN_HOOK();          // 关键 Detour：输出主路径，A→W 复用终点，Logger 重入风险
+    HookReentryGuard guard;
 
     // 非真实 Console 句柄（如日志文件句柄）直接 pass-through
     if (!IsConsoleHandle(hConsoleOutput)) {
@@ -166,6 +169,7 @@ BOOL WINAPI WriteConsoleA_Detour(
     DWORD nNumberOfCharsToWrite, LPDWORD lpNumberOfCharsWritten, LPVOID lpReserved) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return WriteConsoleA_orig(hConsoleOutput, lpBuffer,
@@ -213,6 +217,7 @@ BOOL WINAPI WriteFile_Detour(
     }
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     // === 诊断：ENSURE_INITIALIZED 后，记录文件句柄类型 ===
     {
@@ -268,6 +273,7 @@ BOOL WINAPI WriteFile_Detour(
 // Phase 9：不调原 API，避免 ConHost 真改属性导致闪烁
 BOOL WINAPI SetConsoleTextAttribute_Detour(HANDLE hConsoleOutput, WORD attr) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return SetConsoleTextAttribute_orig(hConsoleOutput, attr);
@@ -296,6 +302,7 @@ BOOL WINAPI FillConsoleOutputCharacterW_Detour(
     COORD writeCoord, LPDWORD lpNumberOfCharsWritten) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return FillConsoleOutputCharacterW_orig(hConsoleOutput, character, count,
@@ -305,6 +312,9 @@ BOOL WINAPI FillConsoleOutputCharacterW_Detour(
     // 翻译为 VT：光标定位 + 字符 + 重复
     std::string vt = ConsoleToVt::FillConsoleOutputCharacter(character, count, writeCoord);
     SendToMediator(vt.data(), vt.size());
+
+    // Phase 10 任务6：cls/填充改变了屏幕内容，失效 WriteConsoleOutput diff 缓存
+    ConsoleToVt::InvalidateOutputCache();
 
     // 注意：FillConsoleOutputCharacter 不改变光标位置（Windows API 语义）
     // 故此处不更新 ConsoleState 的光标缓存
@@ -322,6 +332,7 @@ BOOL WINAPI FillConsoleOutputCharacterA_Detour(
     COORD writeCoord, LPDWORD lpNumberOfCharsWritten) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return FillConsoleOutputCharacterA_orig(hConsoleOutput, character, count,
@@ -344,6 +355,7 @@ BOOL WINAPI FillConsoleOutputAttribute_Detour(
     COORD writeCoord, LPDWORD lpNumberOfCharsWritten) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return FillConsoleOutputAttribute_orig(hConsoleOutput, attribute, count,
@@ -353,6 +365,9 @@ BOOL WINAPI FillConsoleOutputAttribute_Detour(
     // 翻译为 VT：光标定位 + SGR
     std::string vt = ConsoleToVt::FillConsoleOutputAttribute(attribute, count, writeCoord);
     SendToMediator(vt.data(), vt.size());
+
+    // Phase 10 任务6：颜色填充改变了屏幕属性，失效 WriteConsoleOutput diff 缓存
+    ConsoleToVt::InvalidateOutputCache();
 
     if (lpNumberOfCharsWritten != nullptr) {
         *lpNumberOfCharsWritten = count;
@@ -371,6 +386,7 @@ BOOL WINAPI WriteConsoleOutputW_Detour(
     COORD bufferSize, COORD bufferCoord, PSMALL_RECT writeRegion) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || buffer == nullptr || writeRegion == nullptr) {
         return WriteConsoleOutputW_orig(hConsoleOutput, buffer, bufferSize,
@@ -395,6 +411,7 @@ BOOL WINAPI WriteConsoleOutputA_Detour(
     COORD bufferSize, COORD bufferCoord, PSMALL_RECT writeRegion) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || buffer == nullptr || writeRegion == nullptr) {
         return WriteConsoleOutputA_orig(hConsoleOutput, buffer, bufferSize,
@@ -438,6 +455,7 @@ BOOL WINAPI WriteConsoleOutputCharacterW_Detour(
     COORD writeCoord, LPDWORD lpNumberOfCharsWritten) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return WriteConsoleOutputCharacterW_orig(hConsoleOutput, buffer, length,
@@ -447,6 +465,9 @@ BOOL WINAPI WriteConsoleOutputCharacterW_Detour(
     // 翻译为 VT：光标定位 + UTF-8 字符串
     std::string vt = ConsoleToVt::WriteConsoleOutputCharacter(buffer, length, writeCoord);
     SendToMediator(vt.data(), vt.size());
+
+    // Phase 10 任务6：局部文本覆盖改变了屏幕内容，失效 WriteConsoleOutput diff 缓存
+    ConsoleToVt::InvalidateOutputCache();
 
     // 注意：WriteConsoleOutputCharacter 不改变光标位置（Windows API 语义）
     // 故此处不更新 ConsoleState 的光标缓存
@@ -464,6 +485,7 @@ BOOL WINAPI WriteConsoleOutputCharacterA_Detour(
     COORD writeCoord, LPDWORD lpNumberOfCharsWritten) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return WriteConsoleOutputCharacterA_orig(hConsoleOutput, buffer, length,
@@ -496,6 +518,7 @@ BOOL WINAPI ScrollConsoleScreenBufferW_Detour(
     const CHAR_INFO* lpFill) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || lpScrollRect == nullptr || lpFill == nullptr) {
         return ScrollConsoleScreenBufferW_orig(hConsoleOutput, lpScrollRect, lpClipRect,
@@ -507,6 +530,9 @@ BOOL WINAPI ScrollConsoleScreenBufferW_Detour(
         *lpScrollRect, lpClipRect, dwDestinationOrigin,
         lpFill->Char.UnicodeChar, lpFill->Attributes);
     SendToMediator(vt.data(), vt.size());
+
+    // Phase 10 任务6：滚屏使屏幕 cell 偏移，失效 WriteConsoleOutput diff 缓存
+    ConsoleToVt::InvalidateOutputCache();
 
     // 不调原 API：ConHost 不再收到滚屏
     return TRUE;
@@ -520,6 +546,7 @@ BOOL WINAPI ScrollConsoleScreenBufferA_Detour(
     const CHAR_INFO* lpFill) {
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || lpScrollRect == nullptr || lpFill == nullptr) {
         return ScrollConsoleScreenBufferA_orig(hConsoleOutput, lpScrollRect, lpClipRect,
@@ -540,6 +567,9 @@ BOOL WINAPI ScrollConsoleScreenBufferA_Detour(
         *lpScrollRect, lpClipRect, dwDestinationOrigin,
         wFill.Char.UnicodeChar, wFill.Attributes);
     SendToMediator(vt.data(), vt.size());
+
+    // Phase 10 任务6：滚屏使屏幕 cell 偏移，失效 WriteConsoleOutput diff 缓存
+    ConsoleToVt::InvalidateOutputCache();
 
     // 不调原 API：ConHost 不再收到滚屏
     return TRUE;

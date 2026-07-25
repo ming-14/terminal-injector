@@ -96,8 +96,22 @@ private:
     // 向 WT stdout 写 VT 序列（发鼠标报告请求用）
     void WriteStdoutVt(const char* data, size_t len);
 
+    // === Phase 11：DLL 远程卸载 ===
+
+    // 收到 DLL 的 UnloadComplete 时调用
+    // DLL 已完成 DoUnload（Hook 卸载、Logger 关闭、卸载线程 ExitThread），
+    // 但 LoadCount 仍为 1（cmd 主线程 LdrpThreadBlob 持引用，DLL 内部无法释放）。
+    // 本方法在目标进程中创建远程线程调用 FreeLibrary(dllBase)，把 LoadCount
+    // 从 1 减到 0，触发 DLL_PROCESS_DETACH 完成真正卸载。
+    // 远程线程从未进入过 injected.dll 代码，LDR 不会为其持有 ThreadBlob。
+    void OnUnloadComplete();
+
     std::unique_ptr<ITransport> m_transport;
     uint32_t m_targetPid = 0;
+
+    // Phase 11：injected.dll 在目标进程中的基址（Hello 上报）
+    // OnUnloadComplete 据此远程调 FreeLibrary(m_dllBase)
+    uint64_t m_dllBase = 0;
 
     // Phase 5：WT 尺寸监听器（监听 WT resize 通知 DLL）
     WtSizeWatcher m_sizeWatcher;

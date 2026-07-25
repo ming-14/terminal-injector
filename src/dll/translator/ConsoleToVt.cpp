@@ -13,8 +13,55 @@
 #include "ConsoleToVt.h"
 #include "VtEscape.h"
 #include "../state/ConsoleState.h"
+#include "logging/Logger.h"
+
+#include <vector>
+#include <cstring>
 
 namespace terminjector {
+
+// ===== Phase 10 任务6：WriteConsoleOutput diff 缓存 =====
+// 缓存上次 WriteConsoleOutput 写入的 cell 矩阵，下次同 region 调用时
+// 仅输出变化的 cell，大幅减少满屏重绘场景的 VT 字节量
+//
+// 线程安全：
+//   - s_cacheLock 保护 s_lastBuffer/s_lastRegion/s_cacheValid
+//   - WriteConsoleOutput 可能被多个 Hook 线程并发调用（罕见，但理论上可能）
+//   - InvalidateOutputCache 在其他 Hook 路径调用，需与 WriteConsoleOutput 互斥
+//
+// 缓存失效时机：
+//   - FillConsoleOutputCharacter/Attribute：cls/改颜色改变屏幕内容
+//   - WriteConsoleOutputCharacter：局部文本覆盖
+//   - ScrollConsoleScreenBuffer：滚屏使 cell 偏移
+//   - region 变化：WriteConsoleOutput 内部检测到 region 不同时自动全量输出
+namespace {
+SRWLOCK s_cacheLock = SRWLOCK_INIT;
+std::vector<CHAR_INFO> s_lastBuffer;  // 按 region 尺寸存储（regionRows × regionCols）
+SMALL_RECT s_lastRegion{0, 0, 0, 0};  // 上次写入的区域
+bool s_cacheValid = false;
+
+// 比较 two CHAR_INFO 是否"渲染等价"（字符 + 可见属性相同）
+// COMMON_LVB_TRAILING_BYTE 等 LVB 标志不影响渲染输出，但参与缓存比较
+// 以确保 trailing cell 的缓存与首次输出一致
+inline bool CellEqual(const CHAR_INFO& a, const CHAR_INFO& b) {
+    return a.Char.UnicodeChar == b.Char.UnicodeChar
+        && a.Attributes == b.Attributes;
+}
+
+// 判断 cell 是否为"默认空格"（WT 初始状态）
+// 全量输出时跳过这种 cell，减少 VT 字节量
+inline bool IsDefaultBlank(const CHAR_INFO& ci) {
+    return ci.Char.UnicodeChar == L' ' && ci.Attributes == 0x07;
+}
+} // namespace
+
+// 失效 diff 缓存：屏幕内容被非 WriteConsoleOutput 路径改变时调用
+void ConsoleToVt::InvalidateOutputCache() {
+    AcquireSRWLockExclusive(&s_cacheLock);
+    s_lastBuffer.clear();
+    s_cacheValid = false;
+    ReleaseSRWLockExclusive(&s_cacheLock);
+}
 
 // ===== Phase 3：WriteConsoleW 翻译 =====
 // wchar_t 文本 → UTF-8 + SGR 颜色
@@ -104,8 +151,9 @@ std::string ConsoleToVt::FillConsoleOutputAttribute(
 // 每个 cell 带字符+属性，需逐 cell 翻译为 光标定位 + SGR + 字符
 //
 // 优化策略：
-//   1. 跳过空格 + 默认属性（0x07）的 cell（避免满屏空格）
+//   1. 跳过空格 + 默认属性（0x07）的 cell（避免满屏空格）—— 仅全量路径
 //   2. 同行连续相同属性的 cell 合并为一次光标定位 + 多字符
+//   3. Phase 10 任务6：diff 路径。若本次 region 与缓存相同，仅输出变化 cell
 //
 // bufferCoord: 源缓冲区读取起始坐标（通常 {0,0}）
 // writeRegion: 目标屏幕区域
@@ -115,35 +163,90 @@ std::string ConsoleToVt::WriteConsoleOutput(
 
     if (buffer == nullptr || bufferSize.X <= 0 || bufferSize.Y <= 0) return {};
 
+    // 目标区域尺寸
+    const int regionRows = writeRegion.Bottom - writeRegion.Top + 1;
+    const int regionCols = writeRegion.Right - writeRegion.Left + 1;
+    if (regionRows <= 0 || regionCols <= 0) return {};
+
+    // 保存原始光标位置：Windows 真实的 WriteConsoleOutput 不改变光标位置
+    // （它直接写屏幕缓冲区，光标保持原位）。
+    // 但 VT 翻译过程中输出的 CursorPosition 会移动 ConPTY 光标，
+    // 故翻译完成后需发 CursorPosition 把 ConPTY 光标恢复到原位。
+    // 同时不更新 ConsoleState 光标缓存（保持原值）。
+    COORD savedCursor = ConsoleState::Instance().GetCursorPosition();
+
+    // 提取本次 region 内的 cell 数组（按 regionRows × regionCols 存储）
+    // 与 buffer 解耦，便于后续 diff 比较与缓存更新
+    std::vector<CHAR_INFO> currentCells(
+        static_cast<size_t>(regionRows) * regionCols);
+    for (int r = 0; r < regionRows; ++r) {
+        int srcRow = bufferCoord.Y + r;
+        for (int c = 0; c < regionCols; ++c) {
+            int srcCol = bufferCoord.X + c;
+            if (srcRow < bufferSize.Y && srcCol < bufferSize.X) {
+                currentCells[static_cast<size_t>(r) * regionCols + c] =
+                    buffer[srcRow * bufferSize.X + srcCol];
+            } else {
+                // 源缓冲区越界：用默认空格填充
+                CHAR_INFO blank{};
+                blank.Char.UnicodeChar = L' ';
+                blank.Attributes = 0x07;
+                currentCells[static_cast<size_t>(r) * regionCols + c] = blank;
+            }
+        }
+    }
+
+    // 加缓存锁：diff 判断 + 输出 + 缓存更新必须原子
+    AcquireSRWLockExclusive(&s_cacheLock);
+
+    const bool canDiff = s_cacheValid
+        && s_lastRegion.Left == writeRegion.Left
+        && s_lastRegion.Top == writeRegion.Top
+        && s_lastRegion.Right == writeRegion.Right
+        && s_lastRegion.Bottom == writeRegion.Bottom
+        && s_lastBuffer.size() == currentCells.size();
+
     std::string out;
     // 预估容量：每个 cell 最多 ~20 字节（CSI 8 + SGR 8 + UTF-8 4）
-    out.reserve(static_cast<size_t>(bufferSize.X) * bufferSize.Y * 20);
+    // diff 路径实际输出远小于此，预留足够容量避免 realloc
+    out.reserve(static_cast<size_t>(regionRows) * regionCols * 20);
 
     WORD lastAttr = 0xFFFF;  // 初始无效值，首次必输出 SGR
 
-    // 目标区域尺寸
-    int regionRows = writeRegion.Bottom - writeRegion.Top + 1;
-    int regionCols = writeRegion.Right - writeRegion.Left + 1;
-
     // 遍历目标区域：r/c 是区域内的相对坐标
-    // 源缓冲区读取坐标 = bufferCoord + (r, c)
     // 目标屏幕坐标 = writeRegion.TopLeft + (r, c)
     for (int r = 0; r < regionRows; ++r) {
-        int srcRow = bufferCoord.Y + r;
-        if (srcRow >= bufferSize.Y) break;
-
-        // 当前行是否有输出（用于判断是否需要光标定位）
-        bool rowStarted = false;
+        bool rowStarted = false;  // 当前行是否已输出光标定位
         WORD rowAttr = lastAttr;
 
         for (int c = 0; c < regionCols; ++c) {
-            int srcCol = bufferCoord.X + c;
-            if (srcCol >= bufferSize.X) break;
+            const CHAR_INFO& ci = currentCells[static_cast<size_t>(r) * regionCols + c];
 
-            const CHAR_INFO& ci = buffer[srcRow * bufferSize.X + srcCol];
+            // 优化：跳过双宽字符的 trailing cell（全量与 diff 路径都跳过）
+            // Windows Console 中双宽字符（中文/emoji）占 2 个 cell：
+            //   leading cell（COMMON_LVB_LEADING_BYTE=0x0100）存字符
+            //   trailing cell（COMMON_LVB_TRAILING_BYTE=0x0200）也存同一字符
+            // 若 trailing cell 也输出字符，会导致 "版本" 渲染成 "版版本本"
+            // 跳过 trailing cell，ConPTY 会自动把 leading 字符渲染为 2 列宽
+            if (ci.Attributes & COMMON_LVB_TRAILING_BYTE) {
+                continue;
+            }
 
-            // 优化1：跳过空格 + 默认属性（0x07 灰底黑字）
-            if (ci.Char.UnicodeChar == L' ' && ci.Attributes == 0x07) {
+            // 跳过条件：
+            //   - 全量路径：跳过默认空格（WT 初始状态，无需输出）
+            //   - diff 路径：跳过与缓存相同的 cell（无变化）
+            bool skip = false;
+            if (canDiff) {
+                const CHAR_INFO& last = s_lastBuffer[static_cast<size_t>(r) * regionCols + c];
+                if (CellEqual(ci, last)) {
+                    skip = true;
+                }
+            } else {
+                if (IsDefaultBlank(ci)) {
+                    skip = true;
+                }
+            }
+            if (skip) {
                 rowStarted = false;  // 中断连续输出
                 continue;
             }
@@ -160,7 +263,7 @@ std::string ConsoleToVt::WriteConsoleOutput(
             }
 
             // 同行连续输出：仅首次需要光标定位
-            // 中断后（如跳过空格）需重新定位
+            // 中断后（如跳过 cell）需重新定位
             if (!rowStarted) {
                 out += vt::CursorPosition(vtRow, vtCol);
                 rowStarted = true;
@@ -176,12 +279,30 @@ std::string ConsoleToVt::WriteConsoleOutput(
         }
     }
 
-    // 更新 ConsoleState：光标位置、当前属性
-    ConsoleState::Instance().SetCursorPosition(
-        COORD{writeRegion.Left, writeRegion.Top});
-    if (lastAttr != 0xFFFF) {
-        ConsoleState::Instance().SetTextAttribute(lastAttr);
-    }
+    // 更新缓存：本次 currentCells 成为下次的 lastBuffer
+    // diff 路径下 currentCells 已是最新屏幕状态
+    // 全量路径下 currentCells 包含默认空格（与 WT 实际状态一致）
+    s_lastBuffer = std::move(currentCells);
+    s_lastRegion = writeRegion;
+    s_cacheValid = true;
+
+    ReleaseSRWLockExclusive(&s_cacheLock);
+
+    // 翻译完成后恢复 ConPTY 光标到原始位置
+    // WriteConsoleOutput 不改变光标位置（Windows 真实行为），但 VT 翻译过程中
+    // 输出的 CursorPosition 命令会让 ConPTY 光标移动到最后的 cell 位置。
+    // 发 CursorPosition 把 ConPTY 光标拉回 savedCursor，与 ConsoleState 缓存保持一致。
+    // 不更新 ConsoleState 缓存（保持原值，符合 Windows 真实行为）。
+    // lastAttr 也不更新 ConsoleState（WriteConsoleOutput 不改变当前属性状态）。
+    out += vt::CursorPosition(savedCursor.Y + 1, savedCursor.X + 1);
+
+    // Phase 10 任务6：diff 决策日志，便于测试验证 diff 算法生效
+    // 格式：WriteConsoleOutput: canDiff=N region=(L,T,R,B) cells=N outBytes=N
+    LOG_INFO("WriteConsoleOutput: canDiff=%d region=(%d,%d,%d,%d) cells=%d outBytes=%zu",
+             canDiff ? 1 : 0,
+             writeRegion.Left, writeRegion.Top,
+             writeRegion.Right, writeRegion.Bottom,
+             regionRows * regionCols, out.size());
 
     return out;
 }

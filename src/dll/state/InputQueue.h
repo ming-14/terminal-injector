@@ -176,6 +176,13 @@ public:
         Clear();
     }
 
+    // Phase 11：唤醒阻塞在 GetWaitHandle() 上的读取线程
+    // Unloader 在 UninstallAll 之前调用，让 ReadConsoleInput Hook 返回（无数据），
+    // 之后 Hook 卸载，下次调用走原 API 不再依赖 InputQueue
+    void SignalDataReady() {
+        SetEvent(m_event);
+    }
+
     // 事件句柄（ReadConsoleInput Hook 用 WaitForSingleObject 等待）
     HANDLE GetWaitHandle() const { return m_event; }
 

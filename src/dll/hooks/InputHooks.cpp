@@ -16,10 +16,12 @@
 //   管道断开时返回 FALSE，避免永久阻塞
 #include "InputHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../state/InputQueue.h"
 #include "../LazyInit.h"
+#include "../Unloader.h"
 #include "../lineedit/LineEditor.h"
 #include "transport/ITransport.h"
 #include "logging/Logger.h"
@@ -44,6 +46,38 @@ static std::atomic<int> g_readConsoleW_calls{0};
 static std::atomic<int> g_readConsoleA_calls{0};
 static std::atomic<int> g_readFile_stdin_calls{0};
 static constexpr int kDiagLogLimit = 20;
+
+// ============================================================
+// ReadDetourGuard：RAII 跟踪 Read 类 Detour 线程数（Phase 11 防 AV 崩溃）
+// ============================================================
+// 背景：Unloader 在 UninstallAll 前需等待所有 Read 类 Detour 线程离开 DLL 代码，
+//       否则 MH_RemoveHook 释放 trampoline 时，线程调用 *_orig 会 AV 0xC0000005
+//
+// 使用方式：
+//   ENSURE_INITIALIZED() 后构造 guard（计数++）；
+//   pass-through 调 orig 前 release()（计数--，让 Unloader 可继续 UninstallAll）；
+//   正常返回路径由析构自动 --。
+//
+// 关键：return 语句的表达式执行时局部变量还未析构，
+//       若 orig 调用过程中 Uninstaller 执行 UninstallAll 会释放 trampoline → AV。
+//       release() 让计数先归零，Unloader 看到 count==0 才执行 UninstallAll，
+//       此时 orig（trampoline）仍有效（RemoveHook 还没执行）。
+class ReadDetourGuard {
+public:
+    ReadDetourGuard() { Unloader::EnterReadDetour(); }
+    ~ReadDetourGuard() {
+        if (m_active) Unloader::LeaveReadDetour();
+    }
+    // 手动释放计数（pass-through 调 orig 前调用）
+    void release() {
+        if (m_active) {
+            Unloader::LeaveReadDetour();
+            m_active = false;
+        }
+    }
+private:
+    bool m_active = true;
+};
 
 // ============================================================
 // 原函数指针定义
@@ -148,6 +182,7 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     // LazyInit 期间调原始 API（避免递归）
     if (IsInLazyInit()) {
@@ -155,8 +190,13 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
         return ReadConsoleInputW_orig(h, buf, count, read);
     }
 
+    // ReadDetourGuard：进入 Detour 计数++，pass-through 调 orig 前 release（--）
+    // 让 Unloader 在 UninstallAll 前等待所有 Read 类 Detour 线程离开 DLL 代码
+    ReadDetourGuard readGuard;
+
     if (!IsInputHandle(h)) {
         if (log) LOG_INFO("ReadConsoleInputW_Detour: #%d not input handle, pass-through orig", callId);
+        readGuard.release();
         return ReadConsoleInputW_orig(h, buf, count, read);
     }
 
@@ -176,11 +216,18 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
             }
             return TRUE;
         }
-        // 队列空：检查连接状态
-        if (!IsTransportConnected()) {
-            *read = 0;
-            if (log) LOG_INFO("ReadConsoleInputW_Detour: #%d transport disconnected, FALSE", callId);
-            return FALSE;  // 管道断开，返回失败让调用方退出
+        // 队列空：检查连接状态 / 卸载标志
+        // transport 断开 或 Unloader 启动：pass-through 到 orig，让调用方走 ConHost 输入路径
+        // 不返回 FALSE 的原因：
+        //   1. cmd 收到 ReadConsoleW 失败会退出（Phase 11 验收 2 要求 cmd 仍可交互）
+        //   2. 调用栈停留在 DLL 代码内会阻塞 LDR 卸载（LoadCount 无法归零）
+        //   pass-through 后线程阻塞在 kernelbase.dll 的原 ReadConsoleInputW，
+        //   不在 DLL 代码内，LDR 可正常卸载
+        // 关键：release 先于 orig 调用，让 Unloader 看到 count==0 才 UninstallAll
+        if (!IsTransportConnected() || Unloader::IsUnloading()) {
+            if (log) LOG_INFO("ReadConsoleInputW_Detour: #%d transport disconnected/unloading, pass-through to orig", callId);
+            readGuard.release();
+            return ReadConsoleInputW_orig(h, buf, count, read);
         }
         if (log) {
             LOG_INFO("ReadConsoleInputW_Detour: #%d queue empty, blocking wait...", callId);
@@ -204,14 +251,19 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         if (log) LOG_INFO("ReadConsoleInputA_Detour: #%d LazyInit pass-through", callId);
         return ReadConsoleInputA_orig(h, buf, count, read);
     }
 
+    // ReadDetourGuard：同 ReadConsoleInputW_Detour
+    ReadDetourGuard readGuard;
+
     if (!IsInputHandle(h)) {
         if (log) LOG_INFO("ReadConsoleInputA_Detour: #%d not input handle, pass-through", callId);
+        readGuard.release();
         return ReadConsoleInputA_orig(h, buf, count, read);
     }
 
@@ -223,9 +275,11 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
             *read = static_cast<DWORD>(n);
             return TRUE;
         }
-        if (!IsTransportConnected()) {
-            *read = 0;
-            return FALSE;
+        // transport 断开 或 Unloader 启动：pass-through 到 orig（同 ReadConsoleInputW_Detour 理由）
+        if (!IsTransportConnected() || Unloader::IsUnloading()) {
+            if (log) LOG_INFO("ReadConsoleInputA_Detour: #%d transport disconnected/unloading, pass-through to orig", callId);
+            readGuard.release();
+            return ReadConsoleInputA_orig(h, buf, count, read);
         }
         WaitForSingleObject(queue.GetWaitHandle(), 100);
     }
@@ -238,6 +292,7 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
 BOOL WINAPI PeekConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
                                       DWORD count, LPDWORD read) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return PeekConsoleInputW_orig(h, buf, count, read);
@@ -258,6 +313,7 @@ BOOL WINAPI PeekConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
 BOOL WINAPI PeekConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
                                       DWORD count, LPDWORD read) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return PeekConsoleInputA_orig(h, buf, count, read);
@@ -281,6 +337,7 @@ BOOL WINAPI PeekConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
 // 返回 InputQueue 中 INPUT_RECORD 队列长度
 BOOL WINAPI GetNumberOfConsoleInputEvents_Detour(HANDLE h, LPDWORD count) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetNumberOfConsoleInputEvents_orig(h, count);
@@ -302,6 +359,7 @@ BOOL WINAPI GetNumberOfConsoleInputEvents_Detour(HANDLE h, LPDWORD count) {
 BOOL WINAPI WriteConsoleInputW_Detour(HANDLE h, const INPUT_RECORD* buf,
                                        DWORD count, LPDWORD written) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return WriteConsoleInputW_orig(h, buf, count, written);
@@ -323,6 +381,7 @@ BOOL WINAPI WriteConsoleInputW_Detour(HANDLE h, const INPUT_RECORD* buf,
 BOOL WINAPI WriteConsoleInputA_Detour(HANDLE h, const INPUT_RECORD* buf,
                                        DWORD count, LPDWORD written) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return WriteConsoleInputA_orig(h, buf, count, written);
@@ -346,6 +405,7 @@ BOOL WINAPI WriteConsoleInputA_Detour(HANDLE h, const INPUT_RECORD* buf,
 // 清空 DLL 内部队列（不清中介发来的，mediator 侧 stdin 仍有数据，下次会重发）
 BOOL WINAPI FlushConsoleInputBuffer_Detour(HANDLE h) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return FlushConsoleInputBuffer_orig(h);
@@ -382,14 +442,25 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
     }
 
     ENSURE_INITIALIZED();
+    ASSERT_IN_HOOK();          // 关键 Detour：行编辑主路径，Python REPL 走此
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         if (log) LOG_INFO("ReadConsoleW_Detour: #%d LazyInit pass-through", callId);
         return ReadConsoleW_orig(h, buf, len, read, ctrl);
     }
+
+    // ReadDetourGuard：进入 Detour 计数++，pass-through 调 orig 前 release（--）
+    // 关键修复（2026-07-25）：cmd 主线程阻塞在下方 WaitForSingleObject 时，
+    // Unloader SignalDataReady 唤醒后立即 UninstallAll 会释放 trampoline，
+    // 主线程被调度回来调用 ReadConsoleW_orig（trampoline）→ AV 0xC0000005
+    // release 先于 orig 调用，让 Unloader 看到 count==0 才 UninstallAll
+    ReadDetourGuard readGuard;
+
     if (!IsInputHandle(h) || buf == nullptr || read == nullptr) {
         if (log) LOG_INFO("ReadConsoleW_Detour: #%d skip (notInput=%d bufNull=%d readNull=%d), pass-through",
                           callId, !IsInputHandle(h), buf == nullptr, read == nullptr);
+        readGuard.release();
         return ReadConsoleW_orig(h, buf, len, read, ctrl);
     }
 
@@ -413,10 +484,18 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
         while (true) {
             n = queue.DequeueRecords(&rec, 1);
             if (n > 0) break;
-            if (!IsTransportConnected()) {
-                // 管道断开：返回 0 字符让调用方退出
-                *read = 0;
-                return FALSE;
+            // transport 断开 或 Unloader 启动：pass-through 到 orig
+            // 关键：必须 pass-through 而非返回 FALSE
+            //   - 返回 FALSE 会让 cmd 收到 ReadConsoleW 失败而退出（Phase 11 验收 2 要求 cmd 仍可交互）
+            //   - 调用栈停留在 DLL 代码内（本函数循环）会阻塞 LDR 卸载，
+            //     助手进程远程 FreeLibrary 时 LoadCount 因线程在 DLL 内无法归零
+            //   pass-through 后线程阻塞在 kernelbase.dll 原 ReadConsoleW，
+            //   不在 DLL 代码内，LDR 可正常卸载，cmd 也能从 ConHost 读取用户输入
+            //   release 先于 orig 调用，让 Unloader 看到 count==0 才 UninstallAll
+            if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                if (log) LOG_INFO("ReadConsoleW_Detour: #%d transport disconnected/unloading, pass-through to orig", callId);
+                readGuard.release();
+                return ReadConsoleW_orig(h, buf, len, read, ctrl);
             }
             WaitForSingleObject(queue.GetWaitHandle(), 100);
         }
@@ -483,13 +562,19 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
     }
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         if (log) LOG_INFO("ReadConsoleA_Detour: #%d LazyInit pass-through", callId);
         return ReadConsoleA_orig(h, buf, len, read, ctrl);
     }
+
+    // ReadDetourGuard：同 ReadConsoleW_Detour
+    ReadDetourGuard readGuard;
+
     if (!IsInputHandle(h) || buf == nullptr || read == nullptr) {
         if (log) LOG_INFO("ReadConsoleA_Detour: #%d skip, pass-through", callId);
+        readGuard.release();
         return ReadConsoleA_orig(h, buf, len, read, ctrl);
     }
 
@@ -508,9 +593,11 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
         while (true) {
             n = queue.DequeueRecords(&rec, 1);
             if (n > 0) break;
-            if (!IsTransportConnected()) {
-                *read = 0;
-                return FALSE;
+            // transport 断开 或 Unloader 启动：pass-through 到 orig（同 ReadConsoleW_Detour 理由）
+            if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                if (log) LOG_INFO("ReadConsoleA_Detour: #%d transport disconnected/unloading, pass-through to orig", callId);
+                readGuard.release();
+                return ReadConsoleA_orig(h, buf, len, read, ctrl);
             }
             WaitForSingleObject(queue.GetWaitHandle(), 100);
         }
@@ -584,6 +671,7 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
     }
 
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
     if (log) LOG_INFO("ReadFile_Detour: #%d ENSURE_INITIALIZED done", callId);
 
     // LazyInit 期间调原始 API（避免递归：transport Recv 在 LazyInit 中调 ReadFile）
@@ -592,12 +680,16 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
         return ReadFile_orig(h, buf, len, read, ov);
     }
 
+    // ReadDetourGuard：同 ReadConsoleW_Detour（VT 透传模式下会阻塞等待，需防 AV）
+    ReadDetourGuard readGuard;
+
     // 检查是否透传模式
     auto& state = ConsoleState::Instance();
     DWORD inMode = state.GetInputMode();
     if ((inMode & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0) {
         // 非透传模式：调原 API（cmd 通常用 ReadConsoleInput 而非 ReadFile(stdin)）
         if (log) LOG_INFO("ReadFile_Detour: #%d non-VT mode (inMode=0x%x), pass-through orig", callId, inMode);
+        readGuard.release();
         return ReadFile_orig(h, buf, len, read, ov);
     }
 
@@ -612,10 +704,13 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
             if (log) LOG_INFO("ReadFile_Detour: #%d return n=%zu", callId, n);
             return TRUE;
         }
-        if (!IsTransportConnected()) {
-            *read = 0;
-            if (log) LOG_INFO("ReadFile_Detour: #%d transport disconnected, FALSE", callId);
-            return FALSE;
+        // transport 断开 或 Unloader 启动：pass-through 到 orig（同 ReadConsoleW_Detour 理由，
+        // 让 vim/less 等程序从 ConHost 读取 VT 输入，避免返回 FALSE 导致程序退出
+        // 及调用栈滞留 DLL 内阻碍 LDR 卸载）
+        if (!IsTransportConnected() || Unloader::IsUnloading()) {
+            if (log) LOG_INFO("ReadFile_Detour: #%d transport disconnected/unloading, pass-through to orig", callId);
+            readGuard.release();
+            return ReadFile_orig(h, buf, len, read, ov);
         }
         WaitForSingleObject(queue.GetWaitHandle(), 100);
     }

@@ -62,7 +62,7 @@ void StatePoller::PollLoop() {
     const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
 
     int pollCount = 0;
-    int syncCount = 0;
+    int diffCount = 0;
 
     while (m_running) {
         ++pollCount;
@@ -71,18 +71,23 @@ void StatePoller::PollLoop() {
         if (hooks::CallRealGetConsoleScreenBufferInfo(hOut, &info)) {
             auto& state = ConsoleState::Instance();
             COORD cached = state.GetCursorPosition();
-            // ConHost 真实 cursor 与缓存不一致：说明 LazyInit 期间有并发输出
-            // 改变了 ConHost 状态，Capture 遗漏。同步缓存 + 发 VT 让 WT 同步
+            // ConHost 真实 cursor 与缓存不一致：记录差异，但不同步
+            //
+            // Phase 10 修正：原实现同步 ConHost 光标到 ConsoleState + 发 VT，
+            // 但这会破坏 LazyInit 的 prompt 覆盖策略：
+            //   - LazyInit 补发屏幕内容后，ConsoleState 光标设为行首 (0, Y)
+            //   - cmd 被 KickStart 唤醒后从行首写 prompt，覆盖补发的 prompt
+            //   - 若 StatePoller 在 cmd 输出前把光标同步到 ConHost (41, Y)，
+            //     cmd 会从 (41, Y) 开始写 prompt，导致 prompt 叠加重复
+            //   - cmd 输出后 AdvanceCursor 自然更新 ConsoleState，无需 StatePoller 干预
+            //
+            // StatePoller 现仅观察记录，用于诊断 ConHost 与缓存的光标偏差
             if (info.dwCursorPosition.X != cached.X ||
                 info.dwCursorPosition.Y != cached.Y) {
-                state.SetCursorPosition(info.dwCursorPosition);
-                // VT 光标定位是 1-based，ConHost 坐标是 0-based
-                std::string s = vt::CursorPosition(info.dwCursorPosition.Y + 1,
-                                                    info.dwCursorPosition.X + 1);
-                hooks::SendToMediator(s.data(), s.size());
-                ++syncCount;
-                LOG_INFO("StatePoller: cursor synced ConHost(%d,%d)->cache, sent VT",
-                         info.dwCursorPosition.X, info.dwCursorPosition.Y);
+                ++diffCount;
+                LOG_INFO("StatePoller: cursor diff ConHost(%d,%d) cache(%d,%d), not syncing (let AdvanceCursor handle)",
+                         info.dwCursorPosition.X, info.dwCursorPosition.Y,
+                         cached.X, cached.Y);
             }
         }
 
@@ -94,8 +99,8 @@ void StatePoller::PollLoop() {
     }
 
     m_running = false;
-    LOG_INFO("StatePoller loop done, polls=%d syncs=%d duration=%llums",
-             pollCount, syncCount, GetTickCount64() - startTick);
+    LOG_INFO("StatePoller loop done, polls=%d diffs=%d duration=%llums",
+             pollCount, diffCount, GetTickCount64() - startTick);
 }
 
 } // namespace terminjector

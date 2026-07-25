@@ -17,11 +17,11 @@
 //   - GetConsoleCP/OutputCP → 返回缓存
 #include "ModeHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../state/InputQueue.h"
 #include "../translator/VtEscape.h"
-#include "protocol/MessageSerializer.h"
 #include "protocol/Message.h"
 #include "logging/Logger.h"
 
@@ -51,12 +51,14 @@ DEFINE_ORIG_PTR(GetConsoleOutputCP, UINT WINAPI());
 // 模式变更通知中介
 // ============================================================
 // 发送 ModeChangePayload 给 mediator（仅日志/调试用，输入翻译在 DLL 侧完成）
+// 注意：SendToMediator 内部会做 Serialize，此处直接传 raw payload，
+//       否则会双重序列化（外层 payload 是内层 header+payload，mediator 解析出
+//       inputMode=kMagic=0x544A494E）
 static void NotifyModeChange() {
     protocol::ModeChangePayload p{};
     p.inputMode  = ConsoleState::Instance().GetInputMode();
     p.outputMode = ConsoleState::Instance().GetOutputMode();
-    auto pkt = protocol::Serialize(protocol::MessageType::ModeChange, &p, sizeof(p));
-    SendToMediator(pkt.data(), pkt.size(), protocol::MessageType::ModeChange);
+    SendToMediator(&p, sizeof(p), protocol::MessageType::ModeChange);
     LOG_INFO("ModeHooks: ModeChange sent inputMode=0x%lx outputMode=0x%lx",
              p.inputMode, p.outputMode);
 }
@@ -68,6 +70,7 @@ static void NotifyModeChange() {
 // 输出句柄：返回 ConsoleState outputMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING（强制 VT）
 BOOL WINAPI GetConsoleMode_Detour(HANDLE h, LPDWORD mode) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleMode_orig(h, mode);
@@ -96,6 +99,7 @@ BOOL WINAPI GetConsoleMode_Detour(HANDLE h, LPDWORD mode) {
 // 不调原 API（避免 ConHost 真改）
 BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleMode_orig(h, mode);
@@ -137,12 +141,12 @@ BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
 // ============================================================
 // mediator 收到后仅记录用于日志/调试，不真改自身 CP（mediator 固定 UTF-8）
 // DLL 翻译的 VT 输出始终是 UTF-8 字节流，与目标程序请求的 CP 无关
+// 注意：SendToMediator 内部会做 Serialize，此处直接传 raw payload，避免双重序列化
 static void NotifyCpChange() {
     protocol::CpChangePayload p{};
     p.inputCp  = ConsoleState::Instance().GetInputCp();
     p.outputCp = ConsoleState::Instance().GetOutputCp();
-    auto pkt = protocol::Serialize(protocol::MessageType::CpChange, &p, sizeof(p));
-    SendToMediator(pkt.data(), pkt.size(), protocol::MessageType::CpChange);
+    SendToMediator(&p, sizeof(p), protocol::MessageType::CpChange);
     LOG_INFO("ModeHooks: CpChange sent inputCp=%u outputCp=%u",
              p.inputCp, p.outputCp);
 }
@@ -155,6 +159,7 @@ static void NotifyCpChange() {
 // title 转 UTF-8 后发送（mediator 固定 UTF-8 代码页）
 BOOL WINAPI SetConsoleTitleW_Detour(LPCWSTR title) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleTitleW_orig(title);
@@ -191,6 +196,7 @@ BOOL WINAPI SetConsoleTitleW_Detour(LPCWSTR title) {
 //       误导转换（Console CP 与 ANSI CP 是不同概念）
 BOOL WINAPI SetConsoleTitleA_Detour(LPCSTR title) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleTitleA_orig(title);
@@ -214,6 +220,7 @@ BOOL WINAPI SetConsoleTitleA_Detour(LPCSTR title) {
 // 返回值：不含结尾 \0 的字符数（与系统 API 一致）
 DWORD WINAPI GetConsoleTitleW_Detour(LPWSTR buf, DWORD size) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleTitleW_orig(buf, size);
@@ -231,6 +238,7 @@ DWORD WINAPI GetConsoleTitleW_Detour(LPWSTR buf, DWORD size) {
 // 从 W 缓存转 A（用 GetACP，与 SetConsoleTitleA 对称）
 DWORD WINAPI GetConsoleTitleA_Detour(LPSTR buf, DWORD size) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleTitleA_orig(buf, size);
@@ -269,6 +277,7 @@ DWORD WINAPI GetConsoleTitleA_Detour(LPSTR buf, DWORD size) {
 //   但 DLL 的 ReadConsoleInputW Hook 返回 wchar_t，不走 CP 转换
 BOOL WINAPI SetConsoleCP_Detour(UINT cp) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleCP_orig(cp);
@@ -291,6 +300,7 @@ BOOL WINAPI SetConsoleCP_Detour(UINT cp) {
 //   DLL 的 WriteConsoleW Hook 已把 wchar_t 转 UTF-8 VT，与此值无关
 BOOL WINAPI SetConsoleOutputCP_Detour(UINT cp) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetConsoleOutputCP_orig(cp);
@@ -310,6 +320,7 @@ BOOL WINAPI SetConsoleOutputCP_Detour(UINT cp) {
 // ============================================================
 UINT WINAPI GetConsoleCP_Detour() {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleCP_orig();
@@ -322,6 +333,7 @@ UINT WINAPI GetConsoleCP_Detour() {
 // ============================================================
 UINT WINAPI GetConsoleOutputCP_Detour() {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleOutputCP_orig();

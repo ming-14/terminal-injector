@@ -8,7 +8,7 @@
 //
 // 消息流向：
 //   DLL  -> 中介：Hello / VtOutput / ModeChange / CpChange / Pong / ByeAck
-//           ChildProcessNotify / ChildExitNotify
+//                  UnloadComplete / ChildProcessNotify / ChildExitNotify
 //   中介 -> DLL：HelloAck / VtInput / ResizeNotify / Ping / Shutdown
 #pragma once
 
@@ -20,7 +20,7 @@ namespace terminjector::protocol {
 // 数值固定为 uint32_t，写入 PacketHeader.type 字段
 enum class MessageType : uint32_t {
     // 握手（Phase 2）
-    Hello        = 0x0001,  // DLL 注入成功后上报：含目标 PID、初始状态快照
+    Hello        = 0x0001,  // DLL 注入成功后上报：含目标 PID、初始状态快照、dllBase
     HelloAck     = 0x0002,  // 中介确认握手，回传中介侧 WT 的初始尺寸
 
     // 输出数据（Phase 4）
@@ -39,8 +39,13 @@ enum class MessageType : uint32_t {
     Pong         = 0x0041,
 
     // 卸载（Phase 11）
-    Shutdown     = 0x0050,  // 中介->DLL：要求卸载 Hook
-    ByeAck       = 0x0051,  // DLL->中介：已卸载完毕
+    Shutdown       = 0x0050,  // 中介->DLL：要求卸载 Hook
+    ByeAck         = 0x0051,  // DLL->中介：已卸载完毕（保留枚举，未使用）
+    UnloadComplete = 0x0052,  // DLL->中介：DoUnload 已完成，请求远程 FreeLibrary
+                              // 详见 docs/phases/11-unload-testing.md
+                              // DLL 内部无法让 LoadCount 归零（cmd 主线程 LdrpThreadBlob
+                              // 持引用），需 mediator 用 CreateRemoteThread 远程调
+                              // FreeLibrary(dllBase) 才能触发 DETACH
 
     // 子进程注入（Phase 12）
     // DLL->中介：父进程 CreateProcess Hook 捕获到子进程创建，
@@ -63,6 +68,7 @@ enum class MessageType : uint32_t {
 
 // Hello 消息 payload（DLL -> 中介）
 // 注入瞬间由 DLL 读取目标进程 Console 状态填入
+// #pragma pack(1) 紧凑布局，无需手动对齐填充
 struct HelloPayload {
     uint32_t targetPid;       // 目标进程 PID
     uint32_t targetBitness;   // 32 / 64，目前固定 64
@@ -74,8 +80,10 @@ struct HelloPayload {
     uint16_t cursorX;         // 初始光标 X
     uint16_t cursorY;         // 初始光标 Y
     uint16_t windowRows;      // 可见窗口高（srWindow.Bottom - Top + 1）
+    uint64_t dllBase;         // injected.dll 的 HMODULE（基址），mediator 据此
+                              // 远程调 FreeLibrary(dllBase) 触发 DETACH（Phase 11）
 };
-static_assert(sizeof(HelloPayload) == 24, "HelloPayload 大小应为 24 字节");
+static_assert(sizeof(HelloPayload) == 32, "HelloPayload 大小应为 32 字节");
 
 // HelloAck 消息 payload（中介 -> DLL）
 // 中介回传自己（WT 侧）的当前尺寸与光标，DLL 据此校正目标缓冲区与光标缓存

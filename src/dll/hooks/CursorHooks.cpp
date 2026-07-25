@@ -12,6 +12,7 @@
 //         否则 ConHost 仍保留目标程序注入瞬间的尺寸，cmd 提示符换行会按旧宽度
 #include "CursorHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../translator/VtEscape.h"
@@ -49,6 +50,8 @@ DEFINE_ORIG_PTR(GetConsoleCursorInfo, BOOL WINAPI(HANDLE, PCONSOLE_CURSOR_INFO))
 //   解决：只发 VT，让 ConPTY 单一来源处理光标定位。
 BOOL WINAPI SetConsoleCursorPosition_Detour(HANDLE hConsoleOutput, COORD pos) {
     ENSURE_INITIALIZED();
+    ASSERT_IN_HOOK();          // 关键 Detour：光标同步高频，检测非预期重入
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return SetConsoleCursorPosition_orig(hConsoleOutput, pos);
@@ -77,6 +80,7 @@ BOOL WINAPI SetConsoleCursorPosition_Detour(HANDLE hConsoleOutput, COORD pos) {
 BOOL WINAPI GetConsoleScreenBufferInfo_Detour(HANDLE hConsoleOutput,
                                               PCONSOLE_SCREEN_BUFFER_INFO lpInfo) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     // LazyInit 期间调原始 API：StateSnapshot::Capture 需要真实 console 值，
     // 不能返回未初始化的 ConsoleState 缓存（会是 0x0）
@@ -113,6 +117,7 @@ BOOL WINAPI GetConsoleScreenBufferInfo_Detour(HANDLE hConsoleOutput,
 BOOL WINAPI SetConsoleCursorInfo_Detour(HANDLE hConsoleOutput,
                                         const CONSOLE_CURSOR_INFO* lpInfo) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput) || lpInfo == nullptr) {
         return SetConsoleCursorInfo_orig(hConsoleOutput, lpInfo);
@@ -136,6 +141,7 @@ BOOL WINAPI SetConsoleCursorInfo_Detour(HANDLE hConsoleOutput,
 BOOL WINAPI GetConsoleCursorInfo_Detour(HANDLE hConsoleOutput,
                                        PCONSOLE_CURSOR_INFO lpInfo) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     // LazyInit 期间调原始 API（同 GetConsoleScreenBufferInfo 理由）
     if (IsInLazyInit()) {

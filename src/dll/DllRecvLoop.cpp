@@ -12,6 +12,7 @@
 // 注意：transport 的 Send/Recv 可并发（NamedPipeTransport::Send 已加锁）
 #include "DllRecvLoop.h"
 #include "LazyInit.h"
+#include "Unloader.h"                  // Phase 11：管道断开触发主动卸载
 #include "transport/ITransport.h"
 #include "protocol/MessageSerializer.h"
 #include "protocol/Message.h"
@@ -65,8 +66,11 @@ void RecvLoopMain() {
             peekCount++;
         }
         if (peeked < 0) {
-            // 管道出错或断开，退出循环
-            LOG_INFO("DllRecvLoop: pipe error/broken (Peek=%d)", peeked);
+            // 管道出错或断开，退出循环并触发主动卸载（Phase 11）
+            // 之前只 break 退出循环，DLL 仍驻留内存、Hook 仍激活
+            // 现在调 Unloader::RequestUnload 在独立线程执行 FreeLibraryAndExitThread
+            LOG_INFO("DllRecvLoop: pipe error/broken (Peek=%d), requesting unload", peeked);
+            Unloader::RequestUnload();
             break;
         }
         if (peeked == 0) {
@@ -99,7 +103,9 @@ void RecvLoopMain() {
         protocol::MessageType type;
         std::vector<uint8_t> payload;
         if (!protocol::RecvPacket(transport, type, payload)) {
-            LOG_INFO("DllRecvLoop: pipe closed (RecvPacket failed)");
+            // 管道关闭（对端 mediator 退出），触发主动卸载（Phase 11）
+            LOG_INFO("DllRecvLoop: pipe closed (RecvPacket failed), requesting unload");
+            Unloader::RequestUnload();
             break;
         }
 
@@ -191,8 +197,11 @@ void RecvLoopMain() {
                 LOG_DEBUG("DllRecvLoop: Ping ignored (Phase 10)");
                 break;
             case protocol::MessageType::Shutdown:
-                // Phase 11 实现：卸载 Hook
-                LOG_DEBUG("DllRecvLoop: Shutdown ignored (Phase 11)");
+                // Phase 11：mediator 主动要求卸载（如用户关闭 WT tab）
+                // 调 Unloader::RequestUnload 触发 FreeLibraryAndExitThread
+                // RequestUnload 幂等，多次调用只首次执行
+                LOG_INFO("DllRecvLoop: Shutdown received, requesting unload");
+                Unloader::RequestUnload();
                 break;
             case protocol::MessageType::ChildExitSync: {
                 // 子进程退出后，mediator 同步 ConPTY 当前光标到此父进程 DLL

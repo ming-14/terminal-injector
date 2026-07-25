@@ -14,6 +14,7 @@
 //     （ConHost 仅是 ConPTY 的后端，WT 是前端渲染器），无意义且可能引发副作用
 #include "FontHooks.h"
 #include "HookCommon.h"
+#include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "logging/Logger.h"
@@ -41,6 +42,7 @@ DEFINE_ORIG_PTR(GetConsoleFontSize, COORD WINAPI(HANDLE, DWORD));
 BOOL WINAPI GetCurrentConsoleFontEx_Detour(HANDLE h, BOOL bMaximumWindow,
                                             PCONSOLE_FONT_INFOEX info) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetCurrentConsoleFontEx_orig(h, bMaximumWindow, info);
@@ -70,6 +72,7 @@ BOOL WINAPI GetCurrentConsoleFontEx_Detour(HANDLE h, BOOL bMaximumWindow,
 BOOL WINAPI SetCurrentConsoleFontEx_Detour(HANDLE h, BOOL bMaximumWindow,
                                             PCONSOLE_FONT_INFOEX info) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return SetCurrentConsoleFontEx_orig(h, bMaximumWindow, info);
@@ -93,6 +96,7 @@ BOOL WINAPI SetCurrentConsoleFontEx_Detour(HANDLE h, BOOL bMaximumWindow,
 // 目标程序用此值计算字符单元格大小（如 vim 计算 columns/rows）
 COORD WINAPI GetConsoleFontSize_Detour(HANDLE h, DWORD nFont) {
     ENSURE_INITIALIZED();
+    HookReentryGuard guard;
 
     if (IsInLazyInit()) {
         return GetConsoleFontSize_orig(h, nFont);

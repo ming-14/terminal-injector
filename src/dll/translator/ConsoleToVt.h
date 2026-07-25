@@ -44,13 +44,25 @@ public:
     // WriteConsoleOutput：写字符矩阵（每个 cell 带字符+属性）
     // 用于全屏重绘（如 vim/curses 程序）
     // VT 策略：遍历矩阵，每个非空 cell 输出 光标定位 + SGR + 字符
-    // 优化：跳过空格+默认属性 cell；同行连续相同属性合并为一次定位+多字符
+    // 优化：
+    //   - 跳过空格+默认属性 cell；同行连续相同属性合并为一次定位+多字符
+    //   - Phase 10 任务6：diff 算法。维护上次输出的 cell 矩阵缓存，
+    //     若本次 writeRegion 与缓存相同，仅输出变化的 cell（含字符/属性变化）
+    //     满屏重绘场景下 VT 字节量可减少 80%+
     // bufferSize: 矩阵尺寸（X=列数, Y=行数）
     // bufferCoord: 源缓冲区起始坐标（通常为 {0,0}）
     // writeRegion: 目标屏幕区域（会被更新为实际写入区域）
     static std::string WriteConsoleOutput(
         const CHAR_INFO* buffer, COORD bufferSize, COORD bufferCoord,
         SMALL_RECT writeRegion);
+
+    // Phase 10 任务6：失效 WriteConsoleOutput 的 diff 缓存
+    // 在屏幕内容被非 WriteConsoleOutput 路径改变时调用：
+    //   - FillConsoleOutputCharacter/Attribute（cls/改颜色）
+    //   - WriteConsoleOutputCharacter（局部文本覆盖）
+    //   - ScrollConsoleScreenBuffer（滚屏使 cell 偏移）
+    // 不调用会导致下次 WriteConsoleOutput 误以为 cell 未变而跳过输出
+    static void InvalidateOutputCache();
 
     // WriteConsoleOutputCharacter：在指定坐标写一串字符（不改颜色）
     // 用于 prompt $P$G 等局部文本输出

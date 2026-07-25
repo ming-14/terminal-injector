@@ -83,3 +83,18 @@ ehthumbs.db
 # === 文档产物 ===
 docs/*_result.txt
 docs/*_output.txt
+
+# === 测试 / 调试产物（仓库根 + tests/ 下） ===
+# 调试输出 dump / cdb 输出
+*_result.txt
+*_output.txt
+*_buffer.txt
+tests/helpers/*_out.txt
+tests/helpers/*_cdb_out.txt
+tests/runners/*_output.txt
+# cdb 临时脚本（build/ 已忽略，这里覆盖根目录情况）
+cdb_*.txt
+analyze_*.txt
+disasm_*.txt
+verify_*.txt
+gs_*.txt

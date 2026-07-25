@@ -31,6 +31,10 @@ SUITES = [
     ("signal", "test_signal", "Ctrl+C 信号中断 python 死循环（Phase 7）"),
     ("phase8", "test_phase8", "Phase 8 高级特性（Title OSC 序列验证）"),
     ("phase9", "test_phase9", "Phase 9 自保护（Alloc/Attach/Free/CloseHandle 静默拦截）"),
+    ("phase10", "test_phase10", "Phase 10 HookWhitelist 重入防护（A→W 复用/Logger worker 不死锁）"),
+    ("phase10_diff", "test_phase10_diff", "Phase 10 WriteConsoleOutput diff 算法（缓存/增量输出）"),
+    ("phase10_pty", "test_phase10_pty", "Phase 10 PTY-Agent 屏幕快照重测（任务4+5+6 渲染验证）"),
+    ("phase11", "test_phase11", "Phase 11 卸载清理（DLL 模块消失/ cmd 恢复/Hook 字节恢复/反复注入无泄漏）"),
 ]
 
 

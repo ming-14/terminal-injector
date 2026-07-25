@@ -14,6 +14,7 @@
 //       Hook 安装前完成（DllMain 阶段）——但 Phase 3 的 Hook 只有 WriteConsole*，
 //       不影响 Get*，故懒加载内 Capture 安全。
 #include "LazyInit.h"
+#include "BatchSender.h"
 #include "DllRecvLoop.h"
 #include "logging/Logger.h"
 #include "transport/ITransport.h"
@@ -24,6 +25,9 @@
 #include "state/ConsoleState.h"
 #include "state/HandleRegistry.h"
 #include "state/StatePoller.h"
+#include "translator/ConsoleToVt.h"
+#include "translator/VtEscape.h"
+#include "hooks/HookCommon.h"
 
 #include <windows.h>
 #include <memory>
@@ -213,25 +217,63 @@ void EnsureLazyInitialized() {
         LOG_INFO("ConsoleState corrected by WT size: %ux%u", wtCols, wtRows);
     }
 
-    // 用 mediator 回传的 ConPTY 光标覆盖 ConsoleState 缓存光标
-    // 原因：注入瞬间 snap 拿到的是目标进程私有 ConHost 的光标（如 cmd 已显示 prompt
-    //       后的位置），与 WT/ConPTY 的光标（PowerShell 等前置输出之后的位置）不在
-    //       同一坐标系。若 DLL 用 ConHost 光标发 VT 定位序列，会把 ConPTY 光标拉到
-    //       错误位置，导致注入后头几行输出偏右。改用 ConPTY 光标后，cmd 后续输出
-    //       接在 WT 当前位置之后，坐标系与 ConPTY 对齐。
-    //       （详见 HelloAckPayload.cursorX/Y 注释）
-    {
-        COORD conptyCursor;
-        conptyCursor.X = static_cast<SHORT>(wtCursorX);
-        conptyCursor.Y = static_cast<SHORT>(wtCursorY);
-        ConsoleState::Instance().SetCursorPosition(conptyCursor);
-        LOG_INFO("ConsoleState cursor aligned to ConPTY: (%u,%u)",
-                 wtCursorX, wtCursorY);
+    // Phase 10：补发注入前 ConHost 已有屏幕内容到 WT
+    // 原因：注入前 cmd 已输出版本横幅+prompt，这些内容只存在于 ConHost，未发到 WT。
+    //       若不补发，WT 空屏光标在 (0,0)，而 ConsoleState 光标在 ConHost 位置（如 (41,3)），
+    //       两者坐标系错位，导致后续输出位置错误。
+    // 方案：用 ConsoleToVt::WriteConsoleOutput 把 snap.screenCells 转 VT 发给 mediator，
+    //       WT 渲染后内容和 ConHost 一致，光标坐标系自然对齐。
+    //
+    // 注意：WriteConsoleOutput 内部会 SetCursorPosition(0,0)，补发后需手动同步光标到
+    //       snap 的正确位置（相对 srWindow 左上角的偏移）
+    if (!snap.screenCells.empty()) {
+        COORD bufSize;
+        bufSize.X = static_cast<SHORT>(snap.screenRegion.Right - snap.screenRegion.Left + 1);
+        bufSize.Y = static_cast<SHORT>(snap.screenRegion.Bottom - snap.screenRegion.Top + 1);
+        COORD bufCoord{0, 0};
+        std::string vt = ConsoleToVt::WriteConsoleOutput(
+            snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
+        hooks::SendToMediator(vt.data(), vt.size());
+        LOG_INFO("LazyInit: screen content replayed to WT, %zu bytes", vt.size());
+
+        // 同步 WT 光标到 prompt 末尾位置（相对 srWindow 左上角）
+        // ConHost 光标是缓冲区坐标，需减去 srWindow.Left/Top 转为 WT 终端坐标
+        COORD cursor = snap.screenBufferInfo.dwCursorPosition;
+        SHORT termCursorX = static_cast<SHORT>(cursor.X - snap.screenBufferInfo.srWindow.Left);
+        SHORT termCursorY = static_cast<SHORT>(cursor.Y - snap.screenBufferInfo.srWindow.Top);
+        // VT CursorPosition 是 1-based
+        std::string cursorSync = vt::CursorPosition(termCursorY + 1, termCursorX + 1);
+        hooks::SendToMediator(cursorSync.data(), cursorSync.size());
+        LOG_INFO("LazyInit: WT cursor synced to terminal (%d,%d)", termCursorX, termCursorY);
+
+        // 关键：ConsoleState 光标设为行首 (0, cursor.Y) 而非 prompt 末尾
+        //
+        // 原因：cmd 被 KickStart 唤醒后会从 GetConsoleScreenBufferInfo 拿到的光标位置
+        //       开始输出新 prompt。若 ConsoleState 光标保持在 prompt 末尾 (cursor.X, cursor.Y)，
+        //       cmd 输出的新 prompt 会接在旧 prompt 之后，造成视觉上 prompt 重复：
+        //         C:\Users\rikka>C:\Users\rikka>
+        //       把 ConsoleState 光标设为行首 (0, cursor.Y) 后：
+        //   - WriteConsoleW_Detour 输出前会发 CursorPosition(0, cursor.Y) 同步 WT 光标
+        //   - cmd 写新 prompt 字符时从行首开始，正好覆盖补发的旧 prompt
+        //   - 新旧 prompt 内容相同（同一工作目录），完全覆盖，视觉无缝
+        //
+        // 注意：WT 显示的光标此时在 prompt 末尾，但 cmd 第一次 WriteConsoleW 会立即
+        //       把 WT 光标拉回行首，用户感知不到错位
+        COORD lineStart{0, cursor.Y};
+        ConsoleState::Instance().SetCursorPosition(lineStart);
+        LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
+                 cursor.Y);
     }
 
     // 5. Phase 5：启动 DLL 侧后台接收线程（处理 ResizeNotify 等控制流）
     //    必须在 g_initialized=true 之前启动，避免 Hook 路径在状态就绪前触发
     StartDllRecvLoop();
+
+    // Phase 10 任务5：启动 BatchSender flush 线程
+    // 必须在 g_initialized=true 之前启动：g_initialized 后 Hook 走正常路径，
+    // SendToMediator 会把 VtOutput 路由到 BatchSender，此时 BatchSender 必须已就绪
+    // 否则 EnqueueVtOutput 走 fallback 直接 Send（功能正确但失去合并优化）
+    BatchSender::Instance().Init();
 
     // Phase 9：隐藏原 Console 窗口
     // 原因：静默模式后原 cmd 黑框不再更新（ConHost 不收到输出），

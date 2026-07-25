@@ -3,6 +3,7 @@
 # 详见 docs/phases/01-scaffold.md 4.7
 add_library(terminjector_common STATIC
     logging/Logger.cpp
+    logging/RingBufferLogger.cpp
     transport/NamedPipeTransport.cpp
     protocol/MessageSerializer.cpp
 )

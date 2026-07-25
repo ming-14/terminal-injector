@@ -6,6 +6,9 @@
 //       注入模式：将 injected.dll 注入到 <pid> 进程
 //   terminal-injector.exe --mediator --target-pid <pid> [--pipe <name>] [--dll <path>]
 //       中介模式：作为 WT 子进程，建立管道等待 DLL 连接
+//   terminal-injector.exe --unload-remote <pid> <dllBase>
+//       远程卸载助手（Phase 11）：在目标进程创建远程线程调 FreeLibrary(dllBase)
+//       由 injected.dll 的 Unloader 在 DoUnload 末尾启动，独立于 WT 生命周期
 //   terminal-injector.exe --version
 //   terminal-injector.exe --help
 //
@@ -21,14 +24,16 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <tlhelp32.h>  // Phase 11：CreateToolhelp32Snapshot 检查模块是否加载
 
 namespace terminjector {
 
 // 命令行参数
 struct CliArgs {
-    enum class Mode { None, Inject, Mediator, Help, Version };
+    enum class Mode { None, Inject, Mediator, UnloadRemote, Help, Version };
     Mode         mode = Mode::None;
     uint32_t     targetPid = 0;
+    uint64_t     dllBase = 0;   // --unload-remote 模式：injected.dll 基址
     std::wstring dllPath;    // 默认 exe 同目录的 injected.dll
     std::wstring pipeName;   // 默认根据 targetPid 构造
 
@@ -69,6 +74,8 @@ static void PrintHelp() {
         "      注入 injected.dll 到目标进程\n"
         "  terminal-injector.exe --mediator --target-pid <pid> [--pipe <name>] [--dll <path>]\n"
         "      中介模式（由 WT 启动），自动 fork 注入器并桥接 DLL 与 WT\n"
+        "  terminal-injector.exe --unload-remote <pid> <dllBase>\n"
+        "      远程卸载助手（Phase 11）：在目标进程创建远程线程调 FreeLibrary\n"
         "  terminal-injector.exe --version\n"
         "  terminal-injector.exe --help\n\n"
         "参数:\n"
@@ -77,6 +84,8 @@ static void PrintHelp() {
         "  --target-pid <pid>    目标进程 PID（mediator 模式必需）\n"
         "  --dll <path>          injected.dll 路径，默认与 exe 同目录\n"
         "  --pipe <name>         命名管道名，默认 \\\\.\\pipe\\terminjector_<pid>\n"
+        "  --unload-remote <pid> <dllBase>\n"
+        "                        远程卸载模式：远程 FreeLibrary(dllBase)\n"
         "  --version             显示版本号\n"
         "  --help, -h            显示此帮助\n");
 }
@@ -98,6 +107,23 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
             }
         } else if (a == "--mediator") {
             args.mode = CliArgs::Mode::Mediator;
+        } else if (a == "--unload-remote" && i + 2 < argc) {
+            // --unload-remote <pid> <dllBase>
+            // 由 injected.dll 的 Unloader 启动，独立于 WT 生命周期
+            args.mode = CliArgs::Mode::UnloadRemote;
+            try {
+                args.targetPid = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } catch (...) {
+                std::fprintf(stderr, "Invalid pid: %s\n", argv[i]);
+                return args;
+            }
+            try {
+                // dllBase 用 16 进制（0x...）或 10 进制均可
+                args.dllBase = std::stoull(argv[++i], nullptr, 0);
+            } catch (...) {
+                std::fprintf(stderr, "Invalid dllBase: %s\n", argv[i]);
+                return args;
+            }
         } else if (a == "--target-pid" && i + 1 < argc) {
             try {
                 args.targetPid = static_cast<uint32_t>(std::stoul(argv[++i]));
@@ -137,23 +163,261 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
         return args;
     }
 
+    // unload-remote 模式校验：必须有 pid 和 dllBase
+    if (args.mode == CliArgs::Mode::UnloadRemote) {
+        if (args.targetPid == 0) {
+            std::fprintf(stderr, "Unload-remote mode requires <pid>\n");
+            return args;
+        }
+        if (args.dllBase == 0) {
+            std::fprintf(stderr, "Unload-remote mode requires <dllBase>\n");
+            return args;
+        }
+    }
+
     args.valid = true;
     return args;
 }
 
+// ============================================================
+// Phase 11：远程卸载助手
+// ============================================================
+// 由 injected.dll 的 Unloader 在 DoUnload 末尾启动（独立进程），
+// 在目标进程中创建远程线程调用 FreeLibrary(dllBase)。
+//
+// 为什么需要独立进程：
+//   WT 关闭时 mediator 被连带终止，无法在 DLL DoUnload 后远程 FreeLibrary。
+//   助手进程是 cmd 的子进程（DLL 在 cmd 中 CreateProcessW 启动它），
+//   独立于 WT 生命周期，WT 关闭不影响它。
+//
+// 远程 FreeLibrary 能让 LoadCount 归 0 的原理：
+//   调用线程是 CreateRemoteThread 新建的，从未进入 injected.dll 代码，
+//   LDR 不为其持 ThreadBlob 引用。而 DLL 内部线程（含 DoUnload 线程）
+//   曾在 injected.dll 中执行，LDR 保持 LoadCount=1 防止线程崩溃。
+//   远程线程绕过此限制，FreeLibrary 后 LoadCount 真正归 0，触发 DETACH。
+// ============================================================
+// Phase 11：远程卸载助手辅助函数
+// ============================================================
+
+// 用 Toolhelp32 检查模块是否仍在目标进程中加载（按基址匹配）。
+// 只读快照，不增加 LoadCount，比 PSAPI EnumProcessModulesEx 更轻量。
+// 返回 true 表示模块仍在，false 表示已从模块列表消失。
+static bool IsModuleLoaded(HANDLE hProc, uint64_t dllBase) {
+    DWORD pid = GetProcessId(hProc);
+    if (pid == 0) {
+        // 无法获取 PID，保守返回 true（让调用方继续重试）
+        return true;
+    }
+    HANDLE hSnap = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (hSnap == INVALID_HANDLE_VALUE) {
+        // 快照失败，保守返回 true
+        return true;
+    }
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32FirstW(hSnap, &me)) {
+        do {
+            if (reinterpret_cast<uint64_t>(me.modBaseAddr) == dllBase) {
+                found = true;
+                break;
+            }
+        } while (Module32NextW(hSnap, &me));
+    }
+    CloseHandle(hSnap);
+    return found;
+}
+
+// 触发 LDR flush：远程调用 LoadLibraryW("kernel32.dll")。
+// LdrLoadDll 内部调用 LdrpFlushUnloadCompleteProcessing 清理待卸载模块
+// （State=9 LdrModulesReadyToUnload 的模块），让它们真正从 LdrLists 消失。
+//
+// 副作用：cmd 进程的 kernel32 LoadCount +1，但 kernel32 是系统核心 DLL
+// 永不卸载，无实际影响。
+static bool TriggerLdrFlush(HANDLE hProc) {
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hKernel32) return false;
+    auto pLoadLibraryW = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(hKernel32, "LoadLibraryW"));
+    if (!pLoadLibraryW) return false;
+
+    // 在目标进程分配内存存放 "kernel32.dll" 宽字符串
+    const wchar_t* dllName = L"kernel32.dll";
+    SIZE_T pathLen = (wcslen(dllName) + 1) * sizeof(wchar_t);
+    LPVOID remoteStr = VirtualAllocEx(hProc, nullptr, pathLen,
+                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remoteStr) {
+        LOG_ERROR("TriggerLdrFlush: VirtualAllocEx failed err=%lu", GetLastError());
+        return false;
+    }
+
+    bool ok = false;
+    SIZE_T written = 0;
+    if (WriteProcessMemory(hProc, remoteStr, dllName, pathLen, &written)) {
+        HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
+            pLoadLibraryW, remoteStr, 0, nullptr);
+        if (hThread) {
+            DWORD waitRet = WaitForSingleObject(hThread, 5000);
+            DWORD exitCode = 0;
+            GetExitCodeThread(hThread, &exitCode);
+            LOG_INFO("TriggerLdrFlush: LoadLibraryW(kernel32) wait=%lu exitCode=0x%lx "
+                     "(nonzero=success)",
+                     waitRet, exitCode);
+            CloseHandle(hThread);
+            ok = (exitCode != 0);
+        } else {
+            LOG_ERROR("TriggerLdrFlush: CreateRemoteThread failed err=%lu",
+                      GetLastError());
+        }
+    } else {
+        LOG_ERROR("TriggerLdrFlush: WriteProcessMemory failed err=%lu",
+                  GetLastError());
+    }
+    VirtualFreeEx(hProc, remoteStr, 0, MEM_RELEASE);
+    return ok;
+}
+
+static int RunUnloadRemote(uint32_t targetPid, uint64_t dllBase) {
+    LOG_INFO("UnloadRemote: targetPid=%u dllBase=0x%llx",
+             targetPid, static_cast<unsigned long long>(dllBase));
+
+    // 1. 打开目标进程（需 CREATE_THREAD/VM_OPERATION 等权限）
+    DWORD access = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                   PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+    HANDLE hProc = OpenProcess(access, FALSE, targetPid);
+    if (!hProc) {
+        LOG_ERROR("UnloadRemote: OpenProcess failed pid=%u err=%lu",
+                  targetPid, GetLastError());
+        return 1;
+    }
+
+    // 2. 取 kernel32!FreeLibrary 地址
+    //    系统共享基址保证此地址在目标进程中也是 FreeLibrary
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hKernel32) {
+        LOG_ERROR("UnloadRemote: GetModuleHandleW(kernel32) failed err=%lu",
+                  GetLastError());
+        CloseHandle(hProc);
+        return 1;
+    }
+    auto pFreeLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(hKernel32, "FreeLibrary"));
+    if (!pFreeLibrary) {
+        LOG_ERROR("UnloadRemote: GetProcAddress(FreeLibrary) failed err=%lu",
+                  GetLastError());
+        CloseHandle(hProc);
+        return 1;
+    }
+
+    // 3. 等 DoUnload 线程 + Logger worker 线程退出
+    //    助手进程在 Unloader 步骤 9 启动，此时：
+    //      - DoUnload 线程仍在步骤 9 中执行（还没到步骤 11 ExitThread）
+    //      - Logger worker 线程在运行（步骤 10 Logger::Shutdown 还没执行）
+    //    LoadCount 此时 >= 3（DoUnload 线程 + Logger 线程 + cmd 主线程 ThreadBlob）
+    //    若此时远程 FreeLibrary 只减 1，LoadCount 未归零，DETACH 不触发。
+    //
+    //    需等它们退出后，LoadCount 才降到 1（只剩 cmd 主线程 LdrpThreadBlob），
+    //    远程 FreeLibrary 才能把 LoadCount 减到 0，触发 DLL_PROCESS_DETACH。
+    //
+    //    等待时间估算：
+    //      - 步骤 10 Logger::Shutdown 同步等 Logger worker 退出（RingBufferLogger
+    //        m_shutdown=true + WaitForSingleObject，~100-200ms）
+    //      - 步骤 11 ExitThread 立即返回
+    //      - LDR 释放 DoUnload 线程的 ThreadBlob（~100ms）
+    //    共 ~500ms，保守取 2000ms 留足余量
+    LOG_INFO("UnloadRemote: waiting 2000ms for DoUnload + Logger threads to exit "
+             "and LDR to release ThreadBlobs");
+    Sleep(2000);
+
+    // 4. 重试循环：远程 FreeLibrary + LDR flush
+    //    首次 FreeLibrary 应让 LoadCount 归 0 触发 DETACH，但 LDR 可能延迟卸载
+    //    （State=9 LdrModulesReadyToUnload），模块仍在 LdrLists。
+    //    需触发 LDR flush（远程 LoadLibraryW）才会真正从模块列表消失。
+    //    重试 3 次应对时序不确定（ThreadBlob 释放延迟等）。
+    bool unloaded = false;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        // 远程 FreeLibrary(dllBase)
+        HANDLE hThread = CreateRemoteThread(
+            hProc, nullptr, 0,
+            pFreeLibrary,
+            reinterpret_cast<LPVOID>(static_cast<uintptr_t>(dllBase)),
+            0, nullptr);
+        if (!hThread) {
+            LOG_ERROR("UnloadRemote: attempt %d CreateRemoteThread failed err=%lu",
+                      attempt, GetLastError());
+            // 等待后重试（可能是临时资源问题）
+            Sleep(500);
+            continue;
+        }
+        DWORD waitRet = WaitForSingleObject(hThread, 5000);
+        DWORD exitCode = 0;
+        GetExitCodeThread(hThread, &exitCode);
+        LOG_INFO("UnloadRemote: attempt %d FreeLibrary wait=%lu exitCode=%lu "
+                 "(nonzero=success) dllBase=0x%llx",
+                 attempt, waitRet, exitCode,
+                 static_cast<unsigned long long>(dllBase));
+        CloseHandle(hThread);
+
+        // 等 LDR 处理 DETACH（DllMain MH_Uninitialize 等）
+        Sleep(300);
+
+        // 检查模块是否还在
+        if (!IsModuleLoaded(hProc, dllBase)) {
+            LOG_INFO("UnloadRemote: DLL unloaded after FreeLibrary (attempt %d)",
+                     attempt);
+            unloaded = true;
+            break;
+        }
+
+        // 模块仍在：可能是 LoadCount 未归零 或 LDR 延迟卸载（State=9）
+        // 触发 LDR flush 让 LdrpFlushUnloadCompleteProcessing 清理待卸载模块
+        LOG_INFO("UnloadRemote: DLL still loaded after attempt %d, triggering LDR flush",
+                 attempt);
+        TriggerLdrFlush(hProc);
+        Sleep(300);
+
+        if (!IsModuleLoaded(hProc, dllBase)) {
+            LOG_INFO("UnloadRemote: DLL unloaded after LDR flush (attempt %d)",
+                     attempt);
+            unloaded = true;
+            break;
+        }
+    }
+
+    CloseHandle(hProc);
+    LOG_INFO("UnloadRemote: final result unloaded=%d dllBase=0x%llx",
+             unloaded, static_cast<unsigned long long>(dllBase));
+    return unloaded ? 0 : 1;
+}
+
 // 主分发逻辑
 static int Run(int argc, char* argv[]) {
+    // 先解析参数，再根据 mode 决定日志路径。
+    // 原因：--unload-remote 助手进程由 DLL 在 DoUnload 末尾启动，
+    // 与下一次循环的 mediator 并发，若共用 LOG_PATH 会因
+    // FILE_SHARE_READ 不允许 share write 而冲突（CreateFileW 失败，
+    // mediator 日志写不进，wait_for_handshake 超时）。
+    // --unload-remote 写独立日志文件，避免抢占 mediator 日志句柄。
+    auto args = ParseArgs(argc, argv);
+
     // 用 exe 同目录的绝对路径写日志，避免 WT 启动时工作目录不确定
     // 否则相对路径 "terminal-injector.log" 可能写到不可预测的位置
     std::wstring exeDir = GetExeDir();
-    std::wstring logPath = exeDir + L"\\terminal-injector.log";
+    std::wstring logPath;
+    if (args.mode == CliArgs::Mode::UnloadRemote) {
+        // 助手进程独立日志：terminal-injector-unload.log
+        logPath = exeDir + L"\\terminal-injector-unload.log";
+    } else {
+        // mediator / inject 等模式：terminal-injector.log
+        logPath = exeDir + L"\\terminal-injector.log";
+    }
     Logger::Initialize(logPath.c_str(), LogLevel::Debug);
     LOG_INFO("=== terminal-injector starting, argc=%d ===", argc);
     for (int i = 0; i < argc; ++i) {
         LOG_INFO("argv[%d] = %s", i, argv[i]);
     }
 
-    auto args = ParseArgs(argc, argv);
     if (!args.valid) {
         Logger::Shutdown();
         return 1;
@@ -181,6 +445,13 @@ static int Run(int argc, char* argv[]) {
                      args.targetPid, args.pipeName.c_str(), args.dllPath.c_str());
             Mediator mediator;
             ret = mediator.Run(args.targetPid, args.pipeName, args.dllPath);
+            break;
+        }
+        case CliArgs::Mode::UnloadRemote: {
+            LOG_INFO("Mode=UnloadRemote, targetPid=%u dllBase=0x%llx",
+                     args.targetPid,
+                     static_cast<unsigned long long>(args.dllBase));
+            ret = RunUnloadRemote(args.targetPid, args.dllBase);
             break;
         }
         case CliArgs::Mode::Help:

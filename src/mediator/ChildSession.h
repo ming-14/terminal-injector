@@ -38,11 +38,15 @@ public:
     using ChildNotifyCallback = std::function<void(uint32_t childPid, uint32_t parentPid)>;
     // 子进程退出时调用（RecvLoop 结束后触发，mediator 据此同步 ConPTY 光标给父进程 DLL）
     using ExitCallback        = std::function<void(uint32_t childPid)>;
+    // 收到 ModeChange 时调用（mediator 据此发 VT 鼠标报告启用/禁用序列给 WT）
+    // 子进程 SetConsoleMode(ENABLE_MOUSE_INPUT) → DLL 发 ModeChange → 本回调
+    using ModeChangeCallback  = std::function<void(uint32_t inputMode, uint32_t outputMode)>;
 
     ChildSession(uint32_t childPid,
                  VtOutputCallback    onVtOutput,
                  ChildNotifyCallback onChildNotify,
-                 ExitCallback        onExit);
+                 ExitCallback        onExit,
+                 ModeChangeCallback  onModeChange);
     ~ChildSession();
 
     ChildSession(const ChildSession&) = delete;
@@ -76,6 +80,7 @@ private:
     VtOutputCallback    m_onVtOutput;
     ChildNotifyCallback m_onChildNotify;
     ExitCallback        m_onExit;
+    ModeChangeCallback  m_onModeChange;
 
     // 线程主函数：Create + WaitClient + Handshake + RecvLoop
     void Run();
