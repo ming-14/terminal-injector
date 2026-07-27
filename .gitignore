@@ -2,6 +2,13 @@
 build/
 out/
 cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
 
 # === MSVC / Visual Studio ===
 *.obj
@@ -14,6 +21,9 @@ cmake-build-*/
 *.res
 *.manifest
 *.vcxproj.user
+*.vcxproj
+*.vcxproj.filters
+*.sln
 *.suo
 *.sln.docstates
 .vs/
@@ -54,13 +64,23 @@ htmlcov/
 .eggs/
 dist/
 venv/
+.venv/
+env/
 .env
+.mypy_cache/
+.ruff_cache/
+.tox/
+coverage/
 
 # === 调试 / 日志 ===
 debug/
 logs/
 *.log
 .dbg/
+*.dmp
+*.mdmp
+*.hangdump
+ADPlus/
 
 # === IDE / 编辑器 ===
 .idea/
