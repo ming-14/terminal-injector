@@ -47,6 +47,16 @@ class MediatorLog:
         except OSError:
             return ""
 
+    def read_all(self) -> str:
+        """读取日志文件全部内容（不更新 offset）。"""
+        if not os.path.exists(self.path):
+            return ""
+        try:
+            with open(self.path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        except OSError:
+            return ""
+
     def wait_for(self, pattern: str, timeout: float = 5.0) -> bool:
         """等待新增日志中出现 pattern（字符串子串匹配）。"""
         deadline = time.time() + timeout

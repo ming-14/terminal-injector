@@ -50,15 +50,17 @@ bool GetWtCursorPos(uint16_t& cursorX, uint16_t& cursorY) {
 } // namespace
 
 ChildSession::ChildSession(uint32_t childPid,
-                           VtOutputCallback    onVtOutput,
-                           ChildNotifyCallback onChildNotify,
-                           ExitCallback        onExit,
-                           ModeChangeCallback  onModeChange)
+                           VtOutputCallback         onVtOutput,
+                           ChildNotifyCallback      onChildNotify,
+                           ExitCallback             onExit,
+                           ModeChangeCallback       onModeChange,
+                           ModeSwitchNotifyCallback onModeSwitchNotify)
     : m_childPid(childPid)
     , m_onVtOutput(std::move(onVtOutput))
     , m_onChildNotify(std::move(onChildNotify))
     , m_onExit(std::move(onExit))
-    , m_onModeChange(std::move(onModeChange)) {
+    , m_onModeChange(std::move(onModeChange))
+    , m_onModeSwitchNotify(std::move(onModeSwitchNotify)) {
 }
 
 ChildSession::~ChildSession() {
@@ -250,6 +252,19 @@ void ChildSession::RecvLoop() {
                     LOG_INFO("ChildSession RecvLoop: ModeChange inputMode=0x%lx outputMode=0x%lx, pid=%u",
                              mc.inputMode, mc.outputMode, m_childPid);
                     m_onModeChange(mc.inputMode, mc.outputMode);
+                }
+                break;
+            }
+
+            case MessageType::ModeSwitchNotify: {
+                // 子进程启用 ENABLE_VIRTUAL_TERMINAL_INPUT → DLL 发 ModeSwitchNotify
+                // 转发 mediator 的 OnModeSwitchNotify：记录 VT 输入模式状态
+                if (m_onModeSwitchNotify && payload.size() >= sizeof(ModeSwitchNotifyPayload)) {
+                    ModeSwitchNotifyPayload ms{};
+                    std::memcpy(&ms, payload.data(), sizeof(ms));
+                    LOG_INFO("ChildSession RecvLoop: ModeSwitchNotify vtInput=%d vtOutput=%d, pid=%u",
+                             ms.vtInputMode, ms.vtOutputMode, m_childPid);
+                    m_onModeSwitchNotify(ms.vtInputMode, ms.vtOutputMode);
                 }
                 break;
             }

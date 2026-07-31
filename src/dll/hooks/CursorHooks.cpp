@@ -15,6 +15,7 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "../translator/VtEscape.h"
 #include "logging/Logger.h"
 
@@ -60,8 +61,9 @@ BOOL WINAPI SetConsoleCursorPosition_Detour(HANDLE hConsoleOutput, COORD pos) {
     // Phase 5 诊断日志
     LOG_INFO("SetConsoleCursorPosition_Detour: pos=(%d,%d)", pos.X, pos.Y);
 
-    // 更新光标缓存
+    // 更新光标缓存（Phase 14：同时更新 VirtualConsoleState）
     ConsoleState::Instance().SetCursorPosition(pos);
+    VirtualConsoleState::Instance().SetCursorPos(pos);
 
     // 输出 VT 光标定位（VT 是 1-based，pos 是 0-based）
     std::string s = CursorPosition(pos.Y + 1, pos.X + 1);
@@ -93,7 +95,12 @@ BOOL WINAPI GetConsoleScreenBufferInfo_Detour(HANDLE hConsoleOutput,
     }
 
     // 直接返回缓存（不调原 API）
-    ConsoleState::Instance().FillScreenBufferInfo(*lpInfo);
+    // Phase 14：优先使用 VirtualConsoleState（与 WT 一致的最新状态）
+    if (VirtualConsoleState::Instance().IsInitialized()) {
+        VirtualConsoleState::Instance().FillScreenBufferInfo(*lpInfo);
+    } else {
+        ConsoleState::Instance().FillScreenBufferInfo(*lpInfo);
+    }
 
     // Phase 5 诊断日志（采样，避免日志爆炸）
     static thread_local int s_callCount = 0;

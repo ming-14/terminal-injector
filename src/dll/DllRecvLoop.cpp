@@ -17,6 +17,7 @@
 #include "protocol/MessageSerializer.h"
 #include "protocol/Message.h"
 #include "state/ConsoleState.h"
+#include "state/VirtualConsoleState.h"
 #include "state/InputQueue.h"          // Phase 6：输入队列
 #include "translator/VtInputParser.h"  // Phase 6：VT 输入分帧
 #include "hooks/SignalHooks.h"         // Phase 7：Ctrl+C 触发
@@ -218,8 +219,34 @@ void RecvLoopMain() {
                 c.X = static_cast<SHORT>(sync.cursorX);
                 c.Y = static_cast<SHORT>(sync.cursorY);
                 ConsoleState::Instance().SetCursorPosition(c);
+                VirtualConsoleState::Instance().SetCursorPos(c);
                 LOG_INFO("DllRecvLoop: ChildExitSync cursor synced to (%u,%u)",
                          sync.cursorX, sync.cursorY);
+                break;
+            }
+            case protocol::MessageType::WtStateReport: {
+                // Phase 14：WT 状态反向同步
+                // 中介报告 WT 侧真实状态（resize 或 DSR CPR 响应）
+                // 更新 VirtualConsoleState 使程序查询返回与 WT 一致的值
+                if (payload.size() < sizeof(protocol::WtStateReportPayload)) {
+                    LOG_WARN("DllRecvLoop: WtStateReport payload too small %zu",
+                             payload.size());
+                    break;
+                }
+                protocol::WtStateReportPayload wt{};
+                std::memcpy(&wt, payload.data(), sizeof(wt));
+                auto& vcs = VirtualConsoleState::Instance();
+                if (wt.type == 0) {
+                    // resize
+                    vcs.ApplyWtResize(wt.cols, wt.rows);
+                    LOG_INFO("DllRecvLoop: WtStateReport resize cols=%d rows=%d",
+                             wt.cols, wt.rows);
+                } else if (wt.type == 1) {
+                    // cursor report (DSR CPR)
+                    vcs.ApplyWtCursorReport(wt.cols, wt.rows);
+                    LOG_INFO("DllRecvLoop: WtStateReport cursor col=%d row=%d",
+                             wt.cols, wt.rows);
+                }
                 break;
             }
             default:

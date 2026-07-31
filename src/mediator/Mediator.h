@@ -17,12 +17,14 @@
 #include "transport/ITransport.h"
 #include "WtSizeWatcher.h"
 #include "ChildSession.h"
+#include "VtParser.h"
 
 #include <memory>
 #include <mutex>
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <atomic>
 
 namespace terminjector {
 
@@ -93,6 +95,12 @@ private:
     //   → DLL VtToInputRecord → 目标 ReadConsoleInputW
     void OnModeChange(uint32_t inputMode, uint32_t outputMode);
 
+    // === Phase 13：VT 模式切换通知 ===
+
+    // 收到 DLL 的 ModeSwitchNotify 时，记录 VT 输入模式状态
+    // DLL 在 SetConsoleMode 检测到 ENABLE_VIRTUAL_TERMINAL_INPUT 标志变化时触发
+    void OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode);
+
     // 向 WT stdout 写 VT 序列（发鼠标报告请求用）
     void WriteStdoutVt(const char* data, size_t len);
 
@@ -125,6 +133,13 @@ private:
     // 初始值 0 表示未收到过 ModeChange
     uint32_t m_lastInputMode = 0;
     bool m_mouseReportEnabled = false;  // WT 鼠标报告当前是否已启用
+
+    // Phase 13：VT 输入模式状态（DLL 通过 ModeSwitchNotify 通知）
+    // true=DLL 处于 VT 直通模式，false=行编辑模式
+    std::atomic<bool> m_vtInputMode{false};
+
+    // Phase 14：轻量 VT 解析器（识别 DSR CPR 等 WT 响应）
+    VtParser m_vtParser;
 };
 
 } // namespace terminjector

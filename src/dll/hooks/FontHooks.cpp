@@ -17,6 +17,7 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "logging/Logger.h"
 
 #include <windows.h>

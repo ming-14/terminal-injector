@@ -15,6 +15,7 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "../state/HandleRegistry.h"
 #include "../translator/VtEscape.h"
 #include "logging/Logger.h"
@@ -49,8 +50,9 @@ BOOL WINAPI SetConsoleScreenBufferSize_Detour(HANDLE hConsoleOutput, COORD dwSiz
         return SetConsoleScreenBufferSize_orig(hConsoleOutput, dwSize);
     }
 
-    // 更新缓存
+    // 更新缓存（Phase 14：同时更新 VirtualConsoleState）
     ConsoleState::Instance().SetBufferSize(dwSize);
+    VirtualConsoleState::Instance().SetBufferSize(dwSize);
     LOG_DEBUG("SetConsoleScreenBufferSize: %dx%d", dwSize.X, dwSize.Y);
 
     // 不调原 API：ConHost 不再收到尺寸变更，消除原 cmd 黑框更新闪烁
@@ -73,9 +75,10 @@ BOOL WINAPI SetConsoleWindowInfo_Detour(HANDLE hConsoleOutput, BOOL bAbsolute,
         return SetConsoleWindowInfo_orig(hConsoleOutput, bAbsolute, lpConsoleWindow);
     }
 
-    // 更新缓存
+    // 更新缓存（Phase 14：同时更新 VirtualConsoleState）
     if (bAbsolute) {
         ConsoleState::Instance().SetWindow(*lpConsoleWindow);
+        VirtualConsoleState::Instance().SetWindowRect(*lpConsoleWindow);
     } else {
         // 相对偏移：在当前窗口基础上叠加
         SMALL_RECT cur = ConsoleState::Instance().GetWindow();
@@ -84,6 +87,7 @@ BOOL WINAPI SetConsoleWindowInfo_Detour(HANDLE hConsoleOutput, BOOL bAbsolute,
         cur.Right  += lpConsoleWindow->Right;
         cur.Bottom += lpConsoleWindow->Bottom;
         ConsoleState::Instance().SetWindow(cur);
+        VirtualConsoleState::Instance().SetWindowRect(cur);
     }
 
     // 不调原 API：ConHost 不再收到窗口变更
@@ -100,6 +104,11 @@ COORD WINAPI GetLargestConsoleWindowSize_Detour(HANDLE hConsoleOutput) {
 
     if (!IsConsoleHandle(hConsoleOutput)) {
         return GetLargestConsoleWindowSize_orig(hConsoleOutput);
+    }
+
+    // Phase 14：优先使用 VirtualConsoleState（与 WT 一致的最新状态）
+    if (VirtualConsoleState::Instance().IsInitialized()) {
+        return VirtualConsoleState::Instance().GetLargestWindowSize();
     }
 
     // 用 srWindow 尺寸近似（与 FillScreenBufferInfo 同策略）

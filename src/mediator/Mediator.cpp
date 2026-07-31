@@ -13,6 +13,7 @@
 #include "protocol/Message.h"
 #include "protocol/MessageSerializer.h"
 #include "VtPassThrough.h"
+#include "VtParser.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -268,6 +269,19 @@ void Mediator::BridgeLoop() {
     // Phase 10+ 处理 Ping / Shutdown 等控制流
     LOG_INFO("BridgeLoop starting (stdin<->pipe, pipe<->stdout, sizeWatcher, childSession)");
 
+    // Phase 14：设置 VtParser DSR CPR 回调
+    // 当 WT 响应 DSR 查询时，发送 WtStateReport(type=1) 给 DLL 更新 VirtualConsoleState
+    m_vtParser.SetCursorReportCallback([this](int col, int row) {
+        protocol::WtStateReportPayload wt{};
+        wt.type = 1;  // cursor_report
+        wt.cols = col;
+        wt.rows = row;
+        auto pkt = protocol::Serialize(protocol::MessageType::WtStateReport, &wt, sizeof(wt));
+        const int sent = m_transport->Send(pkt.data(), pkt.size());
+        LOG_INFO("WtStateReport cursor sent: VT col=%d row=%d (sent=%d/%zu)",
+                 col, row, sent, pkt.size());
+    });
+
     // Phase 5：启动 WT 尺寸监听
     // WT 窗口 resize 时封装 ResizeNotify 发给 DLL，DLL 更新 ConsoleState
     m_sizeWatcher.Start([this](int cols, int rows, int bufCols, int bufRows) {
@@ -280,6 +294,16 @@ void Mediator::BridgeLoop() {
         const int sent = m_transport->Send(pkt.data(), pkt.size());
         LOG_INFO("ResizeNotify sent: win=%dx%d buf=%dx%d (sent=%d/%zu)",
                  cols, rows, bufCols, bufRows, sent, pkt.size());
+
+        // Phase 14：同时发送 WtStateReport 给 VirtualConsoleState
+        protocol::WtStateReportPayload wt{};
+        wt.type = 0;  // resize
+        wt.cols = cols;
+        wt.rows = rows;
+        auto wtPkt = protocol::Serialize(protocol::MessageType::WtStateReport, &wt, sizeof(wt));
+        const int wtSent = m_transport->Send(wtPkt.data(), wtPkt.size());
+        LOG_INFO("WtStateReport resize sent: cols=%d rows=%d (sent=%d/%zu)",
+                 cols, rows, wtSent, wtPkt.size());
     });
 
     // stdin→pipe 独立线程（ReadFile 阻塞，pipe 断开时主线程退出，
@@ -326,6 +350,13 @@ void Mediator::BridgeLoop() {
                 // Phase 11：DLL 已完成 DoUnload，请求远程 FreeLibrary 触发 DETACH
                 // 无 payload，直接调 OnUnloadComplete（用 m_dllBase 远程调 FreeLibrary）
                 OnUnloadComplete();
+            } else if (type == protocol::MessageType::ModeSwitchNotify) {
+                // Phase 13：DLL 通知 VT 输入模式切换
+                if (payload.size() >= sizeof(protocol::ModeSwitchNotifyPayload)) {
+                    protocol::ModeSwitchNotifyPayload ms{};
+                    std::memcpy(&ms, payload.data(), sizeof(ms));
+                    OnModeSwitchNotify(ms.vtInputMode, ms.vtOutputMode);
+                }
             } else {
                 LOG_INFO("BridgeLoop: unhandled msg type=0x%08X len=%zu",
                          static_cast<uint32_t>(type), payload.size());
@@ -407,6 +438,17 @@ void Mediator::WriteStdoutVt(const char* data, size_t len) {
 }
 
 // ============================================================
+// Phase 13：VT 模式切换通知
+// ============================================================
+
+void Mediator::OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode) {
+    bool vtMode = (vtInputMode != 0);
+    m_vtInputMode.store(vtMode);
+    LOG_INFO("OnModeSwitchNotify: VT input mode=%d (vtOutput=%d)",
+             vtInputMode, vtOutputMode);
+}
+
+// ============================================================
 // Phase 12：子进程会话管理
 // ============================================================
 
@@ -423,7 +465,8 @@ void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid) {
         [this](const uint8_t* data, size_t len) { WriteChildVtOutput(data, len); },
         [this](uint32_t cp, uint32_t pp) { OnChildProcessNotify(cp, pp); },
         [this](uint32_t cp) { OnChildExit(cp); },
-        [this](uint32_t in, uint32_t out) { OnModeChange(in, out); });
+        [this](uint32_t in, uint32_t out) { OnModeChange(in, out); },
+        [this](uint32_t vtIn, uint32_t vtOut) { OnModeSwitchNotify(vtIn, vtOut); });
     session->Start();
 
     // 加入会话列表（线程安全）
@@ -440,8 +483,18 @@ void Mediator::WriteChildVtOutput(const uint8_t* data, size_t len) {
     DWORD written = 0;
     BOOL ok = WriteFile(hStdout, data, static_cast<DWORD>(len), &written, nullptr);
     DWORD err = ok ? 0 : GetLastError();
-    LOG_INFO("ChildVtOutput: len=%zu written=%lu ok=%d err=%lu",
-             len, written, ok, err);
+    // 日志含 hex 前缀，供 e2e 测试验证输出内容
+    // Phase 13 e2e 测试通过此日志验证 VT 输出直通字节
+    size_t hexLen = (len > 256) ? 256 : len;  // 最多记 256 字节
+    std::string hex;
+    hex.reserve(hexLen * 3);
+    for (size_t i = 0; i < hexLen; ++i) {
+        char buf[4];
+        std::snprintf(buf, sizeof(buf), "%02X ", data[i]);
+        hex += buf;
+    }
+    LOG_INFO("ChildVtOutput: len=%zu written=%lu ok=%d err=%lu hex[%zu]=%s",
+             len, written, ok, err, hexLen, hex.c_str());
 }
 
 void Mediator::OnChildExit(uint32_t childPid) {
@@ -482,6 +535,10 @@ void Mediator::OnChildExit(uint32_t childPid) {
 // ============================================================
 
 void Mediator::RouteInput(const uint8_t* data, size_t len) {
+    // Phase 14：先通过 VtParser 解析，检测 DSR CPR 等 WT 响应
+    // 若检测到 DSR CPR，VtParser 回调发送 WtStateReport 给 DLL
+    m_vtParser.Feed(data, len);
+
     // 路由策略：优先发送到最后一个活跃 ChildSession（最深前台子进程）；
     //           无活跃子进程时回退到父进程 transport（保持 cmd 自身输入）
     //

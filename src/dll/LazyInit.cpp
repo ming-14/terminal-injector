@@ -23,6 +23,7 @@
 #include "protocol/MessageSerializer.h"
 #include "state/StateSnapshot.h"
 #include "state/ConsoleState.h"
+#include "state/VirtualConsoleState.h"
 #include "state/HandleRegistry.h"
 #include "state/StatePoller.h"
 #include "translator/ConsoleToVt.h"
@@ -198,6 +199,9 @@ void EnsureLazyInitialized() {
     // 4. 初始化运行期状态缓存
     ConsoleState::Instance().InitFromSnapshot(snap);
 
+    // Phase 14：初始化虚拟 Console 状态（从 ConHost 加载初始状态）
+    VirtualConsoleState::Instance().InitializeFromConHost();
+
     // Phase 5：用 mediator 回传的 WT 尺寸校正 ConsoleState
     // 原因：注入瞬间 cmd.exe 的控制台可能尚未初始化完成，
     //       StateSnapshot::Capture 拿到的 dwSize/srWindow 可能是 0x0/1x1，
@@ -214,6 +218,11 @@ void EnsureLazyInitialized() {
         win.Right  = static_cast<SHORT>(wtCols - 1);
         win.Bottom = static_cast<SHORT>(wtRows - 1);
         ConsoleState::Instance().SetWindow(win);
+
+        // Phase 14：同步校正 VirtualConsoleState
+        VirtualConsoleState::Instance().SetBufferSize(bufSize);
+        VirtualConsoleState::Instance().SetWindowRect(win);
+
         LOG_INFO("ConsoleState corrected by WT size: %ux%u", wtCols, wtRows);
     }
 
@@ -261,6 +270,7 @@ void EnsureLazyInitialized() {
         //       把 WT 光标拉回行首，用户感知不到错位
         COORD lineStart{0, cursor.Y};
         ConsoleState::Instance().SetCursorPosition(lineStart);
+        VirtualConsoleState::Instance().SetCursorPos(lineStart);
         LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
                  cursor.Y);
     }

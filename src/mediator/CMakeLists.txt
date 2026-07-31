@@ -6,6 +6,7 @@
 add_library(terminjector_mediator STATIC
     Mediator.cpp
     VtPassThrough.cpp
+    VtParser.cpp
     WtSizeWatcher.cpp
     ChildSession.cpp
     InputRecordToVt.cpp

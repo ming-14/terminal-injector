@@ -23,6 +23,7 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "../translator/ConsoleToVt.h"
 #include "../translator/VtEscape.h"
 #include "logging/Logger.h"
@@ -149,6 +150,11 @@ BOOL WINAPI WriteConsoleW_Detour(
                         static_cast<int>(nNumberOfCharsToWrite),
                         /*wrapAtEol=*/true);
 
+    // Phase 14：同步更新 VirtualConsoleState 光标
+    VirtualConsoleState::Instance().AdvanceCursor(
+        reinterpret_cast<const wchar_t*>(lpBuffer),
+        static_cast<int>(nNumberOfCharsToWrite));
+
     // 诊断日志：AdvanceCursor 后
     {
         COORD after = ConsoleState::Instance().GetCursorPosition();
@@ -243,6 +249,19 @@ BOOL WINAPI WriteFile_Detour(
                               lpNumberOfBytesWritten, lpOverlapped);
     }
 
+    // Phase 13：VT 输出直通模式
+    // 当程序启用了 ENABLE_VIRTUAL_TERMINAL_PROCESSING（如 vim/less/ncurses），
+    // 其 WriteFile 输出已经是 VT 序列，直接转发给 mediator 无需翻译。
+    // 避免 VT → ANSI(解码) → W → VT(翻译) 的无意义往返。
+    auto& state = ConsoleState::Instance();
+    if (state.GetOutputMode() & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+        SendToMediator(lpBuffer, nNumberOfBytesToWrite);
+        if (lpNumberOfBytesWritten != nullptr) {
+            *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
+        }
+        return TRUE;
+    }
+
     // 控制台句柄：按当前输出代码页转 UTF-16，走 WriteConsoleW 翻译路径
     // WriteFile 对控制台的输出是 ANSI 字节流（与 WriteConsoleA 一致）
     UINT cp = ConsoleState::Instance().GetOutputCp();
@@ -276,11 +295,15 @@ BOOL WINAPI SetConsoleTextAttribute_Detour(HANDLE hConsoleOutput, WORD attr) {
     HookReentryGuard guard;
 
     if (!IsConsoleHandle(hConsoleOutput)) {
+        LOG_INFO("SetConsoleTextAttribute_Detour: IsConsoleHandle false, pass-through");
         return SetConsoleTextAttribute_orig(hConsoleOutput, attr);
     }
 
-    // 更新缓存
+    LOG_INFO("SetConsoleTextAttribute_Detour: attr=0x%04x", attr);
+
+    // 更新缓存（Phase 14：同时更新 VirtualConsoleState）
     ConsoleState::Instance().SetTextAttribute(attr);
+    VirtualConsoleState::Instance().SetAttributes(attr);
 
     // 输出 SGR（立即生效，下次 WriteConsole 会用新属性）
     std::string sgr = SgrFromAttribute(attr);

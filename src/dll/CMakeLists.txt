@@ -15,6 +15,7 @@ add_library(injected_dll SHARED
     Unloader.cpp
     state/StateSnapshot.cpp
     state/ConsoleState.cpp
+    state/VirtualConsoleState.cpp
     state/HandleRegistry.cpp
     state/StatePoller.cpp
     translator/Color.cpp

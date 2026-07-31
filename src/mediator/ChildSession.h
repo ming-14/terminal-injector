@@ -41,12 +41,16 @@ public:
     // 收到 ModeChange 时调用（mediator 据此发 VT 鼠标报告启用/禁用序列给 WT）
     // 子进程 SetConsoleMode(ENABLE_MOUSE_INPUT) → DLL 发 ModeChange → 本回调
     using ModeChangeCallback  = std::function<void(uint32_t inputMode, uint32_t outputMode)>;
+    // 收到 ModeSwitchNotify 时调用（mediator 据此记录 VT 输入模式状态）
+    // 子进程 SetConsoleMode 检测到 ENABLE_VIRTUAL_TERMINAL_INPUT 标志变化 → 本回调
+    using ModeSwitchNotifyCallback = std::function<void(uint32_t vtInputMode, uint32_t vtOutputMode)>;
 
     ChildSession(uint32_t childPid,
                  VtOutputCallback    onVtOutput,
                  ChildNotifyCallback onChildNotify,
                  ExitCallback        onExit,
-                 ModeChangeCallback  onModeChange);
+                 ModeChangeCallback  onModeChange,
+                 ModeSwitchNotifyCallback onModeSwitchNotify);
     ~ChildSession();
 
     ChildSession(const ChildSession&) = delete;
@@ -77,10 +81,11 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_exited{false};
 
-    VtOutputCallback    m_onVtOutput;
-    ChildNotifyCallback m_onChildNotify;
-    ExitCallback        m_onExit;
-    ModeChangeCallback  m_onModeChange;
+    VtOutputCallback         m_onVtOutput;
+    ChildNotifyCallback      m_onChildNotify;
+    ExitCallback             m_onExit;
+    ModeChangeCallback       m_onModeChange;
+    ModeSwitchNotifyCallback m_onModeSwitchNotify;
 
     // 线程主函数：Create + WaitClient + Handshake + RecvLoop
     void Run();

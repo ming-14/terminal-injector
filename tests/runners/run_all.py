@@ -35,6 +35,8 @@ SUITES = [
     ("phase10_diff", "test_phase10_diff", "Phase 10 WriteConsoleOutput diff 算法（缓存/增量输出）"),
     ("phase10_pty", "test_phase10_pty", "Phase 10 PTY-Agent 屏幕快照重测（任务4+5+6 渲染验证）"),
     ("phase11", "test_phase11", "Phase 11 卸载清理（DLL 模块消失/ cmd 恢复/Hook 字节恢复/反复注入无泄漏）"),
+    ("phase13", "test_phase13", "Phase 13 VT 直通模式验证（ModeSwitchNotify + 输出直通）"),
+    ("phase14", "test_phase14", "Phase 14 虚拟 Console 状态验证（初始化 + 状态查询 + WtStateReport）"),
 ]
 
 

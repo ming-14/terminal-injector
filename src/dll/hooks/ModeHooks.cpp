@@ -63,6 +63,19 @@ static void NotifyModeChange() {
              p.inputMode, p.outputMode);
 }
 
+// Phase 13：VT 模式切换通知中介
+// 检测到 ENABLE_VIRTUAL_TERMINAL_INPUT 标志变化时发送，
+// 中介据此切换输入翻译策略（行编辑模式走 VtToInputRecord，VT 直通模式原样转发字节）
+static void NotifyModeSwitch(bool vtInputMode) {
+    protocol::ModeSwitchNotifyPayload p{};
+    p.vtInputMode  = vtInputMode ? 1 : 0;
+    p.vtOutputMode = (ConsoleState::Instance().GetOutputMode()
+                     & ENABLE_VIRTUAL_TERMINAL_PROCESSING) ? 1 : 0;
+    SendToMediator(&p, sizeof(p), protocol::MessageType::ModeSwitchNotify);
+    LOG_INFO("ModeHooks: ModeSwitchNotify sent vtInput=%d vtOutput=%d",
+             p.vtInputMode, p.vtOutputMode);
+}
+
 // ============================================================
 // GetConsoleMode Hook
 // ============================================================
@@ -113,14 +126,19 @@ BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
 
     if (IsInputHandle(h)) {
         DWORD oldMode = state.GetInputMode();
+        bool oldVT = (oldMode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
+        bool newVT = (mode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
         state.SetInputMode(mode);
         if (mode != oldMode) {
             // 模式切换：清空输入队列，避免残留数据混淆
             InputQueue::Instance().ClearAllOnModeSwitch();
             NotifyModeChange();
+            // Phase 13：VT_INPUT 标志变化时通知 mediator 切换翻译策略
+            if (oldVT != newVT) {
+                NotifyModeSwitch(newVT);
+            }
             LOG_INFO("ModeHooks: input mode 0x%lx -> 0x%lx (VT_INPUT=%d)",
-                     oldMode, mode,
-                     (mode & ENABLE_VIRTUAL_TERMINAL_INPUT) ? 1 : 0);
+                     oldMode, mode, newVT ? 1 : 0);
         }
     } else {
         // 输出：强制保留 VT 处理标志

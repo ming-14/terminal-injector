@@ -60,6 +60,14 @@ enum class MessageType : uint32_t {
     // 光标定位序列，把 ConPTY 光标拉回旧位置，覆盖子进程输出。
     // 中介在子进程退出时查询 ConPTY 当前光标，通过此消息发给父进程 DLL 对齐缓存。
     ChildExitSync       = 0x0062,
+
+    // 模式切换通知（Phase 13）
+    // DLL->中介：VT 直通模式与行编辑模式切换
+    ModeSwitchNotify    = 0x0070,
+
+    // WT 状态报告（Phase 14）
+    // 中介->DLL：WT 窗口尺寸变化或 DSR CPR 响应，用于虚拟 Console 状态反向同步
+    WtStateReport       = 0x0080,
 };
 
 // 各消息的 payload 结构
@@ -154,6 +162,28 @@ struct ChildExitSyncPayload {
 };
 static_assert(sizeof(ChildExitSyncPayload) == 6,
               "ChildExitSyncPayload 大小应为 6 字节");
+
+// ModeSwitchNotify 消息 payload（DLL -> 中介，Phase 13）
+// DLL 检测到目标程序切换 ENABLE_VIRTUAL_TERMINAL_INPUT 标志时通知 mediator，
+// 中介据此切换输入翻译策略（行编辑模式走 VtToInputRecord，VT 直通模式原样转发字节）
+struct ModeSwitchNotifyPayload {
+    uint32_t vtInputMode;   // 1=VT 直通, 0=行编辑
+    uint32_t vtOutputMode;  // 1=VT 处理, 0=老式
+};
+static_assert(sizeof(ModeSwitchNotifyPayload) == 8,
+              "ModeSwitchNotifyPayload 大小应为 8 字节");
+
+// WtStateReport 消息 payload（中介 -> DLL，Phase 14）
+// 中介向 DLL 报告 WT 侧真实状态，用于虚拟 Console 状态反向同步
+// type=0: resize（cols=new cols, rows=new rows）
+// type=1: cursor_report 响应 DSR CPR（cols=col, rows=row，1-based VT 坐标）
+struct WtStateReportPayload {
+    uint32_t type;       // 0=resize, 1=cursor_report
+    int32_t cols;        // resize: 新列数；cursor: 列
+    int32_t rows;        // resize: 新行数；cursor: 行
+};
+static_assert(sizeof(WtStateReportPayload) == 12,
+              "WtStateReportPayload 大小应为 12 字节");
 
 #pragma pack(pop)
 
