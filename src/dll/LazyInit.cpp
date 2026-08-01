@@ -31,6 +31,7 @@
 #include "hooks/HookCommon.h"
 
 #include <windows.h>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -202,6 +203,22 @@ void EnsureLazyInitialized() {
     // Phase 14：初始化虚拟 Console 状态（从 ConHost 加载初始状态）
     VirtualConsoleState::Instance().InitializeFromConHost();
 
+    // Phase 15：发送 DSR CPR 查询校准 WT 真实光标位置
+    // 通过 SendToMediator 发 \x1b[6n 到 mediator，mediator 转发给 WT，
+    // WT 响应 \x1b[row;colR 后由 mediator VtParser 检测并发送 WtStateReport(type=1)
+    // 给 DLL 更新 VirtualConsoleState，使程序查询到的光标与 WT 一致
+    hooks::SendToMediator(vt::kDsrCprQuery, strlen(vt::kDsrCprQuery),
+                          protocol::MessageType::VtOutput);
+    LOG_INFO("QueryWtCursorPos: DSR CPR query sent to WT");
+
+    // Phase 15：发送 Primary DA 查询获取终端能力标识
+    // 通过 SendToMediator 发 \x1b[c 到 mediator，mediator 转发给 WT，
+    // WT 响应 \x1b[?1;Psc 后由 mediator VtParser 检测并发送 WtStateReport(type=2)
+    // 给 DLL 存储至 VirtualConsoleState，后续可查询终端能力
+    hooks::SendToMediator(vt::kDaPrimaryQuery, strlen(vt::kDaPrimaryQuery),
+                          protocol::MessageType::VtOutput);
+    LOG_INFO("QueryTerminalCaps: Primary DA query sent to WT");
+
     // Phase 5：用 mediator 回传的 WT 尺寸校正 ConsoleState
     // 原因：注入瞬间 cmd.exe 的控制台可能尚未初始化完成，
     //       StateSnapshot::Capture 拿到的 dwSize/srWindow 可能是 0x0/1x1，
@@ -235,7 +252,16 @@ void EnsureLazyInitialized() {
     //
     // 注意：WriteConsoleOutput 内部会 SetCursorPosition(0,0)，补发后需手动同步光标到
     //       snap 的正确位置（相对 srWindow 左上角的偏移）
+    //
+    // Phase 19 修复：仅主目标进程（cmd）执行重放。
+    // 子进程（python 等）的 ConHost 快照 = cmd 注入时刻的陈旧内容：
+    //   - 重放会覆盖 WT 当前已正确的屏幕（cmd 输出全走 VT 劫持，ConHost 不更新）
+    //   - ConHost 快照光标陈旧，用它同步 WT 光标会把光标拉回旧行
+    //     （用户反馈：长命令折行后回车，python 输出前 cursorSync 把光标
+    //       拉回 ConHost 旧位置（0,4），视觉上"回车后光标跳回折行处"）
+    // 子进程光标基准应使用 HelloAck 回传的 WT 真实光标 wtCursorX/Y
     if (!snap.screenCells.empty()) {
+        if (isTarget) {
         COORD bufSize;
         bufSize.X = static_cast<SHORT>(snap.screenRegion.Right - snap.screenRegion.Left + 1);
         bufSize.Y = static_cast<SHORT>(snap.screenRegion.Bottom - snap.screenRegion.Top + 1);
@@ -273,6 +299,20 @@ void EnsureLazyInitialized() {
         VirtualConsoleState::Instance().SetCursorPos(lineStart);
         LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
                  cursor.Y);
+        } else {
+            // 子进程：不重放屏幕，用 HelloAck 回传的 WT 真实光标对齐缓存
+            // （ChildSession Handshake 注释：cursorX/Y 供子进程 DLL 对齐
+            //   ConsoleState 光标缓存，使子进程输出接在 WT 当前位置之后）
+            if (wtCursorX > 0 || wtCursorY > 0) {
+                COORD c;
+                c.X = static_cast<SHORT>(wtCursorX);
+                c.Y = static_cast<SHORT>(wtCursorY);
+                ConsoleState::Instance().SetCursorPosition(c);
+                VirtualConsoleState::Instance().SetCursorPos(c);
+                LOG_INFO("LazyInit: child cursor aligned to WT (%u,%u) from HelloAck",
+                         wtCursorX, wtCursorY);
+            }
+        }
     }
 
     // 5. Phase 5：启动 DLL 侧后台接收线程（处理 ResizeNotify 等控制流）

@@ -53,6 +53,8 @@ BOOL WINAPI SetConsoleScreenBufferSize_Detour(HANDLE hConsoleOutput, COORD dwSiz
     // 更新缓存（Phase 14：同时更新 VirtualConsoleState）
     ConsoleState::Instance().SetBufferSize(dwSize);
     VirtualConsoleState::Instance().SetBufferSize(dwSize);
+    // Phase 18：记录用户请求的缓冲区高度，WT resize 时以此值为下限保留
+    VirtualConsoleState::Instance().SetUserBufferHeight(dwSize.Y);
     LOG_DEBUG("SetConsoleScreenBufferSize: %dx%d", dwSize.X, dwSize.Y);
 
     // 不调原 API：ConHost 不再收到尺寸变更，消除原 cmd 黑框更新闪烁

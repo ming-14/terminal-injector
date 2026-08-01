@@ -237,7 +237,7 @@ dll  ──►  common (logging/transport/protocol/console)
 
 ## 5. Phase 划分总览
 
-共 12 个 Phase，每个 Phase 有明确的交付物、验证标准与依赖关系。详细文档见对应 `0X-*.md`。
+共 18 个 Phase，每个 Phase 有明确的交付物、验证标准与依赖关系。详细文档见对应 `0X-*.md`。
 
 > **注意**：Phase 12（子进程注入）在实际开发顺序中位于 Phase 5 之后、Phase 6 之前。编号为 12 仅是为了不打乱已有 Phase 6-11 的编号。
 
@@ -254,7 +254,13 @@ dll  ──►  common (logging/transport/protocol/console)
 | 8 | 高级特性 | Alt Buffer、ConsoleTitle、ConsoleCP、ConsoleFont、Wait 句柄假映射 | Phase 7 |
 | 9 | 自保护 | Attach/Free/Alloc/GetStdHandle/CloseHandle Hook | Phase 8 |
 | 10 | 状态同步优化与稳定性 | 后台轮询线程、鼠标攒批、死锁防护、性能调优 | Phase 9 |
-| 11 | 卸载清理与多目标测试 | 管道断开卸载、cmd/powershell/python/opencode/vim 全量测试 | Phase 10 |
+| 11 | 卸载清理与多目标测试 | 管道断开卸载、反复注入/卸载 10 次无泄漏 | Phase 10 |
+| 13 | VT 直通模式 | VT 输入模式自动检测与直通转发，LineEditor 行编辑 | Phase 11 |
+| 14 | 虚拟 Console 状态 | VirtualConsole 状态缓存与 WT 双向同步 | Phase 13 |
+| 15 | DSR/DA 终端属性查询 | WT 光标位置查询（DSR CPR）、终端能力标识（DA） | Phase 14 |
+| 16 | 鼠标坐标状态管理 | 跨 ParseMouse 调用的鼠标按键状态连续性 | Phase 15 |
+| 17 | 字符宽度 | wcwidth 集成，CJK 双宽字符正确处理 | Phase 16 |
+| 18 | 滚动缓冲区 | 回滚行数跟踪、用户缓冲区高度保留、模式切换重置 | Phase 17 |
 
 ### 5.1 Phase 依赖图
 
@@ -291,7 +297,25 @@ Phase 3 (DLL框架) ──► 首次端到端验证：WriteConsoleW 劫持 cmd �
    │                Phase 10 (同步优化) ──► 性能达标
    │                   │
    │                   ▼
-   │                Phase 11 (卸载/测试) ──► 全量验收
+   │                Phase 11 (卸载/测试) ──► 单次卸载通过，循环 2 调试中
+   │                   │
+   │                   ▼
+   │                Phase 13 (VT 直通) ──► LineEditor 行编辑 + VT 模式自动切换
+   │                   │
+   │                   ▼
+   │                Phase 14 (虚拟 Console) ──► VirtualConsoleState 双向同步
+   │                   │
+   │                   ▼
+   │                Phase 15 (DSR/DA) ──► WT 光标查询 + 终端能力标识
+   │                   │
+   │                   ▼
+   │                Phase 16 (鼠标状态) ──► 鼠标按键状态跨调用连续性
+   │                   │
+   │                   ▼
+   │                Phase 17 (字符宽度) ──► CJK 双宽字符支持
+   │                   │
+   │                   ▼
+   │                Phase 18 (滚动缓冲区) ──► 回滚行数跟踪
    │
    └─► 每个 Phase 完成后回归测试前序功能
 ```
@@ -392,12 +416,18 @@ Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0
 - [Phase 1: 工程脚手架与依赖准备](01-scaffold.md)
 - [Phase 2: 注入器 + 双模式入口](02-injector-modes.md)
 - [Phase 3: DLL 核心 Hook 框架 + 状态快照](03-dll-framework.md)
-- [Phase 4: 输出链路](04-output-chain.md)（待写）
-- [Phase 5: 光标与缓冲区信息](05-cursor-buffer.md)（待写）
-- [Phase 6: 输入链路](06-input-chain.md)（待写）
-- [Phase 7: 模式与信号](07-mode-signal.md)（待写）
-- [Phase 8: 高级特性](08-advanced-features.md)（待写）
-- [Phase 9: 自保护](09-self-protection.md)（待写）
-- [Phase 10: 状态同步优化与稳定性](10-state-sync-stability.md)（待写）
-- [Phase 11: 卸载清理与多目标测试](11-unload-testing.md)（待写）
+- [Phase 4: 输出链路](04-output-chain.md)
+- [Phase 5: 光标与缓冲区信息](05-cursor-buffer.md)
+- [Phase 6: 输入链路](06-input-chain.md)
+- [Phase 7: 模式与信号](07-mode-signal.md)
+- [Phase 8: 高级特性](08-advanced-features.md)
+- [Phase 9: 自保护](09-self-protection.md)
+- [Phase 10: 状态同步优化与稳定性](10-state-sync-stability.md)
+- [Phase 11: 卸载清理与多目标测试](11-unload-testing.md)
 - [Phase 12: 子进程注入（CreateProcess Hook）](12-child-process-injection.md)
+- [Phase 13: VT 直通模式](13-vt-passthrough-mode.md)
+- [Phase 14: 虚拟 Console 状态](14-virtual-console-state.md)
+- [Phase 15: DSR/DA 终端属性查询](15-dsr-da-terminal-attributes.md)
+- [Phase 16: 鼠标坐标状态管理](16-mouse-coordinates.md)
+- [Phase 17: 字符宽度](17-character-width.md)
+- [Phase 18: 滚动缓冲区](18-scrollback-buffer.md)

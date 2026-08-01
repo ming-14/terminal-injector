@@ -151,15 +151,32 @@ void LineEditor::BeginSession() {
 //   toLineStart=true: X=0（Enter/Ctrl+C 换行后）
 //   toLineStart=false: X = m_startCursor.X + 行内显示偏移
 //   deltaY: Y 偏移（Enter/Ctrl+C 为 1，其他为 0）
+//
+// 软换行修正（2026-08-02 修复）：
+//   行内容显示宽度超过屏幕宽度时 WT 会把回显折成多行（软换行），
+//   光标绝对列 posWidth = m_startCursor.X + 光标前显示宽度 可能超过
+//   屏幕宽度 W。若 Y 只加 deltaY，Enter 后 ConsoleState 光标会停在
+//   折行前的行，cmd 后续输出（新 prompt）定位错行（典型现象：
+//   长命令回车后光标落在续行开头，覆盖命令回显）。
+//   修正：Y 加上 posWidth / W，X 取 posWidth % W。
 void LineEditor::SyncCursor(int deltaY, bool toLineStart) const {
+    // 屏幕宽度（ConsoleState 缓冲宽度缓存，WT 窗口宽度变化时同步）
+    const int screenW = ConsoleState::Instance().GetBufferSize().X;
+
+    // 光标前的绝对列位置（行首 X + 光标前显示宽度）
+    int posWidth = m_startCursor.X + DisplayWidth(m_line, 0, m_cursor);
+
     COORD c;
     if (toLineStart) {
         c.X = 0;
+        // Enter/Ctrl+C：光标在整行之后，折行数 = (startX + 整行宽 - 1) / W
+        int lineWidth = DisplayWidth(m_line, 0, m_line.size());
+        c.Y = static_cast<SHORT>(m_startCursor.Y + deltaY +
+                                 (m_startCursor.X + lineWidth - 1) / screenW);
     } else {
-        int offsetX = DisplayWidth(m_line, 0, m_cursor);
-        c.X = static_cast<SHORT>(m_startCursor.X + offsetX);
+        c.X = static_cast<SHORT>(posWidth % screenW);
+        c.Y = static_cast<SHORT>(m_startCursor.Y + deltaY + posWidth / screenW);
     }
-    c.Y = static_cast<SHORT>(m_startCursor.Y + deltaY);
     ConsoleState::Instance().SetCursorPosition(c);
 }
 
@@ -356,6 +373,28 @@ bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
         lineOut.clear();
         // 光标移到下一行行首（^C\r\n 后）
         SyncCursor(1, true);
+        return true;
+    }
+
+    // ---- Ctrl+Z：EOF（截断行并立即提交）----
+    // conhost 语义：从光标处截断当前输入（^Z 之后的字符丢弃），
+    // 回显 ^Z + 换行，截断行立即返回（ReadConsoleW 读到 EOF 行）
+    if (ch == 0x1a && (ctrlState & LEFT_CTRL_PRESSED)) {
+        // 取消 Tab 补全模式（行已提交，后续按键属新行）
+        m_tabCompleter->Cancel();
+
+        // 截断：丢弃光标之后的字符
+        m_line.erase(m_cursor);
+
+        if (echoEnabled) {
+            vtOut += "^Z\r\n";
+        }
+
+        // 光标移到下一行行首（^Z\r\n 后）
+        SyncCursor(1, true);
+
+        // 返回截断后的行内容（不含 ^Z）
+        lineOut = m_line;
         return true;
     }
 

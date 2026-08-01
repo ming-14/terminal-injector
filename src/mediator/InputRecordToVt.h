@@ -57,6 +57,11 @@ private:
     bool m_hasHighSurrogate = false;
     wchar_t m_highSurrogate = 0;
     DWORD m_highSurrogateCtrl = 0;  // 高代理事件的修饰键状态（Alt 影响 UTF-8 前缀）
+
+    // ---- 鼠标按键状态（Phase 16） ----
+    // 跨 ConvertMouse 调用跟踪上一次按键状态，用于检测按下/释放转换
+    // 替代静态变量 s_prevButtonState，避免多实例状态污染
+    DWORD m_prevButtonState = 0;
 };
 
 } // namespace terminjector

@@ -109,12 +109,20 @@ docs/*_output.txt
 *_result.txt
 *_output.txt
 *_buffer.txt
-tests/helpers/*_out.txt
-tests/helpers/*_cdb_out.txt
-tests/runners/*_output.txt
+tests/legacy/helpers/*_out.txt
+tests/legacy/helpers/*_cdb_out.txt
+tests/legacy/runners/*_output.txt
 # cdb 临时脚本（build/ 已忽略，这里覆盖根目录情况）
 cdb_*.txt
 analyze_*.txt
 disasm_*.txt
 verify_*.txt
 gs_*.txt
+
+# === 临时构建脚本 ===
+_build*
+_do_build*
+_check_env*
+_run_build*
+build_dll_temp*
+diag_*.cdb

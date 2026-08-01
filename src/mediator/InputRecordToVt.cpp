@@ -207,14 +207,13 @@ void InputRecordToVt::ConvertKey(const KEY_EVENT_RECORD& ke, std::string& out) {
 // 跨事件维护按键状态：MOUSE_EVENT_RECORD 的 dwButtonState 只含当前按下的键，
 // 需要对比前一次状态判断是按下还是释放
 void InputRecordToVt::ConvertMouse(const MOUSE_EVENT_RECORD& me, std::string& out) {
-    // 静态变量维护跨事件的按键状态（与 VtToInputRecord::ParseMouse 对应）
-    static DWORD s_prevButtonState = 0;
-
+    // 用实例字段 m_prevButtonState 替代静态变量，避免多实例状态污染
+    // （Phase 16 修复：ChildSession 的 InputRecordToVt 实例独立跟踪状态）
     DWORD cur = me.dwButtonState;
-    DWORD prev = s_prevButtonState;
-    s_prevButtonState = cur;
+    DWORD prev = m_prevButtonState;
+    m_prevButtonState = cur;
 
-    // 滚轮事件：MOUSE_WHEELED，dwButtonState 高字是增量
+    // 滚轮事件：MOUSE_WHEELED / MOUSE_HWHEELED，dwButtonState 高字是增量
     if (me.dwEventFlags & MOUSE_WHEELED) {
         // 高字正=上滚(64), 负=下滚(65)
         int wheel = static_cast<int>(cur) >> 16;
@@ -229,6 +228,22 @@ void InputRecordToVt::ConvertMouse(const MOUSE_EVENT_RECORD& me, std::string& ou
                       btn,
                       me.dwMousePosition.X + 1,
                       me.dwMousePosition.Y + 1);
+        out += buf;
+        return;
+    }
+
+    // 横向滚轮（MOUSE_HWHEELED）：右滚=66, 左滚=67
+    // SGR 1006 标准未定义横向滚轮编码，此处的 66/67 参考 xterm 扩展约定
+    if (me.dwEventFlags & MOUSE_HWHEELED) {
+        int wheel = static_cast<int>(cur) >> 16;
+        int btn = (wheel > 0) ? 66 : 67;
+        if (me.dwControlKeyState & SHIFT_PRESSED) btn |= 4;
+        if (me.dwControlKeyState & LEFT_ALT_PRESSED) btn |= 8;
+        if (me.dwControlKeyState & LEFT_CTRL_PRESSED) btn |= 16;
+
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "\x1b[<%d;%d;%dM",
+                      btn, me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1);
         out += buf;
         return;
     }

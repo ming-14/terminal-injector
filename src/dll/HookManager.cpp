@@ -71,4 +71,15 @@ void HookManager::UninstallAll() {
     LOG_INFO("All hooks uninstalled");
 }
 
+void HookManager::DisableAll() {
+    if (!s_installed) {
+        LOG_WARN("DisableAll: hooks not installed, skip");
+        return;
+    }
+    MH_DisableHook(MH_ALL_HOOKS);
+    // 不清除 s_entries，保留 trampoline 供 residual ReadDetour 线程安全退出
+    // 不设 s_installed=false，DLL_PROCESS_DETACH 中 UninstallAll() 会做最终清理
+    LOG_INFO("All hooks disabled (trampolines preserved)");
+}
+
 } // namespace terminjector

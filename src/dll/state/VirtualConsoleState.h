@@ -53,9 +53,23 @@ public:
     // === WT 反向同步接口 ===
     void ApplyWtResize(int32_t cols, int32_t rows);
     void ApplyWtCursorReport(int32_t col, int32_t row);
+    // Phase 15：应用 DA 报告（终端能力标识）
+    void ApplyWtDaReport(int32_t caps);
+
+    // === 终端能力查询 ===
+    int32_t GetTerminalCaps() const { return m_terminalCaps.load(); }
 
     // === 是否已初始化 ===
     bool IsInitialized() const { return m_initialized.load(); }
+
+    // ---- 滚动缓冲区（Phase 18） ----
+    // 获取当前滚动计数（内容滚出视口顶部的行数）
+    int32_t GetScrollbackLines() const;
+    // 设置用户请求的缓冲区高度（SetConsoleScreenBufferSize 调用）
+    // 当 WT resize 时，以此值为下限保留缓冲区高度
+    void SetUserBufferHeight(int32_t height);
+    // 模式切换时重置滚动计数
+    void ResetScrollback();
 
 private:
     VirtualConsoleState() = default;
@@ -65,7 +79,12 @@ private:
     COORD m_bufferSize{80, 25};
     SMALL_RECT m_windowRect{0, 0, 79, 24};
     std::atomic<WORD> m_attributes{FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED};
+    std::atomic<int32_t> m_terminalCaps{0};  // Phase 15：终端能力标识（DA 响应）
     std::atomic<bool> m_initialized{false};
+
+    // ---- 滚动缓冲区（Phase 18） ----
+    int32_t m_scrollbackLines = 0;       // 内容滚出视口顶部的行数
+    int32_t m_userBufferHeight = 0;      // 用户通过 SetConsoleScreenBufferSize 请求的缓冲区高度
 };
 
 } // namespace terminjector

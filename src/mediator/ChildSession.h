@@ -40,7 +40,8 @@ public:
     using ExitCallback        = std::function<void(uint32_t childPid)>;
     // 收到 ModeChange 时调用（mediator 据此发 VT 鼠标报告启用/禁用序列给 WT）
     // 子进程 SetConsoleMode(ENABLE_MOUSE_INPUT) → DLL 发 ModeChange → 本回调
-    using ModeChangeCallback  = std::function<void(uint32_t inputMode, uint32_t outputMode)>;
+    // fromChild=true：子进程的 ModeChange 不应影响鼠标报告状态
+    using ModeChangeCallback  = std::function<void(uint32_t inputMode, uint32_t outputMode, bool fromChild)>;
     // 收到 ModeSwitchNotify 时调用（mediator 据此记录 VT 输入模式状态）
     // 子进程 SetConsoleMode 检测到 ENABLE_VIRTUAL_TERMINAL_INPUT 标志变化 → 本回调
     using ModeSwitchNotifyCallback = std::function<void(uint32_t vtInputMode, uint32_t vtOutputMode)>;
@@ -62,6 +63,13 @@ public:
 
     // 转发 VtInput 给子进程 DLL（Phase 6+ 使用）
     void SendVtInput(const uint8_t* data, size_t len);
+
+    // 转发 ResizeNotify 给子进程 DLL（Phase 19）
+    // WT 窗口尺寸变化时 mediator 调用此方法通知子进程 DLL，
+    // 子进程 DLL 更新 ConsoleState 的缓冲区/窗口尺寸。
+    // TUI 程序（如 Textual）在子进程中运行，需要 resize 通知来调整布局。
+    void SendResize(uint16_t cols, uint16_t rows,
+                    uint16_t bufferCols, uint16_t bufferRows);
 
     // 接收线程是否已退出（RecvLoop 结束）
     bool HasExited() const { return m_exited.load(); }

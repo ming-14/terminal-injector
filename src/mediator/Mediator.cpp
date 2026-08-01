@@ -59,22 +59,37 @@ bool GetWtCursorPos(uint16_t& cursorX, uint16_t& cursorY) {
 //   目标进程之前的内容）。把 WT 光标移到 ConHost 坐标会让后续输出偏右。
 //   DLL 侧改为用 ConPTY 当前光标对齐缓存（见 HelloAckPayload.cursorX/Y），
 //   cmd 后续输出自然接在 WT 当前位置之后。
+//
+// 将 ConPTY 缓冲区 resize 到 srWindow 尺寸（即 WT 窗口当前字符尺寸）。
+// 原因：ConPTY 缓冲区初始化时可能小于 WT 窗口（如 120x30 vs 160x40），
+// 导致 TUI 程序（如 Textual）查询到的缓冲区尺寸为 120x30，
+// 渲染只占左半窗口，右半显示旧缓冲区内容。
+// 通过 Win32 API SetConsoleScreenBufferSize + SetConsoleWindowInfo
+// 将缓冲区扩展为 WT 窗口大小，使 TUI 程序可以使用全窗口宽度。
+//
+// 注意：使用 srWindow（实际可见窗口）而非 dwMaximumWindowSize（ConPTY 默认最大值）
+// 因为 dwMaximumWindowSize 在 ConPTY 中可能固定为 120x30，不反映实际 WT 窗口尺寸。
+// \x1b[8;rows;colst VT 序列在 ConPTY 中只改窗口尺寸不改缓冲区尺寸，
+// 因此使用 Win32 API 确保缓冲区尺寸也同步更新。
 void ApplySnapshotToWt(const protocol::HelloPayload& hello) {
-    std::string vt;
-    char buf[64];
-
-    // 设置窗口尺寸（\x1b[8;<rows>;<cols>t）
-    // 用可见窗口高度（windowRows）而非缓冲区高度（bufferRows=9001），
-    // 否则会把 WT 窗口撑到 9001 行，后续 GetWtWindowSize 读到错误的 9001
-    int n = std::snprintf(buf, sizeof(buf),
-        "\x1b[8;%u;%ut", hello.windowRows, hello.bufferCols);
-    vt.append(buf, n);
-
-    // 写到 stdout（WT 收到并渲染）
+    (void)hello;
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD written = 0;
-    WriteFile(hOut, vt.data(), static_cast<DWORD>(vt.size()), &written, nullptr);
-    LOG_INFO("Applied snapshot to WT: %s", vt.c_str());
+    CONSOLE_SCREEN_BUFFER_INFO csbi{};
+    if (GetConsoleScreenBufferInfo(hOut, &csbi)) {
+        // 使用 srWindow 反映 WT 窗口当前实际可见字符尺寸
+        SHORT cols = static_cast<SHORT>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+        SHORT rows = static_cast<SHORT>(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+        if (cols > 0 && rows > 0) {
+            // 第一步：先设置窗口大小为当前尺寸
+            SMALL_RECT win = {0, 0, static_cast<SHORT>(cols - 1), static_cast<SHORT>(rows - 1)};
+            SetConsoleWindowInfo(hOut, TRUE, &win);
+            // 第二步：设置缓冲区尺寸（窗口先设好，避免缓冲区缩小被拒绝）
+            COORD bufSize = {cols, rows};
+            SetConsoleScreenBufferSize(hOut, bufSize);
+            LOG_INFO("ApplySnapshotToWt: buffer resized to %dx%d (srWindow) via Win32 API",
+                     cols, rows);
+        }
+    }
 }
 
 } // namespace
@@ -282,9 +297,48 @@ void Mediator::BridgeLoop() {
                  col, row, sent, pkt.size());
     });
 
+    // Phase 15：设置 VtParser DA 报告回调
+    // 当 WT 响应 DA 查询时，发送 WtStateReport(type=2) 给 DLL 存储终端能力
+    m_vtParser.SetDaReportCallback([this](int caps) {
+        protocol::WtStateReportPayload wt{};
+        wt.type = 2;  // da_report
+        wt.cols = caps;
+        wt.rows = 0;
+        auto pkt = protocol::Serialize(protocol::MessageType::WtStateReport, &wt, sizeof(wt));
+        const int sent = m_transport->Send(pkt.data(), pkt.size());
+        LOG_INFO("WtStateReport DA sent: caps=%d (sent=%d/%zu)",
+                 caps, sent, pkt.size());
+    });
+
     // Phase 5：启动 WT 尺寸监听
-    // WT 窗口 resize 时封装 ResizeNotify 发给 DLL，DLL 更新 ConsoleState
+    // WT 窗口 resize 时：
+    //   1. 用 Win32 API 实际 resize ConPTY 缓冲区（使 VT 输出填满整个 WT 窗口）
+    //   2. 封装 ResizeNotify 发给 DLL，DLL 更新 ConsoleState
+    //   3. 发送 WtStateReport 给 VirtualConsoleState
+    //   4. 转发 ResizeNotify 到所有活跃子进程
     m_sizeWatcher.Start([this](int cols, int rows, int bufCols, int bufRows) {
+        // 第一步：用 Win32 API 实际 resize ConPTY 缓冲区
+        // 若未 resize，ConPTY 缓冲区保持旧尺寸，VT 输出只填充左半窗口，
+        // 右半显示旧缓冲区内容（"刷屏"）。
+        //
+        // 顺序：先 SetConsoleScreenBufferSize 增大缓冲区，再 SetConsoleWindowInfo 设窗口。
+        // 若反过来，窗口可能设得比缓冲区大（如 156x42 窗口 vs 120x30 缓冲区），
+        // SetConsoleWindowInfo 会失败，导致 resize 不生效。
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hOut != INVALID_HANDLE_VALUE && hOut != nullptr) {
+            // 先设缓冲区（确保缓冲区至少和窗口一样大）
+            // 注意：windows.h 的 max 宏会与 std::max 冲突，手动比较
+            SHORT minBufCols = static_cast<SHORT>((bufCols > cols) ? bufCols : cols);
+            SHORT minBufRows = static_cast<SHORT>((bufRows > rows) ? bufRows : rows);
+            COORD bufSize = {minBufCols, minBufRows};
+            SetConsoleScreenBufferSize(hOut, bufSize);
+            // 再设窗口
+            SMALL_RECT win = {0, 0, static_cast<SHORT>(cols - 1), static_cast<SHORT>(rows - 1)};
+            SetConsoleWindowInfo(hOut, TRUE, &win);
+            LOG_INFO("WtSizeWatcher callback: ConPTY buffer resized to %dx%d win=%dx%d via Win32 API",
+                     minBufCols, minBufRows, cols, rows);
+        }
+
         protocol::ResizePayload p{};
         p.cols       = static_cast<uint16_t>(cols);
         p.rows       = static_cast<uint16_t>(rows);
@@ -304,6 +358,22 @@ void Mediator::BridgeLoop() {
         const int wtSent = m_transport->Send(wtPkt.data(), wtPkt.size());
         LOG_INFO("WtStateReport resize sent: cols=%d rows=%d (sent=%d/%zu)",
                  cols, rows, wtSent, wtPkt.size());
+
+        // Phase 19：转发 ResizeNotify 到所有活跃子进程
+        // TUI 程序（如 Textual）在子进程中运行，需要 WT 尺寸变化通知
+        // 才能调整布局。若不转发，子进程 TUI 在 WT resize 时不会刷新。
+        {
+            std::lock_guard<std::mutex> lock(m_childMutex);
+            for (auto& session : m_childSessions) {
+                if (session->IsActive()) {
+                    session->SendResize(
+                        static_cast<uint16_t>(cols),
+                        static_cast<uint16_t>(rows),
+                        static_cast<uint16_t>(bufCols),
+                        static_cast<uint16_t>(bufRows));
+                }
+            }
+        }
     });
 
     // stdin→pipe 独立线程（ReadFile 阻塞，pipe 断开时主线程退出，
@@ -386,8 +456,19 @@ void Mediator::BridgeLoop() {
 // 与 Windows ENABLE_MOUSE_INPUT 语义更接近。1006h 为 SGR 格式（坐标从 0 开始）。
 //
 // 幂等性：只在标志变化时发送，避免重复发 VT 序列
-void Mediator::OnModeChange(uint32_t inputMode, uint32_t outputMode) {
+void Mediator::OnModeChange(uint32_t inputMode, uint32_t outputMode, bool fromChild) {
     (void)outputMode;  // 输出模式不影响鼠标报告
+
+    // 子进程的 ModeChange 不应影响鼠标报告状态。
+    // 子进程（如 Textual/python）使用 VT 模式，通过 DECSET 序列控制鼠标报告，
+    // 若子进程 ModeChange 关闭鼠标报告，会覆盖父进程已开启的鼠标报告，
+    // 导致 WT 不再发送 SGR 1006 鼠标事件，子进程无法接收鼠标。
+    // 父进程（cmd.exe）开启鼠标报告后应保持，子进程通过 DECSET 自行控制。
+    if (fromChild) {
+        LOG_INFO("OnModeChange: from child, inputMode=0x%lx, skipping mouse report change", inputMode);
+        m_lastInputMode = inputMode;
+        return;
+    }
 
     const uint32_t ENABLE_MOUSE_INPUT_FLAG = 0x0010;
     bool wantMouse = (inputMode & ENABLE_MOUSE_INPUT_FLAG) != 0;
@@ -442,9 +523,10 @@ void Mediator::WriteStdoutVt(const char* data, size_t len) {
 // ============================================================
 
 void Mediator::OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode) {
-    bool vtMode = (vtInputMode != 0);
-    m_vtInputMode.store(vtMode);
-    LOG_INFO("OnModeSwitchNotify: VT input mode=%d (vtOutput=%d)",
+    // LIM-004 清理：VT 输入直通/翻译的决策在 DLL 侧（DllRecvLoop VtInput 分支
+    // 按 ENABLE_VIRTUAL_TERMINAL_INPUT 选择 raw 直通或 INPUT_RECORD 翻译），
+    // mediator 只转发，此处仅记录日志
+    LOG_INFO("OnModeSwitchNotify: VT input mode=%u (vtOutput=%u)",
              vtInputMode, vtOutputMode);
 }
 
@@ -465,7 +547,7 @@ void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid) {
         [this](const uint8_t* data, size_t len) { WriteChildVtOutput(data, len); },
         [this](uint32_t cp, uint32_t pp) { OnChildProcessNotify(cp, pp); },
         [this](uint32_t cp) { OnChildExit(cp); },
-        [this](uint32_t in, uint32_t out) { OnModeChange(in, out); },
+        [this](uint32_t in, uint32_t out, bool fromChild) { OnModeChange(in, out, fromChild); },
         [this](uint32_t vtIn, uint32_t vtOut) { OnModeSwitchNotify(vtIn, vtOut); });
     session->Start();
 

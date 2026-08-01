@@ -9,7 +9,11 @@
 //  3.5 等待 s_active_read_detours 归零（2s 超时强制继续）
 //      关键：Read 类 Detour 内 pass-through 调 *_orig（trampoline）前必须先 LeaveReadDetour，
 //      否则 UninstallAll 释放 trampoline 时线程还在调用 → AV 0xC0000005
-//   4. HookManager.UninstallAll   卸载所有 Hook（之后 Console API 走原 API）
+//      2026-08-01 修复：改为 DisableAll（保留 trampoline），即使超时也不再 AV
+//   4. HookManager.DisableAll   禁用所有 Hook（保留 trampoline）
+//      之后 Console API 走原 API，不再进 Detour
+//      （UninstallAll 会释放 trampoline，→ ReadDetour 线程 AV 崩溃）
+//      DETACH 中 UninstallAll 做真正清理
 //   5. 恢复 ConsoleState          用真实 API 读 ConHost 状态写回缓存
 //      （目标程序下次 GetConsoleScreenBufferInfo 拿到 ConHost 真值而非过期缓存）
 //   6. 显示原 Console 窗口        Phase 9 隐藏过，恢复可见
@@ -128,9 +132,12 @@ void Unloader::DoUnload() {
         }
     }
 
-    // 4. 卸载所有 Hook（恢复原 API 字节）
+    // 4. 禁用所有 Hook（保留 trampoline，不释放）
     //    之后目标程序调 Console API 直接走系统 API，不再进 Detour
-    HookManager::UninstallAll();
+    //    用 DisableAll 而非 UninstallAll：MH_RemoveHook 会释放 trampoline
+    //    内存，若 ReadDetour 线程尚未完全退出，后续调用 *_orig 会 AV 崩溃
+    //    （0xC0000005）。DLL_PROCESS_DETACH 中 UninstallAll 做最终清理。
+    HookManager::DisableAll();
 
     // 5. 恢复 ConsoleState 到真实 ConHost 状态
     //    Hook 已卸载，GetConsoleScreenBufferInfo 直接读 ConHost 真值

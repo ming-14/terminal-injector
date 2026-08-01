@@ -168,6 +168,29 @@ static void ConvertRecordsFromAnsi(INPUT_RECORD* records, DWORD count) {
 }
 
 // ============================================================
+// 输入事件过滤（BUG-005 修复）
+// ============================================================
+// ConHost 语义：输入模式的 ENABLE_WINDOW_INPUT 未设置时，读取接口
+// 不返回 WINDOW_BUFFER_SIZE_EVENT（事件丢弃，读取继续）。
+// ReadConsoleInputW/A、PeekConsoleInputW/A 共用。
+static size_t FilterByInputMode(INPUT_RECORD* buf, size_t n) {
+    DWORD mode = ConsoleState::Instance().GetInputMode();
+    bool filterResize = (mode & ENABLE_WINDOW_INPUT) == 0;
+    if (!filterResize) return n;
+
+    size_t kept = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (buf[i].EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            LOG_INFO("InputHooks: drop WINDOW_BUFFER_SIZE_EVENT (ENABLE_WINDOW_INPUT not set)");
+            continue;
+        }
+        if (kept != i) buf[kept] = buf[i];
+        ++kept;
+    }
+    return kept;
+}
+
+// ============================================================
 // ReadConsoleInputW Hook（核心）
 // ============================================================
 // 阻塞读按键/鼠标事件：从 InputQueue 出队
@@ -204,6 +227,10 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
     // 阻塞循环：从队列出队，空则等待事件信号
     while (true) {
         size_t n = queue.DequeueRecords(buf, static_cast<size_t>(count));
+
+        // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
+        n = FilterByInputMode(buf, n);
+
         if (n > 0) {
             *read = static_cast<DWORD>(n);
             if (log) {
@@ -270,6 +297,10 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
     auto& queue = InputQueue::Instance();
     while (true) {
         size_t n = queue.DequeueRecords(buf, static_cast<size_t>(count));
+
+        // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
+        n = FilterByInputMode(buf, n);
+
         if (n > 0) {
             ConvertRecordsToAnsi(buf, static_cast<DWORD>(n));
             *read = static_cast<DWORD>(n);
@@ -302,8 +333,12 @@ BOOL WINAPI PeekConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
         return PeekConsoleInputW_orig(h, buf, count, read);
     }
 
-    *read = static_cast<DWORD>(
-        InputQueue::Instance().PeekRecords(buf, static_cast<size_t>(count)));
+    size_t n = InputQueue::Instance().PeekRecords(buf, static_cast<size_t>(count));
+
+    // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
+    n = FilterByInputMode(buf, n);
+
+    *read = static_cast<DWORD>(n);
     return TRUE;
 }
 
@@ -324,6 +359,10 @@ BOOL WINAPI PeekConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     size_t n = InputQueue::Instance().PeekRecords(buf, static_cast<size_t>(count));
+
+    // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
+    n = FilterByInputMode(buf, n);
+
     if (n > 0) {
         ConvertRecordsToAnsi(buf, static_cast<DWORD>(n));
     }
@@ -468,13 +507,54 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
     auto& state = ConsoleState::Instance();
     bool echoEnabled = (state.GetInputMode() & ENABLE_ECHO_INPUT) != 0;
 
+    wchar_t* wbuf = static_cast<wchar_t*>(buf);
+
     auto& queue = InputQueue::Instance();
+
+    // ---- 非行编辑模式（ENABLE_LINE_INPUT 未设置）：直接返回字符 ----
+    // Textual 等 TUI 程序通过 ReadConsoleW 读取单字符（如 Python msvcrt.getwch()），
+    // 不使用 LineEditor 行编辑。若走 LineEditor 路径，Ctrl+Q(0x11) 等控制字符会
+    // 被追加到行缓冲区永不返回，导致程序无法响应退出快捷键。
+    if ((state.GetInputMode() & ENABLE_LINE_INPUT) == 0) {
+        if (log) LOG_INFO("ReadConsoleW_Detour: #%d non-line-input mode, reading character directly", callId);
+        while (true) {
+            INPUT_RECORD rec;
+            size_t n = queue.DequeueRecords(&rec, 1);
+            if (n > 0) {
+                if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+                    wchar_t wc = rec.Event.KeyEvent.uChar.UnicodeChar;
+                    if (wc != L'\0') {
+                        wbuf[0] = wc;
+                        *read = 1;
+                        if (log) LOG_INFO("ReadConsoleW_Detour: #%d non-line-input return wc=0x%x", callId, wc);
+                        return TRUE;
+                    }
+                }
+                // 非 KEY_EVENT 或空字符：跳过，继续读下一个
+                continue;
+            }
+            // 队列空：检查 transport 断开或卸载
+            if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                if (log) LOG_INFO("ReadConsoleW_Detour: #%d non-line-input transport disconnected/unloading, pass-through to orig", callId);
+                readGuard.release();
+                return ReadConsoleW_orig(h, buf, len, read, ctrl);
+            }
+            WaitForSingleObject(queue.GetWaitHandle(), 100);
+        }
+    }
+
+    // ---- 行编辑模式（ENABLE_LINE_INPUT 已设置）：LineEditor 行编辑 ----
     auto& editor = LineEditor::Instance();
     // 开始新的行编辑会话：重置行缓冲、光标、历史导航状态
     editor.BeginSession();
     LOG_INFO("ReadConsoleW_Detour: BeginSession done, echo=%d", echoEnabled);
 
-    wchar_t* wbuf = static_cast<wchar_t*>(buf);
+    // 行编辑临时变量（提升到函数作用域避免与 TLS 基址缓存栈布局冲突，
+    // 详见 Phase 11 诊断：std::wstring/string 在循环内构造时其 SSO 缓冲区
+    // 可能覆盖编译器缓存的 TLS 基址 [rbp-71h]，导致 HookReentryGuard 析构
+    // 时 --t_hookDepth 写入错误地址，损坏 GS cookie 引发 STATUS_STACK_BUFFER_OVERRUN）
+    std::wstring lineOut;
+    std::string vtOut;
 
     // 行编辑主循环：dequeue 按键 → LineEditor 处理 → 回显 → 行完成返回
     while (true) {
@@ -511,9 +591,11 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
             continue;
         }
 
+        // 重用临时变量（清空内容，保留 SSO 缓冲区，避免在循环内反复构造/析构）
+        lineOut.clear();
+        vtOut.clear();
+
         // 交给 LineEditor 处理按键
-        std::wstring lineOut;
-        std::string vtOut;
         bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
 
         LOG_INFO("ReadConsoleW_Detour: ProcessKey done=%d vtLen=%zu lineLen=%zu",
@@ -583,8 +665,45 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
     bool echoEnabled = (state.GetInputMode() & ENABLE_ECHO_INPUT) != 0;
 
     auto& queue = InputQueue::Instance();
+
+    // ---- 非行编辑模式（ENABLE_LINE_INPUT 未设置）：直接返回字符 ----
+    // 同 ReadConsoleW_Detour 非行编辑模式处理
+    if ((state.GetInputMode() & ENABLE_LINE_INPUT) == 0) {
+        if (log) LOG_INFO("ReadConsoleA_Detour: #%d non-line-input mode, reading character directly", callId);
+        while (true) {
+            INPUT_RECORD rec;
+            size_t n = queue.DequeueRecords(&rec, 1);
+            if (n > 0) {
+                if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+                    wchar_t wc = rec.Event.KeyEvent.uChar.UnicodeChar;
+                    if (wc != L'\0') {
+                        // wchar_t → ANSI 单字节
+                        char ach = 0;
+                        WideCharToMultiByte(CP_ACP, 0, &wc, 1, &ach, 1, nullptr, nullptr);
+                        *static_cast<char*>(buf) = ach;
+                        *read = 1;
+                        if (log) LOG_INFO("ReadConsoleA_Detour: #%d non-line-input return ach=0x%02x", callId, static_cast<uint8_t>(ach));
+                        return TRUE;
+                    }
+                }
+                continue;
+            }
+            if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                if (log) LOG_INFO("ReadConsoleA_Detour: #%d non-line-input transport disconnected/unloading, pass-through to orig", callId);
+                readGuard.release();
+                return ReadConsoleA_orig(h, buf, len, read, ctrl);
+            }
+            WaitForSingleObject(queue.GetWaitHandle(), 100);
+        }
+    }
+
+    // ---- 行编辑模式（ENABLE_LINE_INPUT 已设置）：LineEditor 行编辑 ----
     auto& editor = LineEditor::Instance();
     editor.BeginSession();
+
+    // 行编辑临时变量（提升到函数作用域避免与 TLS 基址缓存栈布局冲突，同 ReadConsoleW_Detour）
+    std::wstring lineOut;
+    std::string vtOut;
 
     // 行编辑主循环：与 ReadConsoleW_Detour 一致，仅最后编码转换不同
     while (true) {
@@ -606,8 +725,8 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
             continue;
         }
 
-        std::wstring lineOut;
-        std::string vtOut;
+        lineOut.clear();
+        vtOut.clear();
         bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
 
         // VT 回显发送给 mediator
@@ -687,10 +806,35 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
     auto& state = ConsoleState::Instance();
     DWORD inMode = state.GetInputMode();
     if ((inMode & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0) {
-        // 非透传模式：调原 API（cmd 通常用 ReadConsoleInput 而非 ReadFile(stdin)）
-        if (log) LOG_INFO("ReadFile_Detour: #%d non-VT mode (inMode=0x%x), pass-through orig", callId, inMode);
-        readGuard.release();
-        return ReadFile_orig(h, buf, len, read, ov);
+        // 非透传模式：从记录队列消费 KEY_EVENT，提取 UnicodeChar 转换为字节返回
+        // Textual 等 TUI 应用通过 ReadFile(stdin) 读输入，不走 ReadConsoleInput，
+        // 而 DllRecvLoop 翻译后的 INPUT_RECORD 在 record 队列中，不可 pass-through 到 orig
+        if (log) LOG_INFO("ReadFile_Detour: #%d non-VT mode (inMode=0x%x), reading from record queue", callId, inMode);
+        auto& queue = InputQueue::Instance();
+        while (true) {
+            INPUT_RECORD rec = {};
+            size_t n = queue.DequeueRecords(&rec, 1);
+            if (n > 0) {
+                if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+                    wchar_t wc = rec.Event.KeyEvent.uChar.UnicodeChar;
+                    if (wc != L'\0') {
+                        *static_cast<uint8_t*>(buf) = static_cast<uint8_t>(wc & 0xFF);
+                        *read = 1;
+                        if (log) LOG_INFO("ReadFile_Detour: #%d non-VT return byte=0x%02x", callId, static_cast<uint8_t>(wc & 0xFF));
+                        return TRUE;
+                    }
+                }
+                // 非 KEY_EVENT（如 MOUSE_EVENT）或空字符：跳过，继续读下一个
+                continue;
+            }
+            // 队列空：检查 transport 断开或卸载
+            if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                if (log) LOG_INFO("ReadFile_Detour: #%d non-VT transport disconnected/unloading, pass-through to orig", callId);
+                readGuard.release();
+                return ReadFile_orig(h, buf, len, read, ov);
+            }
+            WaitForSingleObject(queue.GetWaitHandle(), 100);
+        }
     }
 
     // 透传模式：从原始字节队列读
