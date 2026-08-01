@@ -173,14 +173,15 @@ struct ModeSwitchNotifyPayload {
 static_assert(sizeof(ModeSwitchNotifyPayload) == 8,
               "ModeSwitchNotifyPayload 大小应为 8 字节");
 
-// WtStateReport 消息 payload（中介 -> DLL，Phase 14）
+// WtStateReport 消息 payload（中介 -> DLL，Phase 14/15）
 // 中介向 DLL 报告 WT 侧真实状态，用于虚拟 Console 状态反向同步
 // type=0: resize（cols=new cols, rows=new rows）
 // type=1: cursor_report 响应 DSR CPR（cols=col, rows=row，1-based VT 坐标）
+// type=2: da_report 响应 Primary DA 查询（cols=caps, rows=0，终端能力标识）
 struct WtStateReportPayload {
-    uint32_t type;       // 0=resize, 1=cursor_report
-    int32_t cols;        // resize: 新列数；cursor: 列
-    int32_t rows;        // resize: 新行数；cursor: 行
+    uint32_t type;       // 0=resize, 1=cursor_report, 2=da_report
+    int32_t cols;        // resize: 新列数；cursor: 列；da: 终端能力标识
+    int32_t rows;        // resize: 新行数；cursor: 行；da: 0
 };
 static_assert(sizeof(WtStateReportPayload) == 12,
               "WtStateReportPayload 大小应为 12 字节");

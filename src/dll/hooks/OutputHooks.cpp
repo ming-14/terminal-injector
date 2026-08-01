@@ -145,10 +145,13 @@ BOOL WINAPI WriteConsoleW_Detour(
         reinterpret_cast<const wchar_t*>(lpBuffer), nNumberOfCharsToWrite, attr);
     SendToMediator(vt.data(), vt.size());
 
-    // 更新光标缓存（解析 \r \n \b \t 控制字符，行末换行，Phase 5 补全滚屏）
+    // 更新光标缓存（解析 \r \n \b \t 控制字符，行末按输出模式 wrap 或停留）
+    // LIM-003 修复：不再硬编码 wrapAtEol=true，
+    // ENABLE_WRAP_AT_EOL_OUTPUT 未设置时光标停在行末不换行
+    bool wrapAtEol = (state.GetOutputMode() & ENABLE_WRAP_AT_EOL_OUTPUT) != 0;
     state.AdvanceCursor(reinterpret_cast<const wchar_t*>(lpBuffer),
                         static_cast<int>(nNumberOfCharsToWrite),
-                        /*wrapAtEol=*/true);
+                        wrapAtEol);
 
     // Phase 14：同步更新 VirtualConsoleState 光标
     VirtualConsoleState::Instance().AdvanceCursor(

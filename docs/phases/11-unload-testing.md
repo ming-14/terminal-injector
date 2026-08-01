@@ -1,6 +1,6 @@
 # Phase 11: 卸载清理与多目标测试
 
-> 本 Phase 实现干净的卸载机制，并执行全量多目标测试。完成后，关闭 WT 标签页或主动卸载时，DLL 能解除所有 Hook、恢复目标程序原 Console 行为、释放资源。同时对 cmd/powershell/python/opencode/vim/less 等目标程序进行全面验证。
+> 本 Phase 实现干净的卸载机制，并执行反复注入/卸载验证。关闭 WT 标签页或主动卸载时，DLL 能解除所有 Hook、恢复目标程序原 Console 行为、释放资源。
 
 ---
 
@@ -8,411 +8,206 @@
 
 1. **管道断开检测**：DLL 接收线程检测到 `Recv` 返回 0 或错误时，触发卸载流程
 2. **卸载流程**：
-   - `HookManager::UninstallAll()`（DisableHook + RemoveHook）
+   - `HookManager::DisableAll()`（先禁用 Hook，保留 trampoline 避免 AV）
+   - `HookManager::UninstallAll()`（DLL_PROCESS_DETACH 时执行，最终释放 trampoline）
    - 恢复 `ConsoleState` 到真实 ConHost 状态（调 `_orig` 读取）
    - 释放 `InputQueue`、`fakeWaitHandle`、`HandleRegistry` 等资源
    - 通过 `FreeLibraryAndExitThread` 安全卸载 DLL（避免 DllMain 中 FreeLibrary 死锁）
-3. **mediator 退出**：管道断开后清理 `WtSizeWatcher`、桥接线程，退出码 0
-4. **多目标测试矩阵**：对 7 类目标程序逐项验证
-5. **手动测试清单**与**自动化脚本**
-6. 验收：所有目标程序在所有维度通过
+3. **ReadDetourGuard**：跟踪活跃的 ReadDetour 线程，确保卸载前所有 Detour 已退出
+4. **远程 FreeLibrary**：DLL 内 LoadCount 因 cmd 主线程 LdrpThreadBlob 不能归零，需 mediator 远程线程调 FreeLibrary
+5. **反复注入/卸载 10 次**：无泄漏、无崩溃
 
 ---
 
-## 2. 前置依赖
+## 2. 当前状态（2026-08-01）
 
-- Phase 10 完成（性能与稳定性达标）
+### 已完成
+- ✅ 单次卸载流程（Unloader.h/.cpp、DllRecvLoop.cpp、Mediator.cpp）
+- ✅ HookManager::DisableAll()（保留 trampoline 避免 AV）
+- ✅ ReadDetourGuard（跟踪活跃 ReadDetour 线程，确保卸载前退出）
+- ✅ 远程 FreeLibrary（mediator 收到 UnloadComplete 后远程线程调 FreeLibrary）
+- ✅ Release CRT 链接（避免 Debug CRT 卸载后内存损坏）
+- ✅ 验收 1-3 全部通过（DLL 模块卸载、cmd 可交互、Hook 字节恢复）
+
+### 未完成
+- ❌ 验收 4（反复注入/卸载 10 次）：循环 2 cmd 崩溃退出（STATUS_STACK_BUFFER_OVERRUN 0xC0000409）
 
 ---
 
-## 3. 涉及文件清单
+## 3. 崩溃诊断
+
+### 3.1 现象
 
 ```
-src/dll/
-├── Unloader.h / .cpp                 # 新建：卸载流程
-├── dllmain.cpp                       # 修改：DETACH 调用 Unloader
-└── DllRecvLoop.cpp                   # 修改：检测断开触发卸载
-src/mediator/
-└── Mediator.cpp                      # 修改：管道断开清理
-tests/
-├── targets/                          # 测试目标脚本
-│   ├── test_cmd.bat
-│   ├── test_powershell.ps1
-│   ├── test_python_tui.py
-│   └── test_opencode.sh
-├── runners/
-│   └── run_all.py                    # 自动化测试
-└── manual/
-    └── checklist.md                  # 手动测试清单
+循环 2/10：
+  [info] 循环 2 握手成功
+  [unload] 关闭 WT 窗口...
+  [unload] mediator 已退出
+  [unload] 等待 DLL 卸载...
+  [unload] cmd 进程在卸载等待期间退出！elapsed=1.62s exitcode=0xc0000409
 ```
+
+### 3.2 崩溃位置
+
+```
+# Child-SP          RetAddr           Call Site
+00 0000007a`9b9ff688 00007ff8`b6dbb72f injected!__report_gsfailure+0x5
+01 0000007a`9b9ff690 00007ff6`c5518027 injected!terminjector::hooks::ReadConsoleW_Detour+0x5df
+02 0000007a`9b9ff7d0 00007ff6`c550d31b cmd!ReadBufFromConsole+0x127
+```
+
+- **异常码**：0xC0000409（STATUS_STACK_BUFFER_OVERRUN）
+- **子码**：0x2（FAST_FAIL_STACK_COOKIE_CHECK_FAILURE）
+- **GS cookie**：期望 `0000b8f84fb6f8a7`，实际 `ffffffffffffffff`
+- **源文件**：`InputHooks.cpp:557`（ReadConsoleW_Detour 的 `__security_check_cookie`）
+
+### 3.3 根因分析
+
+GS cookie 在 `[rbp-1]` 被完全覆盖为 `0xFFFFFFFFFFFFFFFF`。此模式表明栈上某个局部变量写入越界。
+
+**已尝试的修复**：
+1. 将 `std::wstring lineOut` 和 `std::string vtOut` 从循环内提升到函数作用域，避免循环内反复构造/析构导致 SSO 缓冲区与 TLS 基址缓存栈布局冲突
+2. 改用 Release CRT 链接（Debug CRT 在卸载后内存管理不一致）
+
+**修复后崩溃仍然发生**，说明根因不完全在此。`0xFFFFFFFFFFFFFFFF` 写入模式暗示可能是：
+- 栈上某个局部变量未初始化，编译器将其置于 GS cookie 位置
+- 某处 `memset(ptr, -1, size)` 或类似操作越界
+- 栈上 `std::string`/`std::wstring` 的 SSO 缓冲区大小计算错误导致覆盖
+
+### 3.4 关键观察
+
+- 单次卸载（验收 1-3）始终通过，仅在循环 2+ 崩溃 → 可能与首次注入/卸载后的残留状态有关
+- 崩溃时 cmd 主线程正在 `ReadConsoleW_Detour` 的行编辑主循环中
+- 后台线程 4（KickStartBlockedReaders）仍在运行，试图写 `WriteConsoleInputW` 唤醒阻塞的读取器
+- 线程 5（RingBufferLogger）和线程 6（RecvLoopMain）仍在运行
 
 ---
 
-## 4. 详细任务
+## 4. 卸载流程详解
 
-### 4.1 管道断开检测
+### 4.1 管道断开 → 卸载触发
 
 ```cpp
 // DllRecvLoop.cpp
-void DllRecvLoop() {
-    VtInputParser parser;
-    while (g_transport->IsConnected()) {
-        protocol::MessageType type;
-        std::vector<uint8_t> payload;
-        if (!RecvPacket(*g_transport, type, payload)) {
-            LOG_WARN("Pipe disconnected, triggering unload");
-            break;
-        }
-        // ... 处理消息 ...
-    }
-    // 触发卸载
-    Unloader::RequestUnload();
-}
+// Recv 返回 0 或错误时：
+LOG_INFO("DllRecvLoop: pipe error/broken, requesting unload");
+Unloader::RequestUnload();
 ```
 
-`RecvPacket` 返回 false 的情况：
-- `Recv` 返回 0（对端关闭）
-- `Recv` 返回 < 0（错误）
-- 协议解析失败（magic 不符等）
-
-### 4.2 卸载流程（`Unloader`）
+### 4.2 Unloader::RequestUnload
 
 ```cpp
-// Unloader.h
-#pragma once
-#include <atomic>
-
-namespace terminjector {
-
-class Unloader {
-public:
-    // 请求卸载（可从任意线程调用，线程安全）
-    static void RequestUnload();
-
-    // 是否正在卸载
-    static bool IsUnloading() { return s_unloading.load(); }
-
-private:
-    static void DoUnload();
-    static std::atomic<bool> s_unloading;
-};
-
-} // namespace terminjector
-```
-
-```cpp
-// Unloader.cpp
-std::atomic<bool> Unloader::s_unloading{false};
-
 void Unloader::RequestUnload() {
-    if (s_unloading.exchange(true)) return; // 已在卸载
+    if (s_unloading.exchange(true)) return;  // 幂等
     // 在独立线程执行卸载，避免在 recv 线程或 Hook 线程中死锁
     std::thread([]{
         DoUnload();
+        // 线程退出时触发 FreeLibraryAndExitThread
     }).detach();
 }
+```
 
+### 4.3 Unloader::DoUnload
+
+```cpp
 void Unloader::DoUnload() {
-    LOG_INFO("Unload starting");
-
     // 1. 停止后台轮询
     StatePoller::Instance().Stop();
 
-    // 2. 唤醒所有阻塞在 InputQueue 上的线程
+    // 2. 唤醒所有阻塞在 InputQueue 上的线程（SignalDataReady）
+    //    让 ReadDetour 线程从 WaitForSingleObject 中返回
     InputQueue::Instance().SignalDataReady();
 
-    // 3. 卸载所有 Hook（DisableHook + RemoveHook）
-    HookManager::UninstallAll();
+    // 3. 等待所有 ReadDetour 线程退出（超时 2s）
+    //    循环等待 ReadDetourGuard 的 count 降为 0
+    //    若超时，强制 pass-through 并继续
 
-    // 4. 恢复 ConsoleState 到真实 ConHost 状态
-    //    用 _orig 读取真实状态写回（让目标程序下次查询拿到 ConHost 真值）
-    HANDLE hOut = GetStdHandle_orig(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (GetConsoleScreenBufferInfo_orig(hOut, &info)) {
-        ConsoleState::Instance().SetBufferSize(info.dwSize);
-        ConsoleState::Instance().SetCursorPosition(info.dwCursorPosition);
-        ConsoleState::Instance().SetWindow(info.srWindow);
-    }
+    // 4. 禁用所有 Hook（保留 trampoline，不释放）
+    //    DisableAll 而非 UninstallAll：
+    //    MH_RemoveHook 会释放 trampoline 内存，
+    //    若 ReadDetour 线程尚未完全退出，后续调用 *_orig 会 AV 崩溃
+    HookManager::DisableAll();
 
-    // 5. 断开传输
-    if (g_transport) {
-        g_transport->Disconnect();
-        g_transport.reset();
-    }
+    // 5. 恢复 ConsoleState 到真实 ConHost 状态
 
-    // 6. 显示原 Console 窗口（若 Phase 9 隐藏过）
-    HWND hCon = GetConsoleWindow();
-    if (hCon) ShowWindow(hCon, SW_SHOW);
+    // 6. 断开传输、关闭日志
 
-    // 7. 发送 ByeAck 通知 mediator（若管道还能用）
-    //    通常管道已断，跳过
+    // 7. 发送 UnloadComplete 通知 mediator 远程 FreeLibrary
+    //    原因：DLL 内部 FreeLibrary 无法让 LoadCount 归零
+    //    （cmd 主线程 LdrpThreadBlob 持引用）
+    //    mediator 收到后 CreateRemoteThread 调 FreeLibrary(dllBase)
 
-    // 8. 关闭日志
-    LOG_INFO("Unload complete, DLL ready for FreeLibrary");
-    Logger::Shutdown();
-
-    // 9. 安全卸载 DLL
-    //    不能在 DllMain 中 FreeLibrary（Loader Lock）
-    //    用 FreeLibraryAndExitThread：当前线程退出并卸载 DLL
-    HMODULE hSelf = GetModuleHandleW(L"injected.dll");
-    if (hSelf) {
-        FreeLibraryAndExitThread(hSelf, 0);
-        // 不会返回
-    }
+    // 8. FreeLibraryAndExitThread(hSelf, 0)
+    //    安全卸载：减少引用计数 → 触发 DLL_PROCESS_DETACH → 终止当前线程
 }
 ```
 
-**关键**：`FreeLibraryAndExitThread` 是唯一安全的自卸载方式。它会：
-1. 减少 DLL 引用计数
-2. 触发 `DLL_PROCESS_DETACH`（DllMain）
-3. 终止当前线程
-
-### 4.3 DllMain DETACH 处理
+### 4.4 远程 FreeLibrary（mediator 侧）
 
 ```cpp
-// dllmain.cpp
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        // ... Phase 3 ...
-    } else if (reason == DLL_PROCESS_DETACH) {
-        // 此时 Hook 已卸载（Unloader::DoUnload 已执行）
-        // 仅做最小清理
-        MH_Uninitialize();
-        // 注意：Logger 已在 DoUnload 中 Shutdown，不重复
-    }
-    return TRUE;
+// Mediator::OnUnloadComplete()
+void Mediator::OnUnloadComplete() {
+    HANDLE hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION, FALSE, m_targetPid);
+    // 远程线程调用 FreeLibrary(dllBase)
+    // 此线程从未进入过 injected.dll 代码，LDR 不会为其持有 ThreadBlob
+    // LoadCount 从 1 → 0，触发 DLL_PROCESS_DETACH
+    CreateRemoteThread(hProcess, nullptr, 0,
+        (LPTHREAD_START_ROUTINE)FreeLibrary,
+        (LPVOID)m_dllBase, 0, nullptr);
 }
 ```
-
-### 4.4 mediator 退出清理
-
-```cpp
-// Mediator.cpp
-void Mediator::BridgeLoop() {
-    // ... 既有桥接 ...
-    // 管道断开或 stdin EOF 时退出循环
-    LOG_INFO("BridgeLoop exit, cleaning up");
-}
-
-int Mediator::Run(...) {
-    // ... 握手、BridgeLoop ...
-    m_sizeWatcher.Stop();
-    if (m_transport) m_transport->Disconnect();
-
-    // 可选：等待 DLL 发 ByeAck（超时 2 秒）
-    // 通常管道断开即代表 DLL 已卸载或正在卸载
-    LOG_INFO("Mediator exit");
-    return 0;
-}
-```
-
-### 4.5 主动卸载命令（可选）
-
-支持用户主动触发卸载（不关闭 WT）：
-
-```
-terminal-injector.exe --unload <pid>
-```
-
-实现：向目标进程发送一个卸载信号（如通过控制台事件，或再次注入一个 unload DLL）。本 Phase 仅文档记录，不实现（关闭 WT tab 即可触发卸载）。
-
-### 4.6 多目标测试矩阵
-
-#### 4.6.1 测试目标脚本
-
-`tests/targets/test_cmd.bat`：
-```bat
-@echo off
-echo === CMD Test ===
-echo Plain text
-color 0A
-echo Green on black
-color 07
-dir /b
-echo Line 1
-echo Line 2
-prompt $P$G
-```
-
-`tests/targets/test_python_tui.py`：
-```python
-import curses
-def main(stdscr):
-    curses.curs_set(0)
-    stdscr.addstr(0, 0, "Python Curses Test")
-    stdscr.addstr(1, 0, "Click to see coordinates")
-    stdscr.refresh()
-    while True:
-        ch = stdscr.getch()
-        if ch == ord('q'): break
-        if ch == curses.KEY_MOUSE:
-            _, x, y, _, _ = curses.getmouse()
-            stdscr.addstr(2, 0, f"Mouse: ({x},{y})    ")
-            stdscr.refresh()
-curses.wrapper(main)
-```
-
-#### 4.6.2 手动测试清单（`checklist.md`）
-
-```markdown
-# Terminal-Injector 手动测试清单
-
-## cmd.exe
-- [ ] 基本输出 echo
-- [ ] 颜色 color 命令
-- [ ] 清屏 cls
-- [ ] 目录列表 dir
-- [ ] tree 大量输出
-- [ ] 历史命令（上下箭头）
-- [ ] Tab 补全
-- [ ] Ctrl+C 中断 ping -t
-- [ ] 标题 title 命令
-- [ ] chcp 65001 中文
-
-## powershell.exe
-- [ ] 基本输出
-- [ ] VT 颜色 Write-Host -ForegroundColor
-- [ ] 进度条 Write-Progress
-- [ ] Tab 补全
-- [ ] Ctrl+C
-
-## python REPL
-- [ ] 基本交互
-- [ ] print 带颜色
-- [ ] input() 阻塞
-- [ ] Ctrl+C KeyboardInterrupt
-
-## python curses TUI
-- [ ] 全屏渲染
-- [ ] 鼠标点击
-- [ ] 滚轮
-- [ ] q 退出
-
-## opencode
-- [ ] 启动 TUI
-- [ ] 键盘导航
-- [ ] 鼠标点击
-- [ ] 流式输出
-- [ ] 分屏
-- [ ] 退出
-
-## vim
-- [ ] 打开文件
-- [ ] Alt Buffer 进入/退出
-- [ ] 光标移动 hjkl
-- [ ] 方向键
-- [ ] 鼠标点击定位
-- [ ] 滚轮
-- [ ] :wq 保存退出
-- [ ] Ctrl+C
-
-## less
-- [ ] 打开大文件
-- [ ] 滚轮滚动
-- [ ] 空格翻页
-- [ ] q 退出
-
-## 通用
-- [ ] WT 窗口 resize 后重绘正确
-- [ ] 关闭 WT tab 后目标程序恢复（无崩溃）
-- [ ] 原 cmd 窗口不再更新（静默模式）
-- [ ] 长时间运行无内存泄漏
-```
-
-#### 4.6.3 自动化测试脚本（`run_all.py`）
-
-```python
-#!/usr/bin/env python3
-"""Terminal-Injector 自动化测试"""
-import subprocess, time, sys, os
-
-def start_target(cmd):
-    """启动目标程序，返回 (proc, pid)"""
-    proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
-    return proc, proc.pid
-
-def inject(pid):
-    """注入并启动 mediator"""
-    # 用 wt 启动 mediator
-    subprocess.Popen([
-        "wt.exe", "terminal-injector.exe", "--mediator", "--target-pid", str(pid)
-    ])
-    time.sleep(2)  # 等待握手
-
-def cleanup(pid):
-    """清理：杀目标进程"""
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"])
-
-def test_cmd():
-    proc, pid = start_target(["cmd.exe", "/k", "echo test"])
-    inject(pid)
-    time.sleep(5)
-    # TODO: 用图像识别或日志验证 WT 输出
-    cleanup(pid)
-
-if __name__ == "__main__":
-    test_cmd()
-    # test_powershell()
-    # ...
-```
-
-自动化测试难点：验证 WT 渲染结果。方案：
-- 截图 + OCR（复杂）
-- 检查 mediator 日志确认数据流通
-- 人工目视（最终验收）
-
-本 Phase 自动化仅验证"流程跑通无崩溃"，具体渲染正确性靠手动清单。
 
 ---
 
-## 5. 最终验收标准
+## 5. 关键修复记录
 
-### 5.1 功能完整性
-
-所有 4.6.2 清单项通过。
-
-### 5.2 性能指标
-
-| 指标 | 目标 | 实测 |
+| 日期 | 修复 | 说明 |
 |------|------|------|
-| 键盘输入延迟 | < 50ms | |
-| 鼠标输入延迟 | < 50ms | |
-| 满屏输出吞吐 | 60fps | |
-| CPU 占用（满载） | < 30% | |
-| 内存占用（DLL） | < 20MB | |
-
-### 5.3 稳定性
-
-- 连续运行 1 小时无崩溃
-- 反复注入/卸载 10 次无残留
-- `windows-debugging` 工具的 umdh 检查无内存泄漏
-
-### 5.4 卸载干净度
-
-- 关闭 WT tab 后目标程序继续运行（不崩溃）
-- 原 cmd 窗口恢复可交互
-- 任务管理器中 `injected.dll` 不再出现在目标进程模块列表
+| 2026-07-25 | `DisableAll()` 替代 `UninstallAll()` | 保留 trampoline 避免 ReadDetour 线程 AV |
+| 2026-07-25 | `ReadDetourGuard` 实现 | 跟踪活跃 ReadDetour 线程，卸载前等待退出 |
+| 2026-07-25 | 远程 FreeLibrary 机制 | 解决 LoadCount 无法归零问题 |
+| 2026-07-25 | Release CRT 链接 | 避免 Debug CRT 卸载后内存损坏 |
+| 2026-07-25 | `lineOut`/`vtOut` 提升到函数作用域 | 避免循环内 SSO 与 TLS 基址缓存冲突 |
 
 ---
 
-## 6. 风险点
+## 6. 测试套件
 
-| 风险 | 缓解 |
-|------|------|
-| `FreeLibraryAndExitThread` 时仍有线程在 Hook 中执行 | `UninstallAll` 已 DisableHook，新调用不再进 Detour；正在执行的会快速返回 |
-| 卸载后目标程序调 Console API 崩溃 | Hook 已移除，调真实 API；但 ConsoleState 可能不一致 → 卸载时同步真实状态 |
-| 自动化测试无法验证渲染 | 接受人工验收为主；自动化仅验流程 |
-| 测试中发现特定程序不兼容 | 记录到已知问题列表，评估是否修复 |
+### 6.1 验收标准
+
+| 验收项 | 描述 | 状态 |
+|--------|------|------|
+| 验收 1 | DLL 模块已从 cmd 进程卸载 | ✅ 通过 |
+| 验收 2 | cmd 恢复可交互（echo 命令响应） | ✅ 通过 |
+| 验收 3 | Hook 字节已恢复（首字节非 E9） | ✅ 通过 |
+| 验收 4 | 反复注入/卸载 10 次无泄漏 | ❌ 循环 2 崩溃 |
+
+### 6.2 运行方式
+
+```bash
+# 运行 Phase 11 测试
+python tests/runners/run_all.py phase11
+
+# 运行循环 2 崩溃诊断脚本
+python tests/helpers/diag_cycle2_crash.py
+```
+
+### 6.3 诊断辅助
+
+- `tests/helpers/diag_cycle2_crash.py`：最小复现循环 2 崩溃，抓 WER dump
+- 崩溃 dump 位置：`C:\temp\cmd_dumps\cmd.exe.<pid>.dmp`
+- 分析命令：
+  ```
+  cdb -z <dump_path> -c ".sympath srv*C:\symbols*...;.exepath ...;.reload;~* kn 50;!analyze -v;q"
+  ```
 
 ---
 
-## 7. 交付物清单
+## 7. 风险点
 
-- [ ] `Unloader` 完整卸载流程
-- [ ] DllMain DETACH 最小清理
-- [ ] mediator 退出清理
-- [ ] `tests/targets/` 测试脚本
-- [ ] `tests/manual/checklist.md` 完整清单
-- [ ] `tests/runners/run_all.py` 自动化骨架
-- [ ] 5.1~5.4 验收全过
-- [ ] 项目最终交付
+| 风险 | 影响 | 缓解/状态 |
+|------|------|-----------|
+| 循环 2 ReadConsoleW_Detour GS cookie 损坏 | cmd 崩溃 | 调试中，已定位到栈布局问题 |
+| ReadDetour 线程未及时退出 | 卸载时 trampoline 被释放后 AV | DisableAll 先禁用，保留 trampoline |
+| LoadCount 不能归零 | DLL 无法卸载 | 远程 FreeLibrary 解决 |
+| 调试 CRT 链接 | 卸载后内存损坏 | 已切 Release CRT |

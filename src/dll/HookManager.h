@@ -42,6 +42,10 @@ public:
     // 卸载全部 Hook（MH_DisableHook + MH_RemoveHook）
     static void UninstallAll();
 
+    // 仅禁用 Hook（保留 trampoline），供 Unloader::DoUnload 使用
+    // 避免 ReadDetour 线程仍在执行 trampoline 时 MH_RemoveHook 释放内存导致 AV
+    static void DisableAll();
+
     // 状态查询
     static bool IsInstalled() { return s_installed; }
     static size_t RegisteredCount() { return s_entries.size(); }

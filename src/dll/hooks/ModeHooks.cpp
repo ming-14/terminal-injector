@@ -20,6 +20,7 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "../state/InputQueue.h"
 #include "../translator/VtEscape.h"
 #include "protocol/Message.h"
@@ -99,7 +100,17 @@ BOOL WINAPI GetConsoleMode_Detour(HANDLE h, LPDWORD mode) {
         *mode = state.GetInputMode();
     } else {
         // 输出：强制加 VT 处理标志（欺骗程序认为支持 VT）
-        *mode = state.GetOutputMode() | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        // 同时更新缓存状态，让 WriteFile_Detour 正确走 VT 直通路径
+        // 若不更新缓存，WriteFile_Detour 检查 state.GetOutputMode() 时看不到
+        // VT 处理标志，会把 VT 字节流当作普通文本转译（ANSI→wchar_t→WriteConsoleW），
+        // 导致 VT 控制序列（如 \x1b[?1002h 鼠标启用）被破坏，且光标同步序列
+        // 使用错误坐标引发 ConPTY 滚动（Textual/neovim 等 TUI 程序受影响）
+        DWORD cached = state.GetOutputMode();
+        if (!(cached & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+            cached |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            state.SetOutputMode(cached);
+        }
+        *mode = cached;
     }
     return TRUE;
 }
@@ -130,8 +141,10 @@ BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
         bool newVT = (mode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
         state.SetInputMode(mode);
         if (mode != oldMode) {
-            // 模式切换：清空输入队列，避免残留数据混淆
+            // 模式切换：清空输入队列 + 重置鼠标按键状态，避免残留数据混淆
             InputQueue::Instance().ClearAllOnModeSwitch();
+            state.SetMouseButtonState(0);  // Phase 16：重置鼠标按键状态
+            VirtualConsoleState::Instance().ResetScrollback();  // Phase 18：重置滚动计数
             NotifyModeChange();
             // Phase 13：VT_INPUT 标志变化时通知 mediator 切换翻译策略
             if (oldVT != newVT) {

@@ -12,6 +12,7 @@
 //
 // 每个按键产生两个 INPUT_RECORD（按下 bKeyDown=TRUE + 释放 bKeyDown=FALSE）
 #include "VtToInputRecord.h"
+#include "../state/ConsoleState.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -388,17 +389,22 @@ size_t VtToInputRecord::ParseMouse(const uint8_t* data, size_t len,
             int wheel = btn & 64;
 
             if (wheel) {
-                // 滚轮事件
-                mer.dwEventFlags = MOUSE_WHEELED;
-                // baseBtn==0 上滚(正), baseBtn==1 下滚(负)
-                // MOUSE_EVENT_RECORD 的 dwButtonState 高字是滚轮增量
-                mer.dwButtonState = (baseBtn == 0) ? 0x00010000 : 0xFFFF0000;
+                // 滚轮事件（SGR 编码：baseBtn 0=上滚 1=下滚 2=左横滚 3=右横滚）
+                if (baseBtn == 2 || baseBtn == 3) {
+                    // 横滚（LIM-006 修复）：66=64+2 左滚，67=64+3 右滚
+                    // MOUSE_HWHEELED：dwButtonState 高字为正=右滚，负=左滚
+                    mer.dwEventFlags = MOUSE_HWHEELED;
+                    mer.dwButtonState = (baseBtn == 3) ? 0x00010000 : 0xFFFF0000;
+                } else {
+                    // 垂直滚轮
+                    mer.dwEventFlags = MOUSE_WHEELED;
+                    mer.dwButtonState = (baseBtn == 0) ? 0x00010000 : 0xFFFF0000;
+                }
             } else {
                 // 普通按键/移动
-                // 使用静态变量维护跨事件的按键状态
-                // 注意：文档建议用 ConsoleState 持久化，但 Phase 6 先用 static 简化
-                // Phase 8+ 可迁移到 ConsoleState
-                static DWORD s_buttonState = 0;
+                // 使用 ConsoleState 维护跨事件的按键状态（Phase 16 修复：
+                // 替代静态变量，消除多会话/模式切换时的状态污染）
+                DWORD s_buttonState = ConsoleState::Instance().GetMouseButtonState();
 
                 if (isRelease || baseBtn == 3) {
                     // 释放：清除所有按键位
@@ -423,6 +429,7 @@ size_t VtToInputRecord::ParseMouse(const uint8_t* data, size_t len,
                     mer.dwEventFlags = 0;  // 按下事件
                 }
                 mer.dwButtonState = s_buttonState;
+                ConsoleState::Instance().SetMouseButtonState(s_buttonState);
             }
 
             INPUT_RECORD r{};

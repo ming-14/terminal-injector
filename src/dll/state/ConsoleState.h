@@ -95,6 +95,13 @@ public:
     CONSOLE_FONT_INFOEX GetFontInfo() const;
     void SetFontInfo(const CONSOLE_FONT_INFOEX& info);
 
+    // ---- 鼠标按键状态（Phase 16） ----
+    // 跟踪跨 VtToInputRecord::ParseMouse 调用的鼠标按键状态，
+    // 用于 SGR 1006 → INPUT_RECORD 转换时维护 dwButtonState 连续性
+    // 替代静态变量 s_buttonState，消除多会话/模式切换时的状态污染
+    DWORD GetMouseButtonState() const;
+    void SetMouseButtonState(DWORD state);
+
 private:
     ConsoleState() = default;
 
@@ -113,6 +120,13 @@ private:
     HANDLE m_mainBufferHandle = nullptr;  // GetStdHandle(STD_OUTPUT_HANDLE) 缓存
     HANDLE m_altBufferHandle  = nullptr;  // CreateConsoleScreenBuffer 伪句柄
     CONSOLE_FONT_INFOEX m_fontInfo{};     // 注入瞬间快照，GetCurrentConsoleFontEx 返回此值
+    DWORD m_mouseButtonState = 0;         // Phase 16：鼠标按键状态（跨 ParseMouse 调用）
+
+    // ---- 滚动缓冲区（Phase 18） ----
+    // 同步跟踪 VirtualConsoleState 的滚动计数
+    int32_t m_scrollbackLines = 0;
+    int32_t GetScrollbackLines() const;
+    void SetScrollbackLines(int32_t n);
 };
 
 } // namespace terminjector

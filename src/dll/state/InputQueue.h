@@ -171,6 +171,17 @@ public:
         ResetEvent(m_event);
     }
 
+    // 入队窗口缓冲区尺寸变化事件（WINDOW_BUFFER_SIZE_EVENT）
+    // 当 DLL 收到 ResizeNotify 时调用，通知等待 ReadConsoleInput 的程序
+    // （如 Textual）窗口尺寸已变化，让其重新查询 GetConsoleScreenBufferInfo
+    void EnqueueResizeEvent(SHORT cols, SHORT rows) {
+        INPUT_RECORD rec{};
+        rec.EventType = WINDOW_BUFFER_SIZE_EVENT;
+        rec.Event.WindowBufferSizeEvent.dwSize.X = cols;
+        rec.Event.WindowBufferSizeEvent.dwSize.Y = rows;
+        EnqueueRecords(&rec, 1);
+    }
+
     // 模式切换时清空两个队列（避免残留数据混淆）
     void ClearAllOnModeSwitch() {
         Clear();

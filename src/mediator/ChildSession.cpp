@@ -251,7 +251,9 @@ void ChildSession::RecvLoop() {
                     std::memcpy(&mc, payload.data(), sizeof(mc));
                     LOG_INFO("ChildSession RecvLoop: ModeChange inputMode=0x%lx outputMode=0x%lx, pid=%u",
                              mc.inputMode, mc.outputMode, m_childPid);
-                    m_onModeChange(mc.inputMode, mc.outputMode);
+                    // fromChild=true：子进程的 ModeChange 不应影响鼠标报告状态
+                    // 子进程（如 Textual/python）使用 VT 模式，通过 DECSET 控制鼠标报告
+                    m_onModeChange(mc.inputMode, mc.outputMode, true);
                 }
                 break;
             }
@@ -285,6 +287,22 @@ void ChildSession::SendVtInput(const uint8_t* data, size_t len) {
     auto pkt = protocol::Serialize(protocol::MessageType::VtInput, data,
                                    static_cast<uint32_t>(len));
     m_transport->Send(pkt.data(), pkt.size());
+}
+
+void ChildSession::SendResize(uint16_t cols, uint16_t rows,
+                              uint16_t bufferCols, uint16_t bufferRows) {
+    if (!m_transport || !m_transport->IsConnected()) {
+        return;
+    }
+    protocol::ResizePayload p{};
+    p.cols       = cols;
+    p.rows       = rows;
+    p.bufferCols = bufferCols;
+    p.bufferRows = bufferRows;
+    auto pkt = protocol::Serialize(protocol::MessageType::ResizeNotify, &p, sizeof(p));
+    const int sent = m_transport->Send(pkt.data(), pkt.size());
+    LOG_INFO("ChildSession SendResize: sent win=%dx%d buf=%dx%d pid=%u (sent=%d/%zu)",
+             cols, rows, bufferCols, bufferRows, m_childPid, sent, pkt.size());
 }
 
 } // namespace terminjector

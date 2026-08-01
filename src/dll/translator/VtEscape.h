@@ -75,14 +75,24 @@ std::string ResizeWindow(int rows, int cols);
 // DECSET/DECRST 1049：进入/退出 Alt Buffer
 //   1049 = 1047（用备用屏）+ 1048（保存光标）+ 清屏，组合语义最稳
 //   vim/less 等全屏 TUI 进入时 h，退出时 l，WT 自动恢复主屏内容
-constexpr const char* kEnterAltBuffer = "\x1b[?1049h";
-constexpr const char* kExitAltBuffer  = "\x1b[?1049l";
+// 注意：用 char 数组而非 const char* 指针——调用方用 sizeof()-1 求长度，
+//       指针的 sizeof 恒为 8（64 位），会截断尾字节（BUG-002 根因）
+constexpr char kEnterAltBuffer[] = "\x1b[?1049h";
+constexpr char kExitAltBuffer[]  = "\x1b[?1049l";
 
 // ===== 光标显隐（Phase 8） =====
 // DECSET/DECRST 25：显示/隐藏光标
 //   vim 进入 normal 模式常隐藏光标，退出时恢复
 constexpr const char* kShowCursor = "\x1b[?25h";
 constexpr const char* kHideCursor = "\x1b[?25l";
+
+// ===== 终端查询（Phase 15） =====
+// DSR CPR 查询：CSI 6 n（请求光标位置报告）
+// WT 响应：CSI row ; col R
+constexpr const char* kDsrCprQuery = "\x1b[6n";
+// Primary DA 查询：CSI c（请求终端属性）
+// WT 响应：CSI ? 1 ; Ps c（Ps 标识特性集）
+constexpr const char* kDaPrimaryQuery = "\x1b[c";
 
 // ===== OSC 标题（Phase 8） =====
 // OSC 0 ; <title> BEL：设置窗口/标签页标题

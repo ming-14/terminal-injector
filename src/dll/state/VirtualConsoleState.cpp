@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <cstring>
+#include <wcwidth.h>
 
 namespace terminjector {
 
@@ -62,7 +63,11 @@ void VirtualConsoleState::SetCursorPos(COORD pos) {
 //   \n (0x0A) → Y++（下移一行），X 不变（Windows \n 语义不带回车）
 //   \b (0x08) → X--（左移一格），不跨行
 //   \t (0x09) → 下一个 8 列 tab stop
-//   其他字符 → X++，行末回绕到下一行行首
+//   其他字符 → 按 wcwidth 计算显示宽度（0/1/2）推进光标，行末回绕
+//
+// Phase 17 字符宽度审计：
+//   使用 wcwidth/wcwidth32 计算 CJK 字符（宽度 2）和零宽字符（宽度 0），
+//   代理对（emoji 等 BMP 外字符）组合为 32 位 codepoint 后调用 wcwidth32。
 void VirtualConsoleState::AdvanceCursor(const wchar_t* buf, int len) {
     if (buf == nullptr || len <= 0) return;
 
@@ -77,7 +82,20 @@ void VirtualConsoleState::AdvanceCursor(const wchar_t* buf, int len) {
         m_cursorPos.Y++;
         if (m_cursorPos.Y >= rows) {
             m_cursorPos.Y = rows - 1;
+            m_scrollbackLines++;  // Phase 18：递增滚动计数
         }
+    };
+
+    // 代理对辅助函数
+    auto isHighSurrogate = [](wchar_t ch) -> bool {
+        return ch >= 0xD800 && ch <= 0xDBFF;
+    };
+    auto isLowSurrogate = [](wchar_t ch) -> bool {
+        return ch >= 0xDC00 && ch <= 0xDFFF;
+    };
+    auto combineSurrogate = [](wchar_t high, wchar_t low) -> uint32_t {
+        return 0x10000 + ((static_cast<uint32_t>(high) - 0xD800) << 10)
+                       + (static_cast<uint32_t>(low) - 0xDC00);
     };
 
     for (int i = 0; i < len; ++i) {
@@ -91,6 +109,9 @@ void VirtualConsoleState::AdvanceCursor(const wchar_t* buf, int len) {
                 m_cursorPos.Y++;
                 if (m_cursorPos.Y >= rows) {
                     m_cursorPos.Y = rows - 1;
+                    // Phase 18：递增滚动计数（与 ConsoleState::AdvanceCursor
+                    // 的 \n 分支语义保持一致，修复两状态不一致）
+                    m_scrollbackLines++;
                 }
                 break;
             case L'\b':
@@ -107,9 +128,22 @@ void VirtualConsoleState::AdvanceCursor(const wchar_t* buf, int len) {
                 }
                 break;
             default:
-                m_cursorPos.X++;
-                if (m_cursorPos.X >= cols) {
-                    wrapLine();
+                {
+                    // 按字符显示宽度推进光标（Phase 17）
+                    int w;
+                    if (isHighSurrogate(ch) && i + 1 < len && isLowSurrogate(buf[i + 1])) {
+                        // 代理对：组合为 32 位 codepoint 后计算宽度
+                        uint32_t cp = combineSurrogate(ch, buf[i + 1]);
+                        w = wcwidth32(cp);
+                        ++i;  // 跳过低代理
+                    } else {
+                        w = wcwidth(ch);
+                    }
+                    if (w < 0) w = 0;  // 控制字符按 0 宽度处理
+                    m_cursorPos.X = static_cast<SHORT>(m_cursorPos.X + w);
+                    if (m_cursorPos.X >= cols) {
+                        wrapLine();
+                    }
                 }
                 break;
         }
@@ -165,10 +199,14 @@ void VirtualConsoleState::FillScreenBufferInfo(CONSOLE_SCREEN_BUFFER_INFO& info)
 }
 
 // WT resize 反向同步：更新 bufferSize 和 srWindow
+// Phase 18：保留用户设置的缓冲区高度 + 滚动计数，不因 WT resize 丢失 scrollback
 void VirtualConsoleState::ApplyWtResize(int32_t cols, int32_t rows) {
     std::lock_guard<std::mutex> lock(m_lock);
     m_bufferSize.X = static_cast<SHORT>(cols);
-    m_bufferSize.Y = static_cast<SHORT>(rows);
+    // Phase 18：保留用户设置的缓冲区高度 + 滚动计数
+    int32_t minHeight = (std::max)(m_userBufferHeight,
+                                  rows + m_scrollbackLines);
+    m_bufferSize.Y = static_cast<SHORT>((std::max)(static_cast<int32_t>(rows), minHeight));
     m_windowRect.Left = 0;
     m_windowRect.Top = 0;
     m_windowRect.Right = static_cast<SHORT>(cols - 1);
@@ -180,11 +218,12 @@ void VirtualConsoleState::ApplyWtResize(int32_t cols, int32_t rows) {
     if (m_cursorPos.Y >= m_bufferSize.Y) {
         m_cursorPos.Y = static_cast<SHORT>(m_bufferSize.Y - 1);
     }
-    LOG_INFO("VirtualConsoleState::ApplyWtResize: size=%dx%d win=(%d,%d)-(%d,%d) cursor=(%d,%d)",
+    LOG_INFO("VirtualConsoleState::ApplyWtResize: size=%dx%d win=(%d,%d)-(%d,%d) cursor=(%d,%d) scrollback=%d userBufH=%d",
              cols, rows,
              m_windowRect.Left, m_windowRect.Top,
              m_windowRect.Right, m_windowRect.Bottom,
-             m_cursorPos.X, m_cursorPos.Y);
+             m_cursorPos.X, m_cursorPos.Y,
+             m_scrollbackLines, m_userBufferHeight);
 }
 
 // WT DSR CPR 响应反向同步：更新光标位置
@@ -195,6 +234,47 @@ void VirtualConsoleState::ApplyWtCursorReport(int32_t col, int32_t row) {
     m_cursorPos.Y = static_cast<SHORT>(row - 1);
     LOG_INFO("VirtualConsoleState::ApplyWtCursorReport: cursor=(%d,%d) (from VT %d,%d)",
              m_cursorPos.X, m_cursorPos.Y, col, row);
+}
+
+// Phase 15：WT DA 报告反向同步——存储终端能力标识
+// WT 响应 Primary DA 查询（\x1b[c）时，返回 \x1b[?1;Psc，
+// 其中 Ps 标识终端类型（如 61=VT320, 67=VT525）。
+// 此信息记录在 VirtualConsoleState 中，供后续查询使用。
+void VirtualConsoleState::ApplyWtDaReport(int32_t caps) {
+    m_terminalCaps.store(caps);
+    LOG_INFO("VirtualConsoleState::ApplyWtDaReport: terminal caps=%d", caps);
+}
+
+// ============================================================
+// 滚动缓冲区接口（Phase 18）
+// ============================================================
+
+int32_t VirtualConsoleState::GetScrollbackLines() const {
+    std::lock_guard<std::mutex> lock(m_lock);
+    return m_scrollbackLines;
+}
+
+void VirtualConsoleState::SetUserBufferHeight(int32_t height) {
+    std::lock_guard<std::mutex> lock(m_lock);
+    m_userBufferHeight = height;
+    // 同步更新 bufferSize：确保 bufferSize.Y >= max(视口高度, 用户请求高度)
+    SHORT rows = static_cast<SHORT>(m_windowRect.Bottom - m_windowRect.Top + 1);
+    int32_t minHeight = (std::max)(height, rows + m_scrollbackLines);
+    m_bufferSize.Y = static_cast<SHORT>(rows > minHeight ? rows : minHeight);
+    LOG_INFO("VirtualConsoleState::SetUserBufferHeight: height=%d bufferSize.Y=%d scrollback=%d",
+             height, m_bufferSize.Y, m_scrollbackLines);
+}
+
+void VirtualConsoleState::ResetScrollback() {
+    std::lock_guard<std::mutex> lock(m_lock);
+    m_scrollbackLines = 0;
+    m_userBufferHeight = 0;
+    // 恢复 bufferSize 为视口尺寸
+    SHORT rows = static_cast<SHORT>(m_windowRect.Bottom - m_windowRect.Top + 1);
+    SHORT cols = static_cast<SHORT>(m_windowRect.Right - m_windowRect.Left + 1);
+    m_bufferSize.X = cols;
+    m_bufferSize.Y = rows;
+    LOG_INFO("VirtualConsoleState::ResetScrollback: bufferSize reset to %dx%d", cols, rows);
 }
 
 } // namespace terminjector

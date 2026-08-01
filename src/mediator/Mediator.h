@@ -93,12 +93,20 @@ private:
     //   → mediator 发 VT 序列 → WT 启用鼠标报告 → 鼠标事件转 SGR1006 发回 stdin
     //   → mediator ReadConsoleInputW 读到 MOUSE_EVENT_RECORD → InputRecordToVt
     //   → DLL VtToInputRecord → 目标 ReadConsoleInputW
-    void OnModeChange(uint32_t inputMode, uint32_t outputMode);
+    // fromChild=true 表示来自子进程 DLL 的 ModeChange。
+    // 子进程（如 Textual/python）使用 VT 模式（ENABLE_VIRTUAL_TERMINAL_INPUT），
+    // 通过 DECSET 序列直接控制鼠标报告，而非 SetConsoleMode 的 ENABLE_MOUSE_INPUT。
+    // 若子进程 ModeChange 关闭鼠标报告，会覆盖父进程已开启的鼠标报告状态，
+    // 导致 WT 不再发送 SGR 1006 鼠标事件，Textual 等 TUI 程序无法接收鼠标。
+    // 因此子进程的 ModeChange 不应影响鼠标报告状态（mouseReportEnabled）。
+    void OnModeChange(uint32_t inputMode, uint32_t outputMode, bool fromChild = false);
 
     // === Phase 13：VT 模式切换通知 ===
 
-    // 收到 DLL 的 ModeSwitchNotify 时，记录 VT 输入模式状态
-    // DLL 在 SetConsoleMode 检测到 ENABLE_VIRTUAL_TERMINAL_INPUT 标志变化时触发
+    // 收到 DLL 的 ModeSwitchNotify 时记录日志
+    // 注意：VT 输入直通/翻译的决策在 DLL 侧（DllRecvLoop VtInput 分支按
+    // ENABLE_VIRTUAL_TERMINAL_INPUT 选择 raw 直通或 INPUT_RECORD 翻译），
+    // mediator 只负责转发，不保存输入模式状态（LIM-004 清理）
     void OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode);
 
     // 向 WT stdout 写 VT 序列（发鼠标报告请求用）
@@ -133,10 +141,6 @@ private:
     // 初始值 0 表示未收到过 ModeChange
     uint32_t m_lastInputMode = 0;
     bool m_mouseReportEnabled = false;  // WT 鼠标报告当前是否已启用
-
-    // Phase 13：VT 输入模式状态（DLL 通过 ModeSwitchNotify 通知）
-    // true=DLL 处于 VT 直通模式，false=行编辑模式
-    std::atomic<bool> m_vtInputMode{false};
 
     // Phase 14：轻量 VT 解析器（识别 DSR CPR 等 WT 响应）
     VtParser m_vtParser;

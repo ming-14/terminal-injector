@@ -8,6 +8,8 @@
 #include "ConsoleState.h"
 #include "logging/Logger.h"
 
+#include <wcwidth.h>
+
 namespace terminjector {
 
 ConsoleState& ConsoleState::Instance() {
@@ -117,7 +119,7 @@ void ConsoleState::AdvanceCursor(const wchar_t* buf, int len, bool wrapAtEol) {
         c.Y++;
         if (c.Y >= rows) {
             c.Y = rows - 1;
-            // TODO Phase 5: 触发 ScrollConsoleScreenBuffer 等价逻辑
+            m_scrollbackLines++;  // Phase 18：递增滚动计数
         }
     };
 
@@ -139,7 +141,7 @@ void ConsoleState::AdvanceCursor(const wchar_t* buf, int len, bool wrapAtEol) {
                 c.Y++;
                 if (c.Y >= rows) {
                     c.Y = rows - 1;
-                    // TODO Phase 5: 触发 ScrollConsoleScreenBuffer 等价逻辑
+                    m_scrollbackLines++;  // Phase 18：递增滚动计数
                 }
                 break;
             case L'\b':
@@ -162,16 +164,30 @@ void ConsoleState::AdvanceCursor(const wchar_t* buf, int len, bool wrapAtEol) {
                 }
                 break;
             default:
-                // 可见字符（含宽字符：简化处理为单格，ConHost 对宽字符实际占 2 格
-                // 但目标程序通过 GetConsoleScreenBufferInfo 查 cursor 时一般不依赖宽字符精确列）
-                c.X++;
-                if (c.X >= cols) {
-                    if (wrapAtEol) {
-                        wrapLine();
+                {
+                    // 按字符显示宽度推进光标（Phase 17 字符宽度审计）
+                    // 使用 wcwidth/wcwidth32 计算 CJK 双宽字符和零宽字符
+                    int w;
+                    // 检查当前字符是否为高代理，且下一个字符为低代理
+                    if (ch >= 0xD800 && ch <= 0xDBFF && i + 1 < len &&
+                        buf[i + 1] >= 0xDC00 && buf[i + 1] <= 0xDFFF) {
+                        // 代理对：组合为 32 位 codepoint 后计算宽度
+                        uint32_t cp = 0x10000 +
+                            ((static_cast<uint32_t>(ch) - 0xD800) << 10) +
+                            (static_cast<uint32_t>(buf[i + 1]) - 0xDC00);
+                        w = wcwidth32(cp);
+                        ++i;  // 跳过低代理
                     } else {
-                        c.X = cols - 1;
-                        // 已到行末且不 wrap，后续字符都停在这里
-                        // 但仍需处理后续 \r \n 等控制字符，故不 break 出循环
+                        w = wcwidth(ch);
+                    }
+                    if (w < 0) w = 0;  // 控制字符按 0 宽度处理
+                    c.X = static_cast<SHORT>(c.X + w);
+                    if (c.X >= cols) {
+                        if (wrapAtEol) {
+                            wrapLine();
+                        } else {
+                            c.X = cols - 1;
+                        }
                     }
                 }
                 break;
@@ -314,6 +330,38 @@ CONSOLE_FONT_INFOEX ConsoleState::GetFontInfo() const {
 void ConsoleState::SetFontInfo(const CONSOLE_FONT_INFOEX& info) {
     AcquireSRWLockExclusive(&m_lock);
     m_fontInfo = info;
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+// ============================================================
+// 鼠标按键状态（Phase 16）
+// ============================================================
+DWORD ConsoleState::GetMouseButtonState() const {
+    AcquireSRWLockShared(&m_lock);
+    DWORD s = m_mouseButtonState;
+    ReleaseSRWLockShared(&m_lock);
+    return s;
+}
+
+void ConsoleState::SetMouseButtonState(DWORD state) {
+    AcquireSRWLockExclusive(&m_lock);
+    m_mouseButtonState = state;
+    ReleaseSRWLockExclusive(&m_lock);
+}
+
+// ============================================================
+// 滚动缓冲区同步（Phase 18）
+// ============================================================
+int32_t ConsoleState::GetScrollbackLines() const {
+    AcquireSRWLockShared(&m_lock);
+    int32_t r = m_scrollbackLines;
+    ReleaseSRWLockShared(&m_lock);
+    return r;
+}
+
+void ConsoleState::SetScrollbackLines(int32_t n) {
+    AcquireSRWLockExclusive(&m_lock);
+    m_scrollbackLines = n;
     ReleaseSRWLockExclusive(&m_lock);
 }
 

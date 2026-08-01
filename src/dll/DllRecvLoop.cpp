@@ -135,7 +135,30 @@ void RecvLoopMain() {
                 win.Bottom = static_cast<SHORT>(p.rows - 1);
                 ConsoleState::Instance().SetWindow(win);
 
-                LOG_INFO("DllRecvLoop: Resize applied win=%ux%u buf=%ux%u",
+                // 注入 WINDOW_BUFFER_SIZE_EVENT 通知等待 ReadConsoleInput 的程序
+                // （如 Textual）窗口尺寸已变化，让其重新查询 GetConsoleScreenBufferInfo
+                // 并刷新布局。若不注入，TUI 程序永远不会收到 resize 通知，
+                // 在 WT 尺寸变化后不会重绘，导致布局与窗口不匹配。
+                // BUG-005 一致性：在事件生成点按输入模式过滤（与真实 ConHost 语义
+                // 一致——ConHost 仅在 ENABLE_WINDOW_INPUT 开启时生成该事件）。
+                // 若仅在读口过滤：GetNumberOfConsoleInputEvents（未过滤计数）会
+                // 报告队列有事件，但 ReadConsoleInputW 读不到，程序阻塞空等。
+                DWORD inMode = ConsoleState::Instance().GetInputMode();
+                if (inMode & ENABLE_WINDOW_INPUT) {
+                    InputQueue::Instance().EnqueueResizeEvent(
+                        static_cast<SHORT>(p.cols),
+                        static_cast<SHORT>(p.rows));
+                } else {
+                    LOG_INFO("DllRecvLoop: resize event dropped (ENABLE_WINDOW_INPUT off)");
+                }
+
+                // 修复：子进程（python 等）只收 ResizeNotify，与主进程的
+                // WtStateReport resize 路径不同步 VirtualConsoleState，
+                // 导致子进程的 bufferSize/scrollback 不随 WT resize 更新。
+                // 这里与主进程 ApplyWtResize 对齐，保持两状态一致。
+                VirtualConsoleState::Instance().ApplyWtResize(p.cols, p.rows);
+
+                LOG_INFO("DllRecvLoop: Resize applied win=%ux%u buf=%ux%u, EnqueueResizeEvent injected",
                          p.cols, p.rows, p.bufferCols, p.bufferRows);
                 break;
             }
@@ -147,6 +170,28 @@ void RecvLoopMain() {
                     // 透传模式：原始 VT 字节直接入 raw 队列
                     // vim/less 等程序开 VT 输入模式，期望收到原始 VT 字节
                     InputQueue::Instance().EnqueueRaw(payload.data(), payload.size());
+                    // 同时翻译为 INPUT_RECORD 入 record 队列（ReadConsoleW 路径需要）
+                    // Textual 通过 Python 的 ReadConsoleW 读输入，不走 ReadFile 或 ReadConsoleInputW，
+                    // 若只入 raw 队列，ReadConsoleW_Detour 永远收不到数据
+                    auto records = vtInputParser.Feed(payload.data(), payload.size());
+                    if (!records.empty()) {
+                        std::vector<INPUT_RECORD> keyRecs, mouseRecs;
+                        for (const auto& r : records) {
+                            if (r.EventType == MOUSE_EVENT) {
+                                mouseRecs.push_back(r);
+                            } else {
+                                keyRecs.push_back(r);
+                            }
+                        }
+                        if (!keyRecs.empty()) {
+                            InputQueue::Instance().EnqueueRecords(keyRecs.data(),
+                                                                  keyRecs.size());
+                        }
+                        if (!mouseRecs.empty()) {
+                            InputQueue::Instance().EnqueueBatched(mouseRecs.data(),
+                                                                  mouseRecs.size());
+                        }
+                    }
                     pendingEscTick = 0;  // 透传模式不用 ESC 超时
                 } else {
                     // 翻译模式：VT 序列 → INPUT_RECORD → 入 record 队列
@@ -246,6 +291,11 @@ void RecvLoopMain() {
                     vcs.ApplyWtCursorReport(wt.cols, wt.rows);
                     LOG_INFO("DllRecvLoop: WtStateReport cursor col=%d row=%d",
                              wt.cols, wt.rows);
+                } else if (wt.type == 2) {
+                    // Phase 15：DA report（终端能力标识）
+                    vcs.ApplyWtDaReport(wt.cols);
+                    LOG_INFO("DllRecvLoop: WtStateReport DA caps=%d",
+                             wt.cols);
                 }
                 break;
             }
