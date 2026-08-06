@@ -29,8 +29,11 @@ from injector import (  # noqa: E402
     wait_for_handshake,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # 清旧 DLL 日志
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
@@ -162,10 +165,10 @@ print("[5/5] DLL 仍未卸载，attach cdb 查看状态...", flush=True)
 print("  cmd PID = {}".format(target_pid), flush=True)
 
 # attach cdb 查看模块、线程、DLL 引用计数
-TOOLS = r"c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609"
-SYMSRV = "srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols"
-IMGPATH = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release"
-OUT = r"c:\Users\rikka\Desktop\terminal-injector\tests\helpers\cdb_unload_out.txt"
+TOOLS = paths.cdb_tools()
+SYMSRV = paths.symbol_path()
+IMGPATH = paths.build_bin()
+OUT = os.path.join(paths.out_dir(), "cdb_unload_out.txt")
 
 # cdb 命令：
 #   lm          列出所有模块（看 injected.dll 是否在）

@@ -22,10 +22,12 @@
 #include "HookCommon.h"
 #include "HookWhitelist.h"
 #include "../HookManager.h"
+#include "../LazyInit.h"
 #include "../state/ConsoleState.h"
 #include "../state/VirtualConsoleState.h"
 #include "../translator/ConsoleToVt.h"
 #include "../translator/VtEscape.h"
+#include "../translator/VtCursorTracker.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -91,6 +93,35 @@ extern "C" volatile LONG g_probe_wf  = 0;  // WriteFile_Detour 调用计数
 // Phase 3：文本流输出 Hook
 // ============================================================
 
+// Phase 21：子进程 VT 直通写前补发 CursorPosition(仅非目标进程)
+//
+// 根因：子 DLL 用 HelloAck 时点的 WT 光标对齐缓存，但其后父 cmd 的启动回显
+//   （\r\n + OSC 标题等，见 Mediator VtPassThrough）会把共享 ConPTY 光标回卷，
+//   直通写落在 ConPTY 实际光标而非 DLL 对齐位置 → 退出时 ChildExitSync 上报的
+//   ConPTY 光标与 aligned 基线偏差（width 系列、long_line_enter 失败）。
+//
+// 修复：子进程直通写内容前，用 VtCursorTracker 当前语义光标补发 CursorPosition
+//   到 ConPTY，强制 ConPTY 真实光标 = 追踪器基准，再写内容。这样 ConPTY 光标
+//   与 DLL 语义一致，ChildExitSync 上报值与测试期望对齐。
+//   仅子进程执行：目标进程（cmd）的 prompt 连排已由 LazyInit 的 Phase 20
+//   lineStartSync 处理，且目标进程 TUI（Textual）的 VT 流自带光标定位，
+//   此处补发会污染（见下方 VT 直通分支注释）。
+// 注意：补发序列用独立消息类型 CursorSync 发送（不经 BatchSender），
+// 避免与后续内容字节合并进同一 VtOutput 消息——modes 测试断言
+// "ChildVtOutput: len=3 hex[3]=61 0A 62" 要求内容消息字节原样。
+// CursorSync 为即时发送（HookCommon 控制消息路径），先于内容到达 mediator。
+void SyncChildVtCursorBeforeWrite() {
+    if (IsTargetProcess()) {
+        return;
+    }
+    COORD pos = VtCursorTracker::Instance().GetCursorPosition();
+    if (pos.X < 0) pos.X = 0;
+    if (pos.Y < 0) pos.Y = 0;
+    std::string sync = vt::CursorPosition(pos.Y + 1, pos.X + 1);
+    SendToMediator(sync.data(), sync.size(),
+                   protocol::MessageType::CursorSync);
+}
+
 // Hook 实现：WriteConsoleW
 BOOL WINAPI WriteConsoleW_Detour(
     HANDLE hConsoleOutput, const VOID* lpBuffer,
@@ -108,6 +139,42 @@ BOOL WINAPI WriteConsoleW_Detour(
                                   lpNumberOfCharsWritten, lpReserved);
     }
 
+    auto& state = ConsoleState::Instance();
+
+    // Phase 13 对齐：VT 输出直通模式（与 WriteFile_Detour 相同）
+    // Textual 等 TUI 程序（account ENABLE_VIRTUAL_TERMINAL_PROCESSING）通过
+    // WriteConsoleW 直接写 VT 序列（光标定位/清屏/颜色均内嵌在文本中）。
+    // 若走下方"纯文本翻译"路径：
+    //   1. 前置 CursorPosition 强制同步会提前覆盖 VT 流自身的光标定位
+    //   2. 默认 SGR 前缀会污染序列的颜色状态
+    //   3. state/VirtualConsoleState AdvanceCursor 把 \x1b [ 等按可打印字符推进，
+    //      造成游标缓存疯涨（曾观测到 Y=1373、scrollback=12153），后续恢复
+    //      光标位错导致 TUI Header 逐帧叠加、多列卡片错位。
+    // 故启用 VT 处理时直接 UTF-8 直传，不做翻译/推进/前置同步。
+    if (state.GetOutputMode() & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+        int vtLen = WideCharToMultiByte(CP_UTF8, 0,
+            reinterpret_cast<const wchar_t*>(lpBuffer),
+            static_cast<int>(nNumberOfCharsToWrite), nullptr, 0, nullptr, nullptr);
+        if (vtLen > 0) {
+            std::string vt(static_cast<size_t>(vtLen), '\0');
+            WideCharToMultiByte(CP_UTF8, 0,
+                reinterpret_cast<const wchar_t*>(lpBuffer),
+                static_cast<int>(nNumberOfCharsToWrite), vt.data(), vtLen,
+                nullptr, nullptr);
+            // Phase 19:直通流同步喂入追踪器,维护 ConPTY 语义光标(写后查询)
+            // Phase 21:写前补发 CursorPosition,强制 ConPTY 光标=追踪器基准
+            //   (子进程;父 cmd 启动回显会回卷共享 ConPTY 光标)
+            SyncChildVtCursorBeforeWrite();
+            VtCursorTracker::Instance().Feed(vt.data(), vt.size());
+            SendToMediator(vt.data(), vt.size());
+        }
+        if (lpNumberOfCharsWritten != nullptr) {
+            *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
+        }
+        LOG_DEBUG("WriteConsoleW_Detour: VT passthrough, len=%lu", nNumberOfCharsToWrite);
+        return TRUE;
+    }
+
     // 诊断日志（排查 Python 双 >>> 问题，验证后移除）
     {
         COORD before = ConsoleState::Instance().GetCursorPosition();
@@ -119,8 +186,6 @@ BOOL WINAPI WriteConsoleW_Detour(
                  nNumberOfCharsToWrite > 2 ? static_cast<unsigned>(wbuf[2]) : 0,
                  nNumberOfCharsToWrite > 3 ? static_cast<unsigned>(wbuf[3]) : 0);
     }
-
-    auto& state = ConsoleState::Instance();
 
     // 修复 ConPTY 光标不同步：输出前强制同步 ConPTY 光标到 DLL 缓存位置
     //
@@ -239,8 +304,38 @@ BOOL WINAPI WriteFile_Detour(
         if (wl > 0) OutputDebugStringW(wdbg);
     }
 
-    // 异步 I/O 直接 pass-through（控制台很少用异步写）
+    // 异步 I/O：console 句柄的 OVERLAPPED 写也需捕获（libuv TTY 每帧用 OVERLAPPED）
+    // mimo 等 Node 程序的 WriteFile 全部带 lpOverlapped，旧逻辑直接 pass-through
+    // 导致重绘永远不进 VT 转发（VtOutput 停在启动帧）。console 设备写是同步完成的
+    // （lpOverlapped 仅作占位），转发 buffer 后仍调 orig 保持异步语义完整。
     if (lpOverlapped != nullptr) {
+        if (IsConsoleHandle(hFile)) {
+            auto& state = ConsoleState::Instance();
+            if (state.GetOutputMode() & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+                // VT 模式:直通(与 Phase13 同步分支一致)
+                // Phase 21:写前补发 CursorPosition(子进程 ConPTY 光标回卷修复)
+                SyncChildVtCursorBeforeWrite();
+                VtCursorTracker::Instance().Feed(
+                    reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite);
+                SendToMediator(lpBuffer, nNumberOfBytesToWrite);
+                LOG_DEBUG("WriteFile_Detour: OVERLAPPED console VT passthrough, len=%lu",
+                          nNumberOfBytesToWrite);
+            } else {
+                // 非 VT：转 UTF-16 走 WriteConsoleW 翻译路径
+                UINT cp = state.GetOutputCp();
+                int wlen = MultiByteToWideChar(cp, 0,
+                    reinterpret_cast<const char*>(lpBuffer),
+                    static_cast<int>(nNumberOfBytesToWrite), nullptr, 0);
+                if (wlen > 0) {
+                    std::wstring wbuf(static_cast<size_t>(wlen), L'\0');
+                    MultiByteToWideChar(cp, 0,
+                        reinterpret_cast<const char*>(lpBuffer),
+                        static_cast<int>(nNumberOfBytesToWrite), wbuf.data(), wlen);
+                    WriteConsoleW_Detour(hFile, wbuf.data(), static_cast<DWORD>(wlen),
+                                         nullptr, nullptr);
+                }
+            }
+        }
         return WriteFile_orig(hFile, lpBuffer, nNumberOfBytesToWrite,
                               lpNumberOfBytesWritten, lpOverlapped);
     }
@@ -258,6 +353,11 @@ BOOL WINAPI WriteFile_Detour(
     // 避免 VT → ANSI(解码) → W → VT(翻译) 的无意义往返。
     auto& state = ConsoleState::Instance();
     if (state.GetOutputMode() & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+        // Phase 19:直通流同步喂入追踪器,维护 ConPTY 语义光标(写后查询)
+        // Phase 21:写前补发 CursorPosition(子进程 ConPTY 光标回卷修复)
+        SyncChildVtCursorBeforeWrite();
+        VtCursorTracker::Instance().Feed(
+            reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite);
         SendToMediator(lpBuffer, nNumberOfBytesToWrite);
         if (lpNumberOfBytesWritten != nullptr) {
             *lpNumberOfBytesWritten = nNumberOfBytesToWrite;

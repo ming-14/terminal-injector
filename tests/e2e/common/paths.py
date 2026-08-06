@@ -16,8 +16,9 @@ PROJECT_ROOT = os.environ.get("TI_PROJECT_ROOT") or os.path.normpath(
     os.path.join(TESTS_ALL_ROOT, "..", ".."))
 BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
 
-# mediator 日志（vt_capture 使用）
-TI_LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+# mediator 日志（vt_capture 使用）：按目标 pid 分文件（terminal-injector-<pid>.log）
+def ti_log_path(target_pid: int) -> str:
+    return os.path.join(BUILD_BIN, "terminal-injector-{}.log".format(target_pid))
 
 
 def ensure_dirs() -> None:

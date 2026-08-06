@@ -66,6 +66,7 @@ VK_F9 = 0x78
 VK_F10 = 0x79
 VK_F11 = 0x7A
 VK_F12 = 0x7B
+VK_LWIN = 0x5B
 
 
 class MOUSEINPUT(ctypes.Structure):

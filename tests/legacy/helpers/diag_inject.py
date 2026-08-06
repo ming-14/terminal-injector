@@ -11,8 +11,10 @@ import os
 import subprocess
 import time
 
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
 LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
@@ -68,7 +70,7 @@ def main():
         print("    日志文件未生成")
 
     # 5. 检查 cmd 注入日志
-    dll_log = r"C:\temp\injected_{}.log".format(pid)
+    dll_log = paths.injected_log(pid)
     print("[4] DLL 日志 {}:".format(dll_log))
     if os.path.exists(dll_log):
         with open(dll_log, "r", encoding="utf-8", errors="ignore") as f:

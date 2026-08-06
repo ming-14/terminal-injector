@@ -15,6 +15,7 @@ namespace terminjector {
 // 静态成员定义
 std::vector<HookEntry> HookManager::s_entries;
 bool HookManager::s_installed = false;
+volatile LONG HookManager::s_installing = 0;
 
 void HookManager::Register(const HookEntry& entry) {
     s_entries.push_back(entry);
@@ -35,6 +36,10 @@ bool HookManager::InstallAll() {
         LOG_WARN("InstallAll: no hooks registered");
         return true;
     }
+
+    // 注意：不在此处管理 s_installing。InstallAll 只是 DllMain(ATTACH) 的
+    // 一个步骤，CreateThread(worker) 的线程创建过程同样会命中被 Hook 的
+    // API，因此标志由 DllMain(ATTACH) 全程置位/清除（见 HookManager.h）
 
     // 1. 逐个 CreateHook，失败则回滚已创建的
     std::vector<void*> created;  // 已成功 CreateHook 的 target，用于回滚

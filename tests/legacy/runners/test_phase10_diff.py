@@ -13,7 +13,7 @@
   - 启动 cmd + WT(mediator) + 注入
   - SendInput 在 cmd 中运行目标程序
   - 目标程序把 python pid 写到结果文件
-  - runner 读结果文件拿 pid，读 C:\\temp\\injected_<pid>.log
+  - runner 读结果文件拿 pid，读该 pid 的 injected 日志
   - 提取 WriteConsoleOutput LOG_INFO 行，验证 canDiff 和 outBytes
 
 链路：
@@ -28,6 +28,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
 
 from helpers import injector
 from helpers import input_sim
@@ -35,8 +37,6 @@ from helpers import input_sim
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TARGET_SCRIPT_REL = os.path.join("tests", "targets", "test_phase10_diff_target.py")
 RESULT_FILE = os.path.join(PROJECT_ROOT, "phase10_diff_result.txt")
-# injected 日志目录（与 LazyInit.cpp 的 logPath 一致）
-INJECTED_LOG_DIR = r"C:\temp"
 
 TARGET_TIMEOUT = 30.0
 
@@ -128,11 +128,11 @@ def parse_results(path: str):
 
 
 def read_injected_log(pid: int) -> str:
-    """读取 C:\\temp\\injected_<pid>.log 全部内容。"""
+    """读取该 pid 最新一份 injected_<pid>_*.log 全部内容。"""
     if pid == 0:
         return ""
-    path = os.path.join(INJECTED_LOG_DIR, "injected_{}.log".format(pid))
-    if not os.path.exists(path):
+    path = paths.injected_log(pid)
+    if not path or not os.path.exists(path):
         return ""
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -298,8 +298,7 @@ def run() -> int:
                 time.sleep(0.5)
                 log = read_injected_log(pid)
                 if not log:
-                    print("[FATAL] injected 日志为空：{}".format(
-                        os.path.join(INJECTED_LOG_DIR, "injected_{}.log".format(pid))))
+                    print("[FATAL] injected 日志为空：{}".format(paths.injected_log(pid)))
                     failures += 1
                 else:
                     wco_logs = extract_wco_logs(log)

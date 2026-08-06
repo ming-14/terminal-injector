@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.session import TestSession
 from common import result as result_mod
+from common.childlog import latest_injected_log
 from helpers import input_sim
 
 NAME = "scrollback_count"
@@ -53,7 +54,7 @@ done()
 
 def _read_scb(pid: int) -> tuple:
     """读 cmd 进程 DLL 日志的最新 scrollback/userBufH（ApplyWtResize 行）。"""
-    p = r"C:\temp\injected_{}.log".format(pid)
+    p = latest_injected_log(pid)
     if not os.path.exists(p):
         return None
     with open(p, "r", encoding="utf-8", errors="ignore") as f:
@@ -143,7 +144,7 @@ def run() -> int:
                     failures += 1
                 else:
                     cpid = vp.strip()
-                    log_path = r"C:\temp\injected_{}.log".format(cpid)
+                    log_path = latest_injected_log(int(cpid))
                     deadline = time.time() + 6.0
                     m = None
                     while time.time() < deadline:

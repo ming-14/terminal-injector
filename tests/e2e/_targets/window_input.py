@@ -317,7 +317,8 @@ while time.time() < deadline:
     time.sleep(0.1)
 if not got:
     rec("GOT_RESIZE", "TIMEOUT")
-# 关闭 WINDOW_INPUT 后再收 3s：不应再收到 resize 事件
+# 关闭 WINDOW_INPUT 后再收 3s：真实 ConPTY 对 viewport 变化无条件发送
+# WINDOW_BUFFER_SIZE_EVENT（microsoft/terminal#281），关闭后仍应收到
 set_mode(h_in, 0)
 time.sleep(1.0)  # 等队列清空 + 事件处理
 deadline2 = time.time() + 5.0

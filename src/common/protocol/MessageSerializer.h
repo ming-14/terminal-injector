@@ -47,6 +47,11 @@ std::vector<uint8_t> Serialize(MessageType type,
 //   >0  成功，返回消费的字节数
 //   0   数据不足（还需更多字节），保持 outPayload 为空
 //   <0  协议错误（magic/version 不匹配，或 length 超过上限）
+//
+// 协议版本策略（kVersion，见 PacketDefs.h）：
+//   帧头携带版本号，Deserialize/RecvPacket 对 version != kVersion 的帧直接
+//   报错并断连（握手失败）。即"版本不一致 = 连接失败"是预期行为——
+//   两侧必须同版本构建，未做向后兼容（协议改动即 bump kVersion）。
 int Deserialize(const uint8_t* data, size_t len,
                 MessageType& outType,
                 std::vector<uint8_t>& outPayload);

@@ -19,7 +19,7 @@
   - 子进程 DLL 日志出现 "child cursor aligned to WT (X,Y) from HelloAck"
   - 子进程 DLL 日志不出现 "WT cursor synced to terminal"（重放分支不执行）
 
-验证方式: 驱动在注入 cmd 中执行长命令（生成 python 子进程），读 C:\\temp\\injected_<pid>.log
+验证方式: 驱动在注入 cmd 中执行长命令（生成 python 子进程），读最新 injected_<pid>_<时间戳>.log
 """
 import glob
 import os
@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.session import TestSession
 from common import result as result_mod
+from common import paths
+from common.childlog import injected_log_glob
 
 NAME = "child_cursor_aligned"
 
@@ -48,17 +50,16 @@ def run() -> int:
             time.sleep(0.5)
 
             # 在 cmd 中执行一条超长命令（折行），生成 python 子进程
-            long_cmd = ('python "C:\\Users\\rikka\\Desktop\\e2e\\_targets\\'
-                        'exp_mouse_move.py" "C:\\Users\\rikka\\Desktop\\e2e\\'
-                        'results\\exp_mouse_move.txt"')
+            target_script = os.path.join(paths.TARGETS_DIR, "exp_mouse_move.py")
+            result_file = os.path.join(paths.RESULTS_DIR, "exp_mouse_move.txt")
+            long_cmd = 'python "{}" "{}"'.format(target_script, result_file)
             s.type_text(long_cmd)
             time.sleep(0.3)
             s.type_enter()
             time.sleep(3.5)
 
             # 找最新创建的子进程 DLL 日志（LazyInit aligned 记录）
-            logs = sorted(glob.glob(r"C:\temp\injected_*.log"),
-                          key=os.path.getmtime)
+            logs = sorted(glob.glob(injected_log_glob()), key=os.path.getmtime)
             if not logs:
                 print("  [FAIL] 未找到任何 injected_*.log")
                 failures += 1

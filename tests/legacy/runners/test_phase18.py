@@ -15,6 +15,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
 
 from helpers import injector
 from helpers import input_sim
@@ -24,7 +26,7 @@ from helpers import input_sim
 SCROLLBACK_TEST_SCRIPT = os.path.join("tests", "phase18_scrollback_test.py")
 
 # 结果文件路径（与测试脚本约定）
-RESULT_FILE = "C:\\Users\\rikka\\Desktop\\terminal-injector\\logs\\scrollback_test_result.txt"
+RESULT_FILE = os.path.join(paths.out_dir(), "scrollback_test_result.txt")
 
 
 def wait_for_result(key: str, timeout: float = 20.0) -> str:

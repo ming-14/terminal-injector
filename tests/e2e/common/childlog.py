@@ -9,19 +9,46 @@ aligned 值作为期望基线。
 import glob
 import os
 import re
+import tempfile
 import time
+
+
+def injected_log_dir() -> str:
+    """DLL 注入日志目录（与 src/dll/LazyInit.cpp GetInjectedLogDir 对齐）。
+
+    DLL 侧：GetTempPathW() 默认系统临时目录，TI_INJECTED_LOG_DIR 环境变量覆盖。
+    测试侧同样优先 TI_INJECTED_LOG_DIR，否则 tempfile.gettempdir()，
+    保证与目标进程（由测试经 mediator 启动，继承测试环境变量）一致。
+    """
+    return os.environ.get("TI_INJECTED_LOG_DIR") or tempfile.gettempdir()
+
+
+def injected_log_glob() -> str:
+    """DLL 注入日志 glob 模式（文件名 injected_<pid>_<时间戳>.log）。"""
+    return os.path.join(injected_log_dir(), "injected_*.log")
+
+
+def latest_injected_log(pid: int) -> str:
+    """返回指定 pid 最新一份 DLL 日志的路径（无则空串）。
+
+    文件名带毫秒时间戳，同一 pid 多次注入/重复会话生成多个文件，
+    按 mtime 取最新即本次会话。
+    """
+    pattern = os.path.join(injected_log_dir(), "injected_{}_*.log".format(pid))
+    logs = sorted(glob.glob(pattern), key=os.path.getmtime)
+    return logs[-1] if logs else ""
 
 
 def find_child_aligned_baseline(timeout: float = 10.0) -> tuple:
     """从最新子进程 DLL 日志解析 LazyInit aligned 基线 (X, Y)。
 
-    在最近创建的 injected_<pid>.log 中找 "child cursor aligned to WT"
+    在最近创建的 injected_<pid>_<时间戳>.log 中找 "child cursor aligned to WT"
     记录（python 由测试启动，最新日志即本次测试的子进程）。
     未找到返回 None。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        logs = sorted(glob.glob(r"C:\temp\injected_*.log"),
+        logs = sorted(glob.glob(injected_log_glob()),
                       key=os.path.getmtime, reverse=True)
         for lp in logs[:3]:
             try:

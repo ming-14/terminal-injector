@@ -5,11 +5,12 @@
 
 预期:
   - mediator 日志含 OSC 7 序列字节
-  - WT 新标签页继承该目录（可选校验，探测 WT 是否支持）
+  - 序列内容为文件系统当前工作目录（动态生成，不硬编码路径）
 
-验证方式: 目标发送 + 驱动解析日志字节
+验证方式: 目标发送 + 上报 hex + 驱动解析日志字节
 """
 import os
+import re
 import sys
 import time
 
@@ -24,8 +25,12 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 h_out = get_std_out()
-# OSC 7 工作目录（file:// URI）
-ok, _ = write_bytes(h_out, b"\\x1b]7;file:///C:/Users/rikka/Desktop/e2e\\x07")
+# OSC 7 工作目录（file:// URI）：用当前工作目录动态构造，避免写死机器路径
+import os as _os
+_cwd = _os.getcwd().replace("\\\\", "/")
+_payload = b"\\x1b]7;file:///" + _cwd.encode("utf-8") + b"\\x07"
+rec("HEX", " ".join("{:02X}".format(b) for b in _payload))
+ok, _ = write_bytes(h_out, _payload)
 rec("SENT", str(int(ok)))
 time.sleep(1.0)
 done()
@@ -39,13 +44,13 @@ def run() -> int:
         with TestSession() as s:
             s.run_target(NAME, TARGET_BODY, ready_key="READY")
             v = s.wait_result(NAME, "SENT", timeout=15.0)
-            if not v:
-                print("  [FAIL] SENT: 无结果")
+            hexval = s.wait_result(NAME, "HEX", timeout=15.0)
+            if not v or not hexval:
+                print("  [FAIL] SENT/HEX: 无结果")
                 failures += 1
             else:
-                pattern = (r"hex\[\d+\]=1B 5D 37 3B 66 69 6C 65 3A 2F 2F 2F "
-                           r"43 3A 2F 55 73 65 72 73 2F 72 69 6B 6B 61 2F "
-                           r"44 65 73 6B 74 6F 70 2F 74 65 73 74 73 5F 61 6C 6C 07")
+                # 按目标上报的 hex 字节匹配 mediator 日志（避免硬编码路径断言）
+                pattern = r"hex\[\d+\]=" + re.escape(hexval)
                 m = s.log().wait_for_regex(pattern, timeout=8.0)
                 if m:
                     print("  [PASS] 日志含 OSC 7 工作目录序列（发送侧直通）")

@@ -5,10 +5,13 @@ import subprocess
 import sys
 import os
 
-TOOLS = r".agents\skills\windows-debugging\10.0.19041.5609"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paths
+
+TOOLS = paths.cdb_tools()
 CDB = os.path.join(TOOLS, "cdb.exe")
-SYM = r"srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols"
-EXE_PATH = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release"
+SYM = paths.symbol_path()
+EXE_PATH = paths.build_bin()
 
 def main():
     if len(sys.argv) < 2:

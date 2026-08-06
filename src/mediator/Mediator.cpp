@@ -17,6 +17,7 @@
 #include "logging/Logger.h"
 
 #include <windows.h>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -98,10 +99,12 @@ Mediator::Mediator() = default;
 Mediator::~Mediator() = default;
 
 int Mediator::Run(uint32_t targetPid, const std::wstring& pipeName,
-                  const std::wstring& dllPath) {
+                  const std::wstring& dllPath, uint32_t selfPid) {
     m_targetPid = targetPid;
-    LOG_INFO("Mediator starting, targetPid=%u pipe=%ls dll=%ls",
-             targetPid, pipeName.c_str(), dllPath.c_str());
+    m_selfPid = selfPid;
+    m_pipeName = pipeName;
+    LOG_INFO("Mediator starting, targetPid=%u pipe=%ls dll=%ls selfPid=%u",
+             targetPid, pipeName.c_str(), dllPath.c_str(), selfPid);
 
     if (targetPid == 0) {
         LOG_ERROR("Mediator: targetPid is 0");
@@ -180,7 +183,9 @@ bool Mediator::SpawnInjector(uint32_t targetPid, const std::wstring& dllPath) {
 
     std::wstring cmd = std::wstring(exePath) +
                        L" --inject " + std::to_wstring(targetPid) +
-                       L" --dll \"" + dllPath + L"\"";
+                       L" --dll \"" + dllPath + L"\"" +
+                       L" --pipe \"" + m_pipeName + L"\"" +
+                       L" --mediator-pid " + std::to_wstring(m_selfPid);
     LOG_INFO("SpawnInjector cmd: %ls", cmd.c_str());
 
     STARTUPINFOW si{};
@@ -231,12 +236,14 @@ bool Mediator::Handshake() {
                  payload.size(), sizeof(hello));
     }
     LOG_INFO("Handshake: Hello received, pid=%u bitness=%u cols=%u rows=%u "
-             "winRows=%u mode=0x%04x cp=%u/%u cursor=(%u,%u) dllBase=0x%llx",
+             "winRows=%u mode=0x%04x cp=%u/%u cursor=(%u,%u) dllBase=0x%llx "
+             "protocolVersion=%u",
              hello.targetPid, hello.targetBitness,
              hello.bufferCols, hello.bufferRows, hello.windowRows,
              hello.consoleMode, hello.consoleCp, hello.consoleOutputCp,
              hello.cursorX, hello.cursorY,
-             static_cast<unsigned long long>(hello.dllBase));
+             static_cast<unsigned long long>(hello.dllBase),
+             kVersion);
 
     // Phase 11：保存 injected.dll 基址
     // 收到 UnloadComplete 时据此远程调 FreeLibrary(dllBase) 触发 DETACH
@@ -376,14 +383,18 @@ void Mediator::BridgeLoop() {
         }
     });
 
-    // stdin→pipe 独立线程（ReadFile 阻塞，pipe 断开时主线程退出，
-    // 进程结束会强制终止此线程；Phase 10 用 CancelIoEx 优雅唤醒）
+    // stdin→pipe 独立线程（ReadConsoleInputW 阻塞）
+    // 断管清理时：置 stop 位 → 从主线程 CancelIoEx(hStdin) 唤醒阻塞的读 → join
+    // （Phase 3 曾用"进程结束强制终止"简化，但进程要等 join 才能退，会永久挂死）
     // Phase 12+：通过 RouteInput 路由回调，把输入分发到活跃子进程或父进程
     // Phase 11：stdin EOF（WT tab 关闭）时主动发 Shutdown 给 DLL，触发 DLL 自卸载
     //           否则 mediator 进程退出后管道断开，DLL 才被动感知（延迟且依赖进程退出）
-    std::thread stdinThread([this]() {
+    std::atomic<bool> stdinStop = false;
+    std::atomic<bool> stdinDone = false;
+    std::thread stdinThread([this, &stdinStop, &stdinDone]() {
         VtPassThrough::ForwardStdinToPipe(
-            [this](const uint8_t* data, size_t len) { RouteInput(data, len); });
+            [this](const uint8_t* data, size_t len) { RouteInput(data, len); },
+            stdinStop, stdinDone);
         // stdin EOF：WT 已关闭，通知 DLL 主动卸载
         // DLL 收到 Shutdown → Unloader::RequestUnload → FreeLibraryAndExitThread
         // → DLL 卸载 → pipe 断开 → 主线程 ForwardPipeToStdout 退出
@@ -406,7 +417,10 @@ void Mediator::BridgeLoop() {
                 if (payload.size() >= sizeof(protocol::ChildProcessNotifyPayload)) {
                     protocol::ChildProcessNotifyPayload notify{};
                     std::memcpy(&notify, payload.data(), sizeof(notify));
-                    OnChildProcessNotify(notify.childPid, notify.parentPid);
+                    // 子会话随机管道名由父 DLL 生成上报（安全加固），
+                    // 与父 DLL 注入子 DLL 时下发的参数必须一致
+                    std::wstring childPipe(notify.pipeName);
+                    OnChildProcessNotify(notify.childPid, notify.parentPid, childPipe);
                 }
             } else if (type == protocol::MessageType::ModeChange) {
                 // DLL 上报目标 SetConsoleMode 模式变更
@@ -436,8 +450,26 @@ void Mediator::BridgeLoop() {
     // 停止 size watcher（pipe 断开后停止轮询）
     m_sizeWatcher.Stop();
 
-    // 等待 stdin 线程（实际场景下进程退出会强制终止，这里 join 兜底）
-    stdinThread.join();
+    // 等待 stdin 线程（pipe 断开后的清理步骤）
+    // 不能直接 join：ReadConsoleInputW 阻塞时 WT 窗口若仍开着就没有 EOF，
+    // 线程永不返回 → 进程挂死（observed: 目标退出/DLL 卸载后残留窗口按键全部失败）
+    // 唤醒方式：置 stop 位后从本线程 CancelIoEx(hStdin)，使阻塞的
+    // ReadConsoleInputW 返回失败退出。竞态：线程可能尚未进入 ReadConsoleInputW
+    // （刚检查完 stop），单次 CancelIoEx 会错过，需重试直到线程置位 done。
+    stdinStop.store(true);
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    for (int i = 0; i < 200 && !stdinDone.load(); ++i) {
+        CancelIoEx(hStdin, nullptr);
+        Sleep(5);
+    }
+    if (stdinDone.load()) {
+        stdinThread.join();
+    } else {
+        // 兜底：句柄类型不支持 CancelIoEx 等极端情况，线程仍阻塞。
+        // 分离后进程退出强制终止线程，避免 join 永久挂死。
+        stdinThread.detach();
+        LOG_ERROR("stdin thread did not exit after CancelIoEx retries, detached");
+    }
     LOG_INFO("BridgeLoop exit");
 }
 
@@ -534,18 +566,22 @@ void Mediator::OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode) {
 // Phase 12：子进程会话管理
 // ============================================================
 
-void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid) {
-    LOG_INFO("OnChildProcessNotify: childPid=%u parentPid=%u", childPid, parentPid);
+void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid,
+                                    const std::wstring& pipeName) {
+    LOG_INFO("OnChildProcessNotify: childPid=%u parentPid=%u pipe=%ls",
+             childPid, parentPid, pipeName.c_str());
 
     // 创建子进程会话：管道实例 + Handshake + 接收线程
     // VtOutput 回调：子进程输出写到 WT stdout（与父进程输出合并）
     // ChildNotify 回调：子进程创建孙进程时递归创建 ChildSession
     // Exit 回调：子进程退出时同步 ConPTY 光标给父进程 DLL（OnChildExit）
     // ModeChange 回调：子进程 SetConsoleMode 时发 VT 鼠标报告启用/禁用序列给 WT
+    // pipeName：父 DLL 生成的随机管道名（必须与父 DLL 传给子 DLL 的一致）
     auto session = std::make_shared<ChildSession>(
-        childPid,
+        childPid, pipeName,
         [this](const uint8_t* data, size_t len) { WriteChildVtOutput(data, len); },
-        [this](uint32_t cp, uint32_t pp) { OnChildProcessNotify(cp, pp); },
+        [this](uint32_t cp, uint32_t pp, const std::wstring& grandPipe) {
+            OnChildProcessNotify(cp, pp, grandPipe); },
         [this](uint32_t cp) { OnChildExit(cp); },
         [this](uint32_t in, uint32_t out, bool fromChild) { OnModeChange(in, out, fromChild); },
         [this](uint32_t vtIn, uint32_t vtOut) { OnModeSwitchNotify(vtIn, vtOut); });

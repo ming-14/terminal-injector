@@ -38,15 +38,18 @@ public:
 
     // 主循环
     // targetPid 目标进程 PID（构造管道名、触发注入）
-    // pipeName  命名管道名
+    // pipeName  命名管道名（随机名，安全加固）
     // dllPath   injected.dll 路径（fork inject 子命令时用）
+    // selfPid   mediator 自身 PID：传给注入器（--mediator-pid），
+    //           DLL 连接后校验服务端进程身份
     // 返回退出码
     int Run(uint32_t targetPid, const std::wstring& pipeName,
-            const std::wstring& dllPath);
+            const std::wstring& dllPath, uint32_t selfPid);
 
 private:
     // 触发注入：fork 自身以 --inject 模式运行
     // 返回 true 表示注入子进程已启动（不等其完成）
+    // fork 命令行携带 --pipe（随机管道名）与 --mediator-pid（服务端身份）
     bool SpawnInjector(uint32_t targetPid, const std::wstring& dllPath);
 
     // 执行 Hello 握手
@@ -62,7 +65,10 @@ private:
     // 收到 ChildProcessNotify 时创建子进程会话
     // childPid 新创建的子进程 PID
     // parentPid 父进程 PID
-    void OnChildProcessNotify(uint32_t childPid, uint32_t parentPid);
+    // pipeName 父 DLL 生成的子会话随机管道名（安全加固，
+    //           子 DLL 连接后校验服务端进程身份 == 本 mediator）
+    void OnChildProcessNotify(uint32_t childPid, uint32_t parentPid,
+                              const std::wstring& pipeName);
 
     // 子进程退出时同步 ConPTY 光标给父进程 DLL
     // childPid 退出的子进程 PID
@@ -124,6 +130,8 @@ private:
 
     std::unique_ptr<ITransport> m_transport;
     uint32_t m_targetPid = 0;
+    uint32_t m_selfPid = 0;  // mediator 自身 PID（DLL 服务端身份校验目标）
+    std::wstring m_pipeName;  // 随机管道名（SpawnInjector fork 时传给注入器）
 
     // Phase 11：injected.dll 在目标进程中的基址（Hello 上报）
     // OnUnloadComplete 据此远程调 FreeLibrary(m_dllBase)

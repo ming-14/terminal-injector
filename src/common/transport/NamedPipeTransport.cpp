@@ -5,11 +5,16 @@
 //   - Server 端用 PIPE_WAIT 阻塞模式，配合上层独立线程
 //   - Client 端连接时若服务端忙（ERROR_PIPE_BUSY），等待 5 秒重试
 //   - Send/Recv 用循环确保完整收发（WriteFile/ReadFile 可能分多次完成）
-//   - MakePipeName 生成 \\.\pipe\terminjector_<pid>
+//   - MakeRandomPipeName 生成 \\.\pipe\terminjector_<pid>_<hex16>
+//     （安全加固：随机后缀，防可预测抢占；名字经注入参数传给 DLL）
+//   - Create() 用当前用户 SID 的 DACL（防跨用户连接）
 #include "NamedPipeTransport.h"
 #include "../logging/Logger.h"
 
 #include <cstdio>
+#include <cstring>
+#include <vector>
+#include <sddl.h>  // ConvertSidToStringSidW / ConvertStringSecurityDescriptorToSecurityDescriptorW
 
 namespace terminjector {
 
@@ -18,14 +23,92 @@ namespace {
 constexpr DWORD kPipeBufSize = 65536;
 }
 
-// 构造命名管道名称：\\.\pipe\terminjector_<targetPid>
-// 中介与 DLL 双方约定一致，DLL 用 GetCurrentProcessId()
-std::wstring MakePipeName(uint32_t targetPid) {
-    wchar_t buf[128];
+// 生成 16 位十六进制随机后缀（8 字节强随机）
+// 用 RtlGenRandom（advapi32!SystemFunction036，动态获取避免改链接）：
+//   rand_s 在部分 CRT 配置下不可用；RtlGenRandom 是系统级 CSPRNG
+std::wstring MakeRandomPipeName(uint32_t targetPid) {
+    BYTE bytes[8] = {0};
+    BOOL ok = FALSE;
+    HMODULE hAdvapi = GetModuleHandleW(L"advapi32.dll");
+    if (hAdvapi != nullptr) {
+        typedef BOOLEAN(WINAPI* RtlGenRandomFn)(PVOID, ULONG);
+        auto fn = reinterpret_cast<RtlGenRandomFn>(
+            GetProcAddress(hAdvapi, "SystemFunction036"));
+        if (fn != nullptr) {
+            ok = fn(bytes, sizeof(bytes)) != FALSE;
+        }
+    }
+    if (!ok) {
+        // 极罕见回退：时间戳 + pid，保证至少跨会话不同
+        const uint64_t fallback =
+            (static_cast<uint64_t>(GetTickCount()) << 32) |
+            GetCurrentProcessId();
+        std::memcpy(bytes, &fallback, sizeof(bytes));
+    }
+    unsigned int a = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+    unsigned int b = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
+    wchar_t buf[160];
     int n = std::swprintf(buf, sizeof(buf) / sizeof(buf[0]),
-                          L"\\\\.\\pipe\\terminjector_%u", targetPid);
+                          L"\\\\.\\pipe\\terminjector_%u_%08X%08X",
+                          targetPid, a, b);
     return (n > 0) ? std::wstring(buf) : std::wstring();
 }
+
+// 构造仅当前用户 + SYSTEM 可访问的 DASD DACL 安全描述符
+// 返回 SECURITY_ATTRIBUTES（调用方应在 CreateNamedPipeW 后调用
+// ReleaseSecurityAttributes 释放 descriptor）
+namespace {
+
+struct SaGuard {
+    SECURITY_ATTRIBUTES sa{};
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    ~SaGuard() {
+        if (sd != nullptr) LocalFree(sd);
+    }
+};
+
+bool BuildCurrentUserSecurityAttributes(SaGuard& out) {
+    // 1. 当前进程 token 的 User SID
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        LOG_WARN("DACL: OpenProcessToken failed: %lu", GetLastError());
+        return false;
+    }
+    DWORD need = 0;
+    GetTokenInformation(hToken, TokenUser, nullptr, 0, &need);
+    std::vector<BYTE> buf(need);
+    TOKEN_USER* tu = reinterpret_cast<TOKEN_USER*>(buf.data());
+    if (!GetTokenInformation(hToken, TokenUser, tu, need, &need)) {
+        LOG_WARN("DACL: GetTokenInformation(TokenUser) failed: %lu", GetLastError());
+        CloseHandle(hToken);
+        return false;
+    }
+    CloseHandle(hToken);
+
+    // 2. SID -> 字符串（拼 SDDL）
+    LPWSTR sidStr = nullptr;
+    if (!ConvertSidToStringSidW(tu->User.Sid, &sidStr)) {
+        LOG_WARN("DACL: ConvertSidToStringSidW failed: %lu", GetLastError());
+        return false;
+    }
+    std::wstring sddl = L"D:(A;;GA;;;SY)(A;;GA;;;" +
+                        std::wstring(sidStr) + L")";
+    LocalFree(sidStr);
+
+    // 3. SDDL -> SECURITY_DESCRIPTOR
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.c_str(), SDDL_REVISION_1, &out.sd, nullptr)) {
+        LOG_WARN("DACL: ConvertStringSecurityDescriptorToSecurityDescriptor failed: %lu",
+                 GetLastError());
+        return false;
+    }
+    out.sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    out.sa.lpSecurityDescriptor = out.sd;
+    out.sa.bInheritHandle = FALSE;
+    return true;
+}
+
+} // namespace
 
 NamedPipeTransport::NamedPipeTransport(std::wstring pipeName, Role role)
     : m_pipeName(std::move(pipeName)), m_role(role) {}
@@ -61,6 +144,12 @@ bool NamedPipeTransport::Create() {
         return false;
     }
 
+    // 安全属性：DACL 限制到当前用户 + SYSTEM
+    // 默认安全属性会让同会话任意进程可连接（管道承载键盘输入与屏幕内容，
+    // 见文件头"管道安全"注释），必须显式收紧
+    SaGuard saGuard;
+    const bool daclOk = BuildCurrentUserSecurityAttributes(saGuard);
+
     // 中介：创建命名管道实例（不阻塞，等 WaitClient 再等待客户端）
     m_pipeHandle = CreateNamedPipeW(
         m_pipeName.c_str(),
@@ -70,11 +159,17 @@ bool NamedPipeTransport::Create() {
         kPipeBufSize,    // 输出缓冲
         kPipeBufSize,    // 输入缓冲
         0,               // 默认超时（仅 WaitNamedPipe 用，此处不生效）
-        nullptr);        // 默认安全属性
+        daclOk ? &saGuard.sa : nullptr);  // DACL 构建失败时回退默认（记 WARN）
     if (m_pipeHandle == INVALID_HANDLE_VALUE) {
         LOG_ERROR("CreateNamedPipeW failed, err=%lu, name=%ws",
                   GetLastError(), m_pipeName.c_str());
         return false;
+    }
+    if (daclOk) {
+        LOG_INFO("NamedPipe server created with user-DACL: %ws", m_pipeName.c_str());
+    } else {
+        LOG_WARN("NamedPipe server created WITHOUT tightened DACL: %ws",
+                 m_pipeName.c_str());
     }
     m_created = true;
     LOG_INFO("NamedPipe server created (not yet waiting): %ws", m_pipeName.c_str());
@@ -157,6 +252,18 @@ void NamedPipeTransport::Disconnect() {
 
 bool NamedPipeTransport::IsConnected() const {
     return m_pipeHandle != INVALID_HANDLE_VALUE;
+}
+
+uint32_t NamedPipeTransport::GetServerProcessId() const {
+    if (m_pipeHandle == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    DWORD serverPid = 0;
+    if (!GetNamedPipeServerProcessId(m_pipeHandle, &serverPid)) {
+        LOG_WARN("GetNamedPipeServerProcessId failed, err=%lu", GetLastError());
+        return 0;
+    }
+    return serverPid;
 }
 
 int NamedPipeTransport::Send(const void* data, size_t len) {

@@ -8,9 +8,17 @@
 //   - 手写 HandleGuard RAII，不引入 wil 依赖
 #include "Injector.h"
 #include "ProcessHelper.h"
+#include "transport/PipeParams.h"
+#include "remote/RemoteCall.h"
 #include "../common/logging/Logger.h"
 
 #include <cstring>
+#include <cwctype>
+#include <algorithm>
+#include <vector>
+
+#include <psapi.h>   // EnumProcessModulesEx / GetModuleFileNameExW
+#pragma comment(lib, "psapi.lib")
 
 namespace terminjector {
 
@@ -31,9 +39,9 @@ Injector::Injector() = default;
 Injector::~Injector() = default;
 
 bool Injector::Inject(uint32_t targetPid, const std::wstring& dllPath,
-                     const std::wstring& pipeName) {
-    LOG_INFO("Inject starting, pid=%u dll=%ls pipe=%ls",
-             targetPid, dllPath.c_str(), pipeName.c_str());
+                      const std::wstring& pipeName, uint32_t mediatorPid) {
+    LOG_INFO("Inject starting, pid=%u dll=%ls pipe=%ls mediatorPid=%u",
+             targetPid, dllPath.c_str(), pipeName.c_str(), mediatorPid);
 
     if (targetPid == 0) {
         LOG_ERROR("Inject: targetPid is 0");
@@ -81,13 +89,25 @@ bool Injector::Inject(uint32_t targetPid, const std::wstring& dllPath,
     }
     LOG_INFO("Remote DLL loaded at %p in pid=%u", hRemoteDll, targetPid);
 
-    // 5. DLL 自发现管道名（约定方案，无需远程调用导出函数）
-    //    DLL DllMain 中：
-    //    - GetCurrentProcessId() 得到 targetPid
-    //    - MakePipeName(targetPid) 构造管道名
-    //    - 连接 mediator（Phase 2 验证用，Phase 3 改懒加载）
-    LOG_INFO("Injection complete, pid=%u (DLL self-discovers pipe via convention)",
-             targetPid);
+    // 5. 跨进程下发管道参数给 DLL（安全加固，防可预测管道名抢占）
+    //    注入参数：随机管道名 + mediatorPid（服务端身份校验目标）
+    //    DLL 侧 RemotePipeSetup 保存；连接后校验 GetNamedPipeServerProcessId
+    if (pipeName.empty()) {
+        LOG_ERROR("Inject: pipeName is empty, cannot deliver pipe params");
+        return false;
+    }
+    {
+        PipeParams params{};
+        wcsncpy_s(params.pipeName, kMaxPipeNameLen, pipeName.c_str(), _TRUNCATE);
+        params.mediatorPid = mediatorPid;
+        if (!RemoteCallExport(hProcess, hRemoteDll, dllPath, "RemotePipeSetup",
+                              &params, sizeof(params), nullptr)) {
+            LOG_ERROR("Inject: RemoteCallExport(RemotePipeSetup) failed for "
+                      "pid=%u; DLL will not connect to mediator", targetPid);
+            return false;
+        }
+        LOG_INFO("Injection complete, pid=%u (pipe params delivered)", targetPid);
+    }
     return true;
 }
 
@@ -184,7 +204,12 @@ HMODULE Injector::RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath
     HandleGuard threadGuard(hThread);
 
     // 等待远程线程结束（10s 超时）
+    LOG_INFO("RemoteLoadLibrary: waiting LoadLibraryW thread (target pid=%u)",
+             GetProcessId(hProcess));
     DWORD waitRes = WaitForSingleObject(hThread, 10000);
+    LOG_INFO("RemoteLoadLibrary: LoadLibraryW thread finished, res=%lu elapsed=%ldms",
+             waitRes,
+             (waitRes == WAIT_OBJECT_0) ? 0L : -1L);
     if (waitRes != WAIT_OBJECT_0) {
         LOG_ERROR("Remote LoadLibraryW thread wait failed: %lu (res=%lu)",
                   GetLastError(), waitRes);
@@ -193,6 +218,9 @@ HMODULE Injector::RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath
     }
 
     // 线程退出码即 LoadLibraryW 返回值（HMODULE）
+    // 注意：GetExitCodeThread 只有 32 位，64 位 HMODULE 的高 32 位会被截断
+    //（远程 DLL 基址可能 >4G，不能依赖退出码）→ 用 EnumProcessModulesEx
+    // 枚举目标进程模块，按文件名匹配 injected.dll，拿完整 64 位基址
     DWORD exitCode = 0;
     if (!GetExitCodeThread(hThread, &exitCode)) {
         LOG_ERROR("GetExitCodeThread failed: %lu", GetLastError());
@@ -208,7 +236,56 @@ HMODULE Injector::RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath
         return nullptr;
     }
 
-    return reinterpret_cast<HMODULE>(exitCode);
+    HMODULE hRemoteDll = FindRemoteModuleByPath(hProcess, L"injected.dll");
+    if (hRemoteDll == nullptr) {
+        LOG_ERROR("Remote LoadLibraryW succeeded but module '%ls' not found "
+                  "in target (%lu)", L"injected.dll", GetLastError());
+        return nullptr;
+    }
+
+    return hRemoteDll;
+}
+
+HMODULE Injector::FindRemoteModuleByPath(HANDLE hProcess, const std::wstring& name) {
+    // 枚举目标进程模块，按文件名（不区分大小写）匹配，返回完整 64 位基址
+    // EnumProcessModulesEx 需要 psapi（#pragma comment 链接）
+    DWORD cb = 0;
+    if (!EnumProcessModulesEx(hProcess, nullptr, 0, &cb,
+                              LIST_MODULES_ALL)) {
+        LOG_ERROR("FindRemoteModuleByPath: EnumProcessModulesEx(query) failed: %lu",
+                  GetLastError());
+        return nullptr;
+    }
+    std::vector<HMODULE> mods(cb / sizeof(HMODULE));
+    if (!EnumProcessModulesEx(hProcess, mods.data(), cb, &cb,
+                              LIST_MODULES_ALL)) {
+        LOG_ERROR("FindRemoteModuleByPath: EnumProcessModulesEx failed: %lu",
+                  GetLastError());
+        return nullptr;
+    }
+
+    std::wstring lower(name);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+
+    for (HMODULE hMod : mods) {
+        wchar_t path[MAX_PATH] = {0};
+        if (GetModuleFileNameExW(hProcess, hMod, path, MAX_PATH) == 0) {
+            continue;
+        }
+        // 取文件名部分，与目标名比对
+        std::wstring base(path);
+        size_t pos = base.find_last_of(L"\\/");
+        std::wstring file = (pos != std::wstring::npos) ? base.substr(pos + 1) : base;
+        std::transform(file.begin(), file.end(), file.begin(),
+                       [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+        if (file == lower) {
+            LOG_INFO("FindRemoteModuleByPath: '%ls' found at %p",
+                     name.c_str(), hMod);
+            return hMod;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace terminjector

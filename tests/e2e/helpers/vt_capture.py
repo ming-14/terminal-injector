@@ -112,6 +112,34 @@ def count_vt_output(log: str) -> int:
     return len(re.findall(r"pipe.*stdout: VtOutput", log))
 
 
+def parse_child_vt_output(log: str) -> tuple:
+    """解析所有 ChildVtOutput 行，返回 (len 总和, hex 头字节列表, 包数)。
+
+    mediator 日志行格式（Mediator.cpp WriteChildVtOutput）：
+      ChildVtOutput: len=%zu written=%lu ok=%d err=%lu hex[%zu]=XX XX ...
+    hex 字段最多记录前 256 字节（len>256 时截断），故返回的字节列表
+    只含每包头部，用于内容标记验证；字节完整性用 len 总和（无截断，
+    与 BatchSender 合并无关）。
+    """
+    total_len = 0
+    head_bytes = b""
+    packets = 0
+    pattern = re.compile(
+        r"ChildVtOutput: len=(\d+) written=(\d+) ok=(\d) err=(\d+) hex\[(\d+)\]=\s*(.*?)\s*$",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(log):
+        packets += 1
+        total_len += int(m.group(1))
+        hex_part = m.group(6)
+        if hex_part:
+            try:
+                head_bytes += bytes.fromhex(hex_part)
+            except ValueError:
+                pass
+    return total_len, head_bytes, packets
+
+
 def bytes_to_hex(data: bytes) -> str:
     """字节转十六进制字符串（大写，空格分隔）。"""
     return " ".join("{:02X}".format(b) for b in data)

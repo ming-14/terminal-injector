@@ -2,7 +2,8 @@
 // 详见 docs/phases/12-child-process-injection.md 4.4.3-4.5
 //
 // Phase 12：每个被注入的子进程对应一个 ChildSession
-//   - 创建命名管道实例 \\.\pipe\terminjector_<child_pid>
+//   - 创建命名管道实例 \\.\pipe\terminjector_<child_pid>_<随机>
+//     （管道名由父 DLL 生成并经 ChildProcessNotify 上报，安全加固）
 //   - 等待子进程 DLL 连接
 //   - Hello 握手（收 Hello，回 HelloAck，不 ApplySnapshot）
 //   - 接收线程：收 VtOutput → 回调 mediator 写 stdout；
@@ -35,7 +36,8 @@ public:
     // 收到子进程 VtOutput 时调用（mediator 据此写 WT stdout）
     using VtOutputCallback    = std::function<void(const uint8_t*, size_t)>;
     // 收到 ChildProcessNotify 时调用（mediator 据此创建孙进程会话）
-    using ChildNotifyCallback = std::function<void(uint32_t childPid, uint32_t parentPid)>;
+    // 第三个参数 pipeName：子/孙 DLL 生成的随机管道名
+    using ChildNotifyCallback = std::function<void(uint32_t childPid, uint32_t parentPid, const std::wstring& pipeName)>;
     // 子进程退出时调用（RecvLoop 结束后触发，mediator 据此同步 ConPTY 光标给父进程 DLL）
     using ExitCallback        = std::function<void(uint32_t childPid)>;
     // 收到 ModeChange 时调用（mediator 据此发 VT 鼠标报告启用/禁用序列给 WT）
@@ -47,6 +49,7 @@ public:
     using ModeSwitchNotifyCallback = std::function<void(uint32_t vtInputMode, uint32_t vtOutputMode)>;
 
     ChildSession(uint32_t childPid,
+                 const std::wstring& pipeName,
                  VtOutputCallback    onVtOutput,
                  ChildNotifyCallback onChildNotify,
                  ExitCallback        onExit,
@@ -84,6 +87,7 @@ public:
 
 private:
     uint32_t m_childPid;
+    std::wstring m_pipeName;  // 随机管道名（父 DLL 生成上报）
     std::unique_ptr<NamedPipeTransport> m_transport;
     std::thread m_thread;
     std::atomic<bool> m_running{false};

@@ -4,14 +4,16 @@
       事件含拖拽）→ SendInput 按下→移动→释放 → WT SGR 序列 → DLL 翻译 →
       目标收到 MOUSE_EVENT
 
-实际行为（WT ConPTY 限制，已记录差异 LIM-005）:
-  - WT 对鼠标移动不输出任何事件（SendInput MOVE / PostMessage WM_MOUSEMOVE /
-    SetCursorPos 均验证无效），拖拽期间只有按下/释放两个 SGR 序列
-  - 因此 MOUSE_MOVED 标志在 WT 链路不可达；拖拽按下态保持无法观测
+实际行为（WT ConPTY 限制，已记录差异 LIM-005，2026-08-05 实测修正）:
+  - WT 对按下期间移动不输出 FR1（MOUSE_MOVED），而是按当前按钮状态重复
+    输出 FR0 按下事件（4 步移动 → 4 个重复 down，flags 恒为 0x0）
+  - 未按键悬停移动不输出任何事件（SendInput MOVE/PostMessage/SetCursorPos
+    均验证无效）
+  - 因此 MOUSE_MOVED 标志在 WT 链路不可达，但拖拽按下态可观测（重复 down）
 
 测试验证:
-  - 拖拽 = down(0x1) → up(0x0) 两事件，释放坐标反映终点（WT 跟踪了位置）
-  - down/up 坐标差异 > 0（位置移动被 WT 记录）
+  - 拖拽 = down(0x1) → [拖拽按下态重复 down] → up(0x0)
+  - 释放坐标反映终点（WT 跟踪了位置）：down/up 坐标差异 > 0
 
 验证方式: 目标 ReadConsoleInputW 循环收 MOUSE_EVENT 并 rec 每事件
 """
@@ -53,14 +55,16 @@ while time.time() < deadline:
         break
     time.sleep(0.1)
 rec("COUNT", str(len(evs)))
-# 断言：down(0x1) → up(0x0)；位置有移动
-if len(evs) == 2:
+# 断言：down(0x1) → 拖拽按下态重复 down(0x1) → up(0x0)；位置有移动
+if len(evs) >= 2 and evs[-1][0] == 0x0:
     check("DOWN", evs[0][0] == 0x1, hex(evs[0][0]))
-    check("UP", evs[1][0] == 0x0, hex(evs[1][0]))
-    dx = abs(evs[1][2] - evs[0][2])
-    dy = abs(evs[1][3] - evs[0][3])
+    check("HOLD", all(e[0] == 0x1 for e in evs[:-1]),
+          ",".join(hex(e[0]) for e in evs[:-1]))
+    check("UP", evs[-1][0] == 0x0, hex(evs[-1][0]))
+    dx = abs(evs[-1][2] - evs[0][2])
+    dy = abs(evs[-1][3] - evs[0][3])
     check("MOVED_POS", dx + dy > 0, "down=({},{}) up=({},{})".format(
-        evs[0][2], evs[0][3], evs[1][2], evs[1][3]))
+        evs[0][2], evs[0][3], evs[-1][2], evs[-1][3]))
 done()
 '''
 
@@ -84,23 +88,24 @@ def run() -> int:
                 if not vc:
                     print("  [FAIL] COUNT: 无结果")
                     failures += 1
-                elif int(vc) != 2:
-                    print("  [FAIL] 收到 {} 个事件（期望 2: down/up——WT 拖拽不报移动，"
-                          "见 LIM-005）".format(vc))
+                elif int(vc) < 2:
+                    print("  [FAIL] 收到 {} 个事件（期望 >= 2: down/up；"
+                          "WT 拖拽按下态以重复 down 呈现，见 LIM-005）"
+                          .format(vc))
                     failures += 1
                 else:
-                    for k in ("DOWN", "UP", "MOVED_POS"):
+                    for k in ("DOWN", "HOLD", "UP", "MOVED_POS"):
                         vk = s.wait_result(NAME, k, timeout=5.0)
                         if vk == "PASS":
                             print("  [PASS] {}: {}".format(
-                                k, {"DOWN": "down=0x1", "UP": "up=0x0",
+                                k, {"DOWN": "down=0x1", "HOLD": "拖拽按下态保持",
+                                    "UP": "up=0x0",
                                     "MOVED_POS": "坐标有移动"}[k]))
                         else:
                             print("  [FAIL] {}: {}".format(k, vk))
                             failures += 1
-                    print("  [SKIP] MOUSE_MOVED 标志：WT ConPTY 不输出鼠标移动事件"
-                          "（SendInput/PostMessage/SetCursorPos 均无效），"
-                          "已记录差异 LIM-005")
+                    print("  [SKIP] MOUSE_MOVED 标志：WT ConPTY 拖拽只输出重复 down"
+                          "（FR0），不出 FR1 移动事件，已记录差异 LIM-005")
     except RuntimeError as e:
         print("  [FAIL] setup 失败: {}".format(e))
         failures += 1

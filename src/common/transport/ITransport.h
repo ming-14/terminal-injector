@@ -44,8 +44,4 @@ public:
     virtual int Peek(void* buf, size_t len) { (void)buf; (void)len; return -1; }
 };
 
-// 构造命名管道名称：\\.\pipe\terminjector_<targetPid>
-// DLL 侧用 GetCurrentProcessId() 得到 targetPid，与中介侧约定一致
-std::wstring MakePipeName(uint32_t targetPid);
-
 } // namespace terminjector

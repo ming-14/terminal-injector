@@ -62,6 +62,7 @@
 #include "protocol/Message.h"
 #include "protocol/MessageSerializer.h"
 #include "transport/ITransport.h"
+#include "hooks/ProtectionHooks.h"
 
 #include <windows.h>
 #include <thread>
@@ -158,7 +159,8 @@ void Unloader::DoUnload() {
     }
 
     // 6. 显示原 Console 窗口（Phase 9 隐藏过，恢复可见让用户能继续操作）
-    HWND hCon = GetConsoleWindow();
+    //    GetConsoleWindow 已 Hook 返回 NULL，走 orig 拿真实 HWND
+    HWND hCon = hooks::CallRealGetConsoleWindow();
     if (hCon) {
         ShowWindow(hCon, SW_SHOW);
         LOG_INFO("Unload: console window shown");

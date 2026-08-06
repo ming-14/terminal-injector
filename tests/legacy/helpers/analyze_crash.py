@@ -6,12 +6,13 @@ import os
 import sys
 import subprocess
 
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-CDB = os.path.join(PROJECT_ROOT, ".agents", "skills", "windows-debugging",
-                    "10.0.19041.5609", "cdb.exe")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+CDB = paths.cdb_exe()
 # PDB 路径（在 build/bin/Release/）
-PDB_DIR = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
-SYMPATH = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols;{}".format(PDB_DIR)
+PDB_DIR = paths.build_bin()
+SYMPATH = paths.symbol_path()
 
 
 def main():

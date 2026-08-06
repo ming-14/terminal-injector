@@ -8,11 +8,13 @@ import time
 import subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "helpers"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from injector import (
     start_target_cmd, start_wt_mediator, clear_log, wait_for_handshake,
     focus_wt, cleanup, LOG_PATH, BUILD_BIN
 )
 import input_sim as sim
+import paths  # noqa: E402
 
 
 def get_log() -> str:
@@ -58,7 +60,7 @@ def main():
     # 在 WT 窗口中输入命令（mediator 转发到目标 cmd）
     print("    在 WT 中运行 textual_demo.py")
     # 先输入 cd 到项目目录
-    sim.type_text("cd C:\\Users\\rikka\\Desktop\\terminal-injector")
+    sim.type_text("cd {}".format(paths.project_root()))
     sim.type_enter()
     time.sleep(1)
     # 启动 textual_demo.py

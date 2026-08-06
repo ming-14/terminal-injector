@@ -23,7 +23,10 @@
 namespace terminjector {
 
 // 假句柄魔数：位 16-31 为 0xABCD（如 sentinel 0xABCDE123）
-// 真实内核句柄高位不会是 0xABCD，魔数判断无冲突
+// 注意：这是内部约定值，非系统契约。真实内核句柄理论上可与魔数碰撞，
+//       碰撞时 CloseHandle 快路径会静默吞掉该句柄（误伤真实句柄）。
+//       由于 sentinel 值固定且为进程私有，实际碰撞概率可忽略；
+//       若未来引入动态句柄，须避开 0xABCD0000-0xABCDFFFF 区间或改走查表路径。
 constexpr uintptr_t kFakeHandleMagicMask = 0xFFFF0000ULL;
 constexpr uintptr_t kFakeHandleMagicBits = 0xABCD0000ULL;
 

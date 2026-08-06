@@ -320,12 +320,14 @@ while time.time() < deadline:
         break
     time.sleep(0.1)
 rec("COUNT", str(len(evs)))
-# 断言：down(0x1) → up(0x0)；位置有移动
-if len(evs) == 2:
+# 断言：down(0x1) → 拖拽按下态重复 down(0x1) → up(0x0)；位置有移动
+if len(evs) >= 2 and evs[-1][0] == 0x0:
     check("DOWN", evs[0][0] == 0x1, hex(evs[0][0]))
-    check("UP", evs[1][0] == 0x0, hex(evs[1][0]))
-    dx = abs(evs[1][2] - evs[0][2])
-    dy = abs(evs[1][3] - evs[0][3])
+    check("HOLD", all(e[0] == 0x1 for e in evs[:-1]),
+          ",".join(hex(e[0]) for e in evs[:-1]))
+    check("UP", evs[-1][0] == 0x0, hex(evs[-1][0]))
+    dx = abs(evs[-1][2] - evs[0][2])
+    dy = abs(evs[-1][3] - evs[0][3])
     check("MOVED_POS", dx + dy > 0, "down=({},{}) up=({},{})".format(
-        evs[0][2], evs[0][3], evs[1][2], evs[1][3]))
+        evs[0][2], evs[0][3], evs[-1][2], evs[-1][3]))
 done()

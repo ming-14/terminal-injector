@@ -297,8 +297,12 @@ def wait_input(h, timeout_ms=5000):
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 h_out = get_std_out()
-# OSC 7 工作目录（file:// URI）
-ok, _ = write_bytes(h_out, b"\x1b]7;file:///C:/Users/rikka/Desktop/e2e\x07")
+# OSC 7 工作目录（file:// URI）：用当前工作目录动态构造，避免写死机器路径
+import os as _os
+_cwd = _os.getcwd().replace("\\", "/")
+_payload = b"\x1b]7;file:///" + _cwd.encode("utf-8") + b"\x07"
+rec("HEX", " ".join("{:02X}".format(b) for b in _payload))
+ok, _ = write_bytes(h_out, _payload)
 rec("SENT", str(int(ok)))
 time.sleep(1.0)
 done()

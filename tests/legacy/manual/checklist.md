@@ -11,7 +11,7 @@
 2. 启动 WT
 3. 在 WT 中运行：
    ```
-   C:\Users\rikka\Desktop\terminal-injector\build\bin\Release\terminal_injector.exe --mediator --target-pid <PID>
+   `<项目根>\build\bin\Release\terminal_injector.exe --mediator --target-pid <PID>`
    ```
 4. 确认握手成功（WT 中出现 cmd 提示符，mediator 日志出现 "Handshake OK"）
 

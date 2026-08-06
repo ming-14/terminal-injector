@@ -242,7 +242,15 @@ void RingBufferLogger::LogV(LogLevel level, const char* fmt, va_list args) {
     //       （2026-07-25 修复循环 2 cmd 崩溃：STATUS_STACK_BUFFER_OVERRUN 0xC0000409）
     char buf[ThreadLogBuffer::kEntrySize];
     const int bufSize = static_cast<int>(sizeof(buf));
-    int prefixLen = std::snprintf(buf, sizeof(buf), "[%s] ", ToString(level));
+    // 前缀包含单调时钟时间戳（us）：用于测量 hook 事件之间的间隔
+    // QueryPerformanceCounter 单调递增，不受系统时间调整影响
+    static const LARGE_INTEGER kFreq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+    static const LARGE_INTEGER kBase = [] { LARGE_INTEGER b; QueryPerformanceCounter(&b); return b; }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const long long elapsedUs = static_cast<long long>(
+        (now.QuadPart - kBase.QuadPart) * 1000000LL / kFreq.QuadPart);
+    int prefixLen = std::snprintf(buf, sizeof(buf), "[%s] t=%lld ", ToString(level), elapsedUs);
     if (prefixLen < 0) prefixLen = 0;
     if (prefixLen > bufSize - 2) prefixLen = bufSize - 2;  // 兜底：至少留 \n\0
 

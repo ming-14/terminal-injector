@@ -72,6 +72,9 @@ from injector import (  # noqa: E402
     wait_for_handshake,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # ============================================================
 # Win32 / Nt API 绑定
 # ============================================================
@@ -328,7 +331,7 @@ def close_wt_window():
 def main():
 
     # 清旧 DLL 日志
-    for f in glob.glob(r"C:\temp\injected_*.log"):
+    for f in glob.glob(paths.injected_log_glob()):
         try:
             os.remove(f)
         except OSError:
@@ -379,7 +382,7 @@ def main():
         mediator_proc.kill()
 
     # 等待 DLL 日志出现 "FreeLibrary" 或 "FreeLibraryAndExitThread"（确认 DoUnload 跑到末尾）
-    dll_log = r"C:\temp\injected_{}.log".format(target_pid)
+    dll_log = paths.injected_log(target_pid)
     print("\n[wait] 等待 DoUnload 完成（日志出现 FreeLibrary）...", flush=True)
     deadline = time.time() + 15.0
     unloaded_log_seen = False

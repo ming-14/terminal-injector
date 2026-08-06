@@ -28,7 +28,9 @@
 
 namespace terminjector {
 
-void VtPassThrough::ForwardStdinToPipe(InputRouter router) {
+void VtPassThrough::ForwardStdinToPipe(InputRouter router,
+                                       const std::atomic<bool>& stop,
+                                       std::atomic<bool>& done) {
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
     // 诊断：打印 stdin 句柄类型与 console mode，便于判断读取行为
     DWORD stdinMode = 0;
@@ -56,11 +58,18 @@ void VtPassThrough::ForwardStdinToPipe(InputRouter router) {
 
     INPUT_RECORD recs[64];
     // 循环靠 ReadConsoleInputW 失败退出；router 由 mediator 提供，在 BridgeLoop 退出前一直有效
+    // stop 置位（断管清理）后，BridgeLoop 从其他线程 CancelIoEx 唤醒阻塞的
+    // ReadConsoleInputW（返回 FALSE），或本线程回到循环顶检查 stop 退出
     while (true) {
+        if (stop.load()) {
+            LOG_INFO("stdin→router: stop requested, exit loop");
+            break;
+        }
         DWORD read = 0;
         // ReadConsoleInputW 阻塞等 WT 输入，返回 INPUT_RECORD 数组（按下/释放分开）
         if (!ReadConsoleInputW(hStdin, recs, 64, &read) || read == 0) {
-            LOG_INFO("stdin→router: ReadConsoleInputW EOF or failed, err=%lu", GetLastError());
+            LOG_INFO("stdin→router: ReadConsoleInputW EOF or failed, err=%lu stop=%d",
+                     GetLastError(), stop.load() ? 1 : 0);
             break;
         }
 
@@ -85,6 +94,7 @@ void VtPassThrough::ForwardStdinToPipe(InputRouter router) {
         router(reinterpret_cast<const uint8_t*>(vtOut.data()), vtOut.size());
         LOG_INFO("stdin→router: routed, len=%zu", vtOut.size());
     }
+    done.store(true);
     LOG_INFO("stdin→router thread exit");
 }
 

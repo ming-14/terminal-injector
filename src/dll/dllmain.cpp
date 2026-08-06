@@ -55,6 +55,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             // 禁用线程 attach/detach 通知，减少 DllMain 调用次数
             DisableThreadLibraryCalls(hModule);
 
+            // 置"安装中"标志：本 ATTACH 流程内（MH_Initialize/InstallAll/
+            // CreateThread）任何被 Hook 的 API 命中 Detour 时，EnsureLazyInitialized
+            // 都跳过同步初始化（ConnectToMediator 轮询最长 5s，会阻塞
+            // LoadLibraryW 线程），改由下方 worker 线程异步完成
+            terminjector::HookManager::SetInstalling(true);
+
             // 1. 初始化 MinHook（失败则拒绝加载）
             if (MH_Initialize() != MH_OK) {
                 OutputDebugStringW(L"[terminjector] DllMain: MH_Initialize failed");
@@ -127,6 +133,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             if (hWorker) {
                 CloseHandle(hWorker);
             }
+            // ATTACH 流程结束（worker 已创建），允许懒加载初始化
+            terminjector::HookManager::SetInstalling(false);
             break;
         }
         case DLL_PROCESS_DETACH: {

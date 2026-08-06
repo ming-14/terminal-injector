@@ -6,6 +6,10 @@
 //   - AttachConsole：拒绝（ERROR_ACCESS_DENIED），防止附加到其他进程 Console
 //   - FreeConsole：返回 TRUE 但不真断，保持 ConHost 控制台存在
 //     （ConHost 仍负责 GenerateConsoleCtrlEvent 等控制信号传递）
+//   - GetConsoleWindow：返回 NULL，隔离目标程序对 ConHost 原生窗口的操作
+//     （Far 类程序拿 HWND 改标题/置顶/子类化会旁路中介管道，且可能把
+//       隐藏窗口重新显示；返回 NULL 后程序走"无窗口"分支，尺寸靠
+//       GetConsoleScreenBufferInfo 缓存提供）
 //   - CloseHandle：假句柄静默 TRUE，其他调真实 API
 //
 // CloseHandle 性能注意：
@@ -45,6 +49,7 @@ namespace terminjector::hooks {
 DEFINE_ORIG_PTR(AllocConsole, BOOL WINAPI());
 DEFINE_ORIG_PTR(AttachConsole, BOOL WINAPI(DWORD));
 DEFINE_ORIG_PTR(FreeConsole, BOOL WINAPI());
+DEFINE_ORIG_PTR(GetConsoleWindow, HWND WINAPI());
 DEFINE_ORIG_PTR(CloseHandle, BOOL WINAPI(HANDLE));
 
 // ============================================================
@@ -160,6 +165,38 @@ BOOL WINAPI CloseHandle_Detour(HANDLE h) {
 }
 
 // ============================================================
+// GetConsoleWindow Hook
+// ============================================================
+// 返回 NULL：隔离目标程序对 ConHost 原生窗口的操作
+//   - Far 等程序拿 HWND 做 SetWindowText/SetWindowPos/子类化，会旁路中介
+//     管道（标题应走 SetConsoleTitleW Detour 转发 WT），且可能把 LazyInit
+//     已隐藏的原 ConHost 窗口重新显示
+//   - 返回 NULL 后程序普遍走"无窗口"分支，安全；尺寸由
+//     GetConsoleScreenBufferInfo Detour 缓存提供
+// 注意：不调 ENSURE_INITIALIZED（与文件头 ProtectionHooks 统一原则一致；
+//      该 Hook 无状态，返回 NULL 恒安全，无需懒加载）
+// IsInLazyInit 时放行原 API：LazyInit 内部需真实 HWND（隐藏窗口），
+// 但这些内部调用统一走 CallRealGetConsoleWindow，故此处 Detour 仍返回 NULL；
+// 保留 IsInLazyInit 分支仅作对称防护（覆盖未来可能直接调此 API 的路径）
+HWND WINAPI GetConsoleWindow_Detour() {
+    if (IsInLazyInit()) {
+        return GetConsoleWindow_orig();
+    }
+    return NULL;
+}
+
+// ============================================================
+// 暴露 orig trampoline 给 DLL 内部模块（LazyInit/StateSnapshot/Unloader）
+// ============================================================
+// 用途：这些模块需要真实 ConHost HWND（隐藏/显示窗口、记录可见性），
+//       若直接调 GetConsoleWindow 会进入 Detour 返回 NULL。
+//       通过 orig trampoline 绕过 Hook 拿真实值。
+// 前提：Hook 已安装（orig 非 null）。调用点均在 InstallAll 后执行，故不判空。
+HWND CallRealGetConsoleWindow() {
+    return GetConsoleWindow_orig();
+}
+
+// ============================================================
 // 注册自保护类 Hook
 // ============================================================
 // 只 Hook 一个版本：优先 kernelbase，回退 kernel32
@@ -217,6 +254,9 @@ void RegisterProtectionHooks() {
     entries.push_back(make("FreeConsole",
         reinterpret_cast<void*>(&FreeConsole_Detour),
         reinterpret_cast<void**>(&FreeConsole_orig)));
+    entries.push_back(make("GetConsoleWindow",
+        reinterpret_cast<void*>(&GetConsoleWindow_Detour),
+        reinterpret_cast<void**>(&GetConsoleWindow_orig)));
     entries.push_back(make("CloseHandle",
         reinterpret_cast<void*>(&CloseHandle_Detour),
         reinterpret_cast<void**>(&CloseHandle_orig)));

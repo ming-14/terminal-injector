@@ -3,9 +3,13 @@
 链路: 调整 WT 窗口尺寸 → mediator WtSizeWatcher → ResizeNotify → DLL
       EnqueueResizeEvent → 目标 ReadConsoleInputW 收到 WINDOW_BUFFER_SIZE_EVENT
 
-预期:
+预期（2026-08-05 实证修正）:
   - ENABLE_WINDOW_INPUT 开启：调整 WT 窗口尺寸，目标收到 WINDOW_BUFFER_SIZE_EVENT
-  - 关闭后：调整窗口尺寸，目标不再收到该事件
+  - 关闭后：调整窗口尺寸，目标**仍会收到**该事件——
+    真实 ConPTY（RS5+）对 viewport 变化无条件发送 WINDOW_BUFFER_SIZE_EVENT，
+    不受 ENABLE_WINDOW_INPUT 门控（microsoft/terminal#281 维护者确认：
+    "send the events for all viewport changes regardless"；官方文档描述
+    与实现不符，微软任务 19686633 待修文档）。DLL 无条件注入与该行为一致。
 
 验证方式: 目标 ReadConsoleInputW 自检 + 驱动调整 WT 窗口尺寸
 """
@@ -44,7 +48,8 @@ while time.time() < deadline:
     time.sleep(0.1)
 if not got:
     rec("GOT_RESIZE", "TIMEOUT")
-# 关闭 WINDOW_INPUT 后再收 3s：不应再收到 resize 事件
+# 关闭 WINDOW_INPUT 后再收 3s：真实 ConPTY 对 viewport 变化无条件发送
+# WINDOW_BUFFER_SIZE_EVENT（microsoft/terminal#281），关闭后仍应收到
 set_mode(h_in, 0)
 time.sleep(1.0)  # 等队列清空 + 事件处理
 deadline2 = time.time() + 5.0
@@ -114,19 +119,18 @@ def run() -> int:
                 else:
                     print("  [PASS] 开 WINDOW_INPUT 收到 resize 事件 ({})".format(v))
 
-            # 关闭 WINDOW_INPUT 后再次 resize，不应收到事件
-            # BUG-005 已修复：ReadConsoleInputW/A、PeekConsoleInputW/A 统一经
-            # FilterByInputMode 按 ENABLE_WINDOW_INPUT 过滤 WINDOW_BUFFER_SIZE_EVENT
+            # 关闭 WINDOW_INPUT 后再次 resize：真实 ConPTY 仍发 WINDOW_BUFFER_SIZE_EVENT
+            # （viewport 变化无条件发送，不受 ENABLE_WINDOW_INPUT 门控，见文件头注释）
             time.sleep(1.0)
             ok = _resize_wt()
             v2 = s.wait_result(NAME, "OFF_SEEN", timeout=20.0)
             if not v2:
                 print("  [FAIL] OFF_SEEN: 无结果")
                 failures += 1
-            elif v2 == "0":
-                print("  [PASS] 关 WINDOW_INPUT 后 resize 事件被过滤")
+            elif v2 == "1":
+                print("  [PASS] 关 WINDOW_INPUT 后仍收到 resize 事件（与真实 ConPTY 一致）")
             else:
-                print("  [FAIL] OFF_SEEN: {}（关闭 WINDOW_INPUT 后仍收到 resize 事件）".format(v2))
+                print("  [FAIL] OFF_SEEN: {}（关闭后未收到——真实 ConPTY 不受 WINDOW_INPUT 门控）".format(v2))
                 failures += 1
     except RuntimeError as e:
         print("  [FAIL] setup 失败: {}".format(e))

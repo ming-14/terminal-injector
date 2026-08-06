@@ -304,6 +304,8 @@ k32.FreeConsole.argtypes = []
 k32.FreeConsole.restype = ctypes.c_int
 k32.AttachConsole.argtypes = [ctypes.c_uint]
 k32.AttachConsole.restype = ctypes.c_int
+k32.GetConsoleWindow.argtypes = []
+k32.GetConsoleWindow.restype = ctypes.c_void_p
 k32.GetLastError.restype = ctypes.c_uint
 class CSI(ctypes.Structure):
     _fields_ = [("dwSize", ctypes.c_short * 2),
@@ -319,8 +321,9 @@ ea = k32.GetLastError()
 rb = k32.AttachConsole(0xFFFFFFFF)  # ATTACH_PARENT_PROCESS
 eb = k32.GetLastError()
 rf = k32.FreeConsole()
+gcw = k32.GetConsoleWindow()
 info = CSI()
 okg = k32.GetConsoleScreenBufferInfo(h_out, ctypes.byref(info))
-rec("RESULT", "{} {} {} {} {} {} {}".format(
-    ra, ea, rb, eb, rf, int(okg), info.dwSize[1]))
+rec("RESULT", "{} {} {} {} {} {} {} {}".format(
+    ra, ea, rb, eb, rf, int(gcw or 0), int(okg), info.dwSize[1]))
 done()

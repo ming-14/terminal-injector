@@ -8,22 +8,25 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # Clean old logs
 import glob
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
         pass
 
-PROJECT_ROOT = r"c:\Users\rikka\Desktop\terminal-injector"
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+PROJECT_ROOT = paths.project_root()
+BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 DLL_PATH = os.path.join(BUILD_BIN, "injected.dll")
 WT_EXE = os.path.join(os.environ.get("LOCALAPPDATA", ""),
                       "Microsoft", "WindowsApps", "wt.exe")
 LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
-PID_FILE = r"C:\temp\debug_pids.txt"
+PID_FILE = os.path.join(paths.out_dir(), "debug_pids.txt")
 
 # Clean mediator log
 try:
@@ -71,7 +74,7 @@ while time.time() < deadline:
 time.sleep(5.0)
 
 # Check DLL log
-dll_log = r"C:\temp\injected_{}.log".format(target_pid)
+dll_log = paths.injected_log(target_pid)
 dll_log_size = 0
 if os.path.exists(dll_log):
     dll_log_size = os.path.getsize(dll_log)

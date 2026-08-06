@@ -269,12 +269,20 @@ void VirtualConsoleState::ResetScrollback() {
     std::lock_guard<std::mutex> lock(m_lock);
     m_scrollbackLines = 0;
     m_userBufferHeight = 0;
-    // 恢复 bufferSize 为视口尺寸
+    // �ָ� bufferSize Ϊ�ӿڳߴ�
     SHORT rows = static_cast<SHORT>(m_windowRect.Bottom - m_windowRect.Top + 1);
     SHORT cols = static_cast<SHORT>(m_windowRect.Right - m_windowRect.Left + 1);
     m_bufferSize.X = cols;
     m_bufferSize.Y = rows;
     LOG_INFO("VirtualConsoleState::ResetScrollback: bufferSize reset to %dx%d", cols, rows);
+}
+
+// Phase 19：VT 直通追踪器内容滚出视口顶部一行时回调，与
+// AdvanceCursor 内部 wrapLine 的滚动计数保持一致（Phase 18 语义）。
+// 高频调用，不记日志。
+void VirtualConsoleState::NotifyScrollLine() {
+    std::lock_guard<std::mutex> lock(m_lock);
+    m_scrollbackLines++;
 }
 
 } // namespace terminjector

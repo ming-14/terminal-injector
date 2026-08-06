@@ -8,12 +8,15 @@
 //   1. 验证 DLL 是我们的 injected.dll（注入器/mediator 可远程调用查版本）
 //   2. 后续 Phase 兼容性检查（DLL 版本与 mediator 期望版本匹配）
 //
-// Phase 3+ 将新增：
-//   - Inject_Shutdown：让 mediator 通知 DLL 卸载 Hook
-//   - Inject_GetStatus：查询当前 Hook 状态、连接状态等
+// Phase 15（安全审查 HIGH #2）：导出 RemotePipeSetup
+//   注入器/父 DLL 经 RemoteCallExport 跨进程调用，传入 PipeParams
+//   （随机管道名 + mediatorPid）。旧方案 DLL 用 pid 约定自发现管道名，
+//   名字可预测易被抢占；现在名字由服务端生成随机后缀经此函数下发。
 #pragma once
 
 #include <cstdint>
+
+#include "transport/PipeParams.h"
 
 #ifdef __cplusplus
 extern "C" {

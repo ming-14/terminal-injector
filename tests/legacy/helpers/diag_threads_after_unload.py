@@ -30,17 +30,16 @@ from injector import (  # noqa: E402
     wait_for_handshake,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # cdb 路径（windows-debugging skill）
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-CDB_EXE = os.path.join(
-    PROJECT_ROOT, ".agents", "skills", "windows-debugging",
-    "10.0.19041.5609", "cdb.exe"
-)
+CDB_EXE = paths.cdb_exe()
 
 # 符号路径（根据 project_memory 配置）
-SYMBOL_PATH = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols"
+SYMBOL_PATH = paths.symbol_path()
 # exe 路径（含 injected.dll 的 build/bin/Release）
-EXE_PATH = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+EXE_PATH = paths.build_bin()
 
 
 def close_wt_window():
@@ -64,7 +63,7 @@ def main():
         sys.exit(1)
 
     # 清旧 DLL 日志
-    for f in glob.glob(r"C:\temp\injected_*.log"):
+    for f in glob.glob(paths.injected_log_glob()):
         try:
             os.remove(f)
         except OSError:
@@ -100,7 +99,7 @@ def main():
     # 等 DoUnload 完成
     # Unloader 调用 Logger::Shutdown 后不再落盘日志，所以等待
     # "shutting down logger" 日志（Logger::Shutdown 前最后一行）
-    dll_log = r"C:\temp\injected_{}.log".format(target_pid)
+    dll_log = paths.injected_log(target_pid)
     print("\n[wait] 等待 DoUnload 完成（shutting down logger 日志）...", flush=True)
     deadline = time.time() + 15.0
     unloaded_log_seen = False
@@ -129,7 +128,7 @@ def main():
     #   -i exe 路径（解析 injected.dll 符号）
     #   -logo 输出文件
     #   -c 命令：~*k（所有线程栈）+ lm（模块列表）+ qd（退出分离）
-    log_file = r"C:\temp\cdb_threads_{}.log".format(target_pid)
+    log_file = os.path.join(paths.out_dir(), "cdb_threads_{}.log".format(target_pid))
     if os.path.exists(log_file):
         os.remove(log_file)
 

@@ -19,13 +19,11 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
 
 from helpers import injector
 from helpers.vt_capture import MediatorLog
-
-
-# DLL 日志目录
-DLL_LOG_DIR = r"C:\temp"
 
 
 class TestContext:
@@ -57,8 +55,8 @@ class TestContext:
         time.sleep(1.0)
 
     def get_dll_log_path(self) -> str:
-        """返回 DLL 日志路径（injected_<pid>.log）。"""
-        return os.path.join(DLL_LOG_DIR, "injected_{}.log".format(self.target_pid))
+        """返回 DLL 日志路径（该 pid 最新一份 injected_<pid>_*.log）。"""
+        return paths.injected_log(self.target_pid)
 
     def read_all(self) -> str:
         return self.log.read_all()

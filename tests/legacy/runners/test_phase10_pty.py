@@ -36,6 +36,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
 
 from helpers import injector
 from helpers import input_sim
@@ -45,7 +47,6 @@ from helpers.vt_capture import MediatorLog
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PHASE10_RESULT = os.path.join(PROJECT_ROOT, "phase10_result.txt")
 PHASE10_DIFF_RESULT = os.path.join(PROJECT_ROOT, "phase10_diff_result.txt")
-INJECTED_LOG_DIR = r"C:\temp"
 
 # 目标程序相对 cmd cwd 的路径（cmd 启动时 cwd=PROJECT_ROOT）
 TARGET_PHASE10 = os.path.join("tests", "targets", "test_phase10_target.py")
@@ -114,11 +115,11 @@ def _extract_pid(path: str) -> int:
 
 
 def _read_injected_log(pid: int) -> str:
-    """读取 C:\\temp\\injected_<pid>.log 全部内容。"""
+    """读取该 pid 最新一份 injected_<pid>_*.log 全部内容。"""
     if pid == 0:
         return ""
-    path = os.path.join(INJECTED_LOG_DIR, "injected_{}.log".format(pid))
-    if not os.path.exists(path):
+    path = paths.injected_log(pid)
+    if not path or not os.path.exists(path):
         return ""
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -411,8 +412,7 @@ def test_phase10_diff_render() -> bool:
         time.sleep(0.5)
         injected_log = _read_injected_log(pid)
         if not injected_log:
-            print("  [FAIL] injected 日志为空：{}\\injected_{}.log".format(
-                INJECTED_LOG_DIR, pid))
+            print("  [FAIL] injected 日志为空：{}".format(paths.injected_log(pid)))
             return False
 
         wco_logs = _extract_wco_logs(injected_log)

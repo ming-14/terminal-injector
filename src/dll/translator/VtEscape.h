@@ -86,10 +86,24 @@ constexpr char kExitAltBuffer[]  = "\x1b[?1049l";
 constexpr const char* kShowCursor = "\x1b[?25h";
 constexpr const char* kHideCursor = "\x1b[?25l";
 
+// ===== 鼠标启用/禁用（Phase 20） =====
+// Textual 在 start_application_mode 中发送的鼠标启用序列组合
+// （见 textual/drivers/windows_driver.py::_enable_mouse_support）：
+//   \x1b[?1000h  SET_VT200_MOUSE（点击/释放）
+//   \x1b[?1003h  SET_ANY_EVENT_MOUSE（移动）+ 隐含 1002/1000
+//   \x1b[?1015h  SET_VT200_HIGHLIGHT_MOUSE（urxvt 扩展）
+//   \x1b[?1006h  SET_SGR_EXT_MODE_MOUSE（SGR 1006 坐标扩展）
+// 注：这些序列在 Textual 启动时（注入前）就已写入原 ConHost，被劫持切到 WT
+// 后字节已丢失，WT 从未进入鼠标跟踪模式 → 不产生鼠标事件。本常量用于 DLL
+// 握手完成后按 snap.inputMode 判定（VT 模式下目标程序确认会发送鼠标序列），
+// 主动重发启用序列让 WT 进入鼠标模式，SGR 事件回传即可命中 SGR→KEY_EVENT 转换。
+constexpr char kEnableMouse[] = "\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+constexpr char kDisableMouse[] = "\x1b[?1000l\x1b[?1003l\x1b[?1015l\x1b[?1006l";
+
 // ===== 终端查询（Phase 15） =====
 // DSR CPR 查询：CSI 6 n（请求光标位置报告）
 // WT 响应：CSI row ; col R
-constexpr const char* kDsrCprQuery = "\x1b[6n";
+constexpr const char *kDsrCprQuery = "\x1b[6n";
 // Primary DA 查询：CSI c（请求终端属性）
 // WT 响应：CSI ? 1 ; Ps c（Ps 标识特性集）
 constexpr const char* kDaPrimaryQuery = "\x1b[c";

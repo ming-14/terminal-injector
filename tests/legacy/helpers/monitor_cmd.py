@@ -10,8 +10,11 @@ import subprocess
 sys.path.insert(0, os.path.dirname(__file__))
 from injector import start_target_cmd, start_wt_mediator, wait_for_handshake, clear_log
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 import glob
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
@@ -36,7 +39,7 @@ print("  握手成功", flush=True)
 import psutil
 
 print("[4/4] 监控 cmd 生命周期（每 0.5s 采样）...", flush=True)
-log_path = r"C:\temp\injected_{}.log".format(target_pid)
+log_path = paths.injected_log(target_pid)
 samples = []
 start = time.time()
 try:

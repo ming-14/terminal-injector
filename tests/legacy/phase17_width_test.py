@@ -15,12 +15,15 @@ import os
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paths  # noqa: E402
+
 kernel32 = ctypes.windll.kernel32
 
 STD_OUTPUT_HANDLE = -11
 
 # 结果文件路径（与 test runner 约定）
-RESULT_FILE = os.environ.get("WIDTH_RESULT_FILE", "C:\\Users\\rikka\\Desktop\\terminal-injector\\logs\\width_test_result.txt")
+RESULT_FILE = os.environ.get("WIDTH_RESULT_FILE") or os.path.join(paths.out_dir(), "width_test_result.txt")
 
 
 def write_result(key, value):

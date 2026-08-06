@@ -3,7 +3,8 @@
 链路: 目标程序查询控制台信息 → DLL 返回合理值（不崩溃）
 
 预期:
-  - GetConsoleWindow 返回非零 HWND（真实终端窗口句柄）
+  - GetConsoleWindow 返回 0（Phase 9 设计：隔离目标程序对 ConHost 原生窗口的
+    操作——Far 类程序拿 HWND 会旁路中介管道；与 self_protection 测试一致）
   - GetLargestConsoleWindowSize 宽 >= 80 且高 >= 24（不小于当前窗口）
   - GetConsoleProcessList 返回 >= 1 个进程（cmd + python + 注入器）
   - GetConsoleMode(stdout) 含 ENABLE_VIRTUAL_TERMINAL_PROCESSING（强制 VT）
@@ -23,7 +24,7 @@ NAME = "query_console"
 TARGET_BODY = '''
 rec("READY", "PASS")
 hwnd = _k.GetConsoleWindow()
-check("WIN_NONZERO", bool(hwnd), "hwnd=0")
+check("WIN_ZERO", not hwnd, "hwnd={}".format(hwnd))
 maxsz = _k.GetLargestConsoleWindowSize(get_std_out())
 check("MAXW_REASONABLE", maxsz.X >= 80 and maxsz.Y >= 24,
       "max=({},{})".format(maxsz.X, maxsz.Y))
@@ -44,7 +45,7 @@ def run() -> int:
     try:
         with TestSession() as s:
             s.run_target(NAME, TARGET_BODY, ready_key="READY", ready_timeout=30.0)
-            for key in ("WIN_NONZERO", "MAXW_REASONABLE",
+            for key in ("WIN_ZERO", "MAXW_REASONABLE",
                         "PROCLIST_GE1", "PROCLIST_REASONABLE", "MODE_HAS_VT"):
                 v = s.wait_result(NAME, key, timeout=10.0)
                 if v == "PASS":

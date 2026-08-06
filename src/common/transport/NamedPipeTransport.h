@@ -3,10 +3,16 @@
 //
 // 角色约定：
 //   - Server（中介程序）：CreateNamedPipeW 创建管道 -> ConnectNamedPipe 等待 DLL
-//   - Client（DLL 侧）  ：CreateFileW 打开 \\.\pipe\terminjector_<pid>
+//   - Client（DLL 侧）  ：CreateFileW 打开 \\.\pipe\terminjector_<pid>_<随机>
 //
 // 模式：PIPE_TYPE_BYTE | PIPE_READMODE_BYTE（字节流，由上层协议分帧）
 // 缓冲：输入/输出各 64KB（鼠标攒批可能产生较大包）
+//
+// 管道安全（安全审查 HIGH #2 修复）：
+//   - 管道名含随机后缀（MakeRandomPipeName），服务端创建后经注入参数
+//     （RemotePipeSetup）传给 DLL，名字不可预测，防同会话进程预创建抢占
+//   - CreateNamedPipeW 使用当前用户 SID 的 DACL（仅本用户 + SYSTEM 可访问）
+//   - DLL 连接后校验 GetNamedPipeServerProcessId == 期望 mediatorPid
 //
 // Server 端时序（Phase 2 调整）：
 //   mediator 必须先 Create() 建立管道，再 SpawnInjector，
@@ -22,6 +28,11 @@
 #include <string>
 
 namespace terminjector {
+
+// 构造随机命名管道名称：\\.\pipe\terminjector_<targetPid>_<16位hex随机>
+// 随机后缀由服务端生成（rand_s，无需额外依赖），防止管道名可预测被抢占。
+// 调用方负责把结果经注入参数传给 DLL（RemotePipeSetup），DLL 不再自发现。
+std::wstring MakeRandomPipeName(uint32_t targetPid);
 
 class NamedPipeTransport : public ITransport {
 public:
@@ -57,6 +68,13 @@ public:
     int  Send(const void* data, size_t len) override;
     int  Recv(void* buf, size_t len) override;
     int  Peek(void* buf, size_t len) override;
+
+    // === 安全校验（Client 端） ===
+
+    // 查询服务端进程 PID（GetNamedPipeServerProcessId）
+    // 未连接/失败返回 0。DLL 连接后用它校验服务端身份 == 期望 mediatorPid，
+    // 防止连接被预创建的同名管道（伪造 mediator）抢占。
+    uint32_t GetServerProcessId() const;
 
 private:
     // 关闭当前句柄并置为 INVALID_HANDLE_VALUE

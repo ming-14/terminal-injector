@@ -5,14 +5,18 @@ import time
 import subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "helpers"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from injector import (
     start_target_cmd, start_wt_mediator, wait_for_handshake,
     focus_wt, clear_log, BUILD_BIN, MEDIATOR_EXE, PROJECT_ROOT,
     LOG_PATH,
 )
 import input_sim as sim
+import paths  # noqa: E402
 
-TEXTUAL_DEMO = "C:\\Users\\rikka\\Desktop\\textual_demo.py"
+TEXTUAL_DEMO = os.environ.get("TEXTUAL_DEMO")
+if not TEXTUAL_DEMO:
+    raise RuntimeError("TEXTUAL_DEMO 未设置（请通过环境变量指定 textual_demo.py 路径）")
 
 def cleanup(*pids):
     for pid in pids:

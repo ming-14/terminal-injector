@@ -28,6 +28,9 @@ from injector import (
 import win32gui
 import win32con
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # Win32 API 用于获取退出码
 _kernel32 = ctypes.windll.kernel32
 _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -105,7 +108,7 @@ def get_cmd_exit_code(hCmd):
 
 def check_wer_dumps(before_names):
     """检查 WER LocalDumps 是否生成了新 dump。返回新 dump 文件路径列表。"""
-    dump_dir = r"C:\temp\cmd_dumps"
+    dump_dir = os.path.join(paths.dump_dir(), "cmd_dumps")
     if not os.path.isdir(dump_dir):
         return []
     new_dumps = []
@@ -125,9 +128,9 @@ def main():
     hCmd = _kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, cmd_pid)
     print("[setup] hCmd={:#x}".format(hCmd or 0))
 
-    # WER LocalDumps 已配置到 C:\temp\cmd_dumps（通过 wer_localdumps_cmd.reg）
+    # WER LocalDumps 已配置到转储目录（通过 wer_localdumps_cmd.reg）
     # cmd.exe 崩溃时 WerFault.exe 会自动抓 full dump 到该目录
-    DUMP_DIR = r"C:\temp\cmd_dumps"
+    DUMP_DIR = os.path.join(paths.dump_dir(), "cmd_dumps")
     os.makedirs(DUMP_DIR, exist_ok=True)
 
     try:
@@ -226,7 +229,7 @@ def main():
                 else:
                     print("[cycle {}] WER 未抓到 dump（可能退出码不是崩溃，而是主动 ExitProcess）".format(i + 1))
                 # 检查 injected.dll 日志
-                log_path = r"C:\temp\injected_{}.log".format(cmd_pid)
+                log_path = paths.injected_log(cmd_pid)
                 if os.path.exists(log_path):
                     size = os.path.getsize(log_path)
                     print("[cycle {}] injected log size: {} bytes".format(i + 1, size))

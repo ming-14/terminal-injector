@@ -19,14 +19,14 @@ import time
 
 # 让 tests/helpers 可导入
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "helpers")))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import injector  # noqa: E402
-
-# injected DLL 日志路径（与 LazyInit.cpp 一致：C:\temp\injected_<pid>.log）
-INJECTED_LOG_DIR = r"C:\temp"
+import paths  # noqa: E402
 
 
 def get_injected_log_path(pid: int) -> str:
-    return os.path.join(INJECTED_LOG_DIR, f"injected_{pid}.log")
+    """返回该 pid 最新一份 injected 日志路径（目录由 paths.injected_log_dir 解析）。"""
+    return paths.injected_log(pid)
 
 
 def main() -> int:

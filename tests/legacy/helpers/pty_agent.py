@@ -25,39 +25,34 @@ PTY-Agent 路径与 WT 路径的差异：
 import json
 import os
 import subprocess
+import sys
 import time
 from typing import List, Optional, Tuple
 
 import psutil
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # 项目路径
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+PROJECT_ROOT = paths.project_root()
+BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
-
-# PTY-Agent app.py 路径解析：
-# 1. 优先环境变量 PTY_AGENT_PATH
-# 2. 默认位置（与现有 manual 测试一致，PTY-Agent 项目根 app.py）
-# 注意：不硬编码到代码逻辑中，仅作为环境变量未设置时的回退
-_DEFAULT_PTY_AGENT_PATH = r"c:\Users\rikka\Desktop\PTY-Agent\PTY-Agent\app.py"
 
 
 def find_pty_agent() -> str:
     """查找 PTY-Agent app.py 路径。
 
-    优先环境变量 PTY_AGENT_PATH，未设置时使用默认位置。
-    找不到时抛 FileNotFoundError，提示用户设置环境变量。
+    用环境变量 PTY_AGENT_PATH（paths.pty_agent() 内部处理），未设置时抛
+    RuntimeError 提示配置。
     """
-    path = os.environ.get("PTY_AGENT_PATH", "")
-    if path and os.path.exists(path):
-        return path
-    if os.path.exists(_DEFAULT_PTY_AGENT_PATH):
-        return _DEFAULT_PTY_AGENT_PATH
-    raise FileNotFoundError(
-        "PTY-Agent app.py 未找到。请设置环境变量 PTY_AGENT_PATH 指向 app.py 路径，"
-        "或确保默认位置存在: {}".format(_DEFAULT_PTY_AGENT_PATH)
-    )
+    try:
+        return paths.pty_agent()
+    except RuntimeError:
+        raise FileNotFoundError(
+            "PTY-Agent app.py 未找到。请设置环境变量 PTY_AGENT_PATH 指向 app.py 路径。"
+        )
 
 
 def start_target_cmd() -> int:

@@ -12,16 +12,15 @@ import os
 import subprocess
 import time
 
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
 LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
-CDB = os.path.join(
-    PROJECT_ROOT,
-    ".agents", "skills", "windows-debugging", "10.0.19041.5609", "cdb.exe",
-)
-SYM = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols;" + BUILD_BIN
+CDB = paths.cdb_exe()
+SYM = paths.symbol_path()
 
 # cdb 脚本：切到线程 3，抓栈，反汇编关键点
 CDB_SCRIPT = r"""

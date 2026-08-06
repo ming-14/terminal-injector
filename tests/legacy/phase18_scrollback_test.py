@@ -15,6 +15,9 @@ import os
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paths  # noqa: E402
+
 kernel32 = ctypes.windll.kernel32
 
 STD_OUTPUT_HANDLE = -11
@@ -25,9 +28,8 @@ ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
 
 # 结果文件路径
 RESULT_FILE = os.environ.get(
-    "SCROLLBACK_RESULT_FILE",
-    "C:\\Users\\rikka\\Desktop\\terminal-injector\\logs\\scrollback_test_result.txt",
-)
+    "SCROLLBACK_RESULT_FILE"
+) or os.path.join(paths.out_dir(), "scrollback_test_result.txt")
 
 
 def write_result(key, value):

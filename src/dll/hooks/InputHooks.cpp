@@ -23,6 +23,7 @@
 #include "../LazyInit.h"
 #include "../Unloader.h"
 #include "../lineedit/LineEditor.h"
+#include "../translator/VtEscape.h"
 #include "transport/ITransport.h"
 #include "logging/Logger.h"
 
@@ -45,7 +46,7 @@ static std::atomic<int> g_readConsoleInputA_calls{0};
 static std::atomic<int> g_readConsoleW_calls{0};
 static std::atomic<int> g_readConsoleA_calls{0};
 static std::atomic<int> g_readFile_stdin_calls{0};
-static constexpr int kDiagLogLimit = 20;
+static constexpr int kDiagLogLimit = 2000;
 
 // ============================================================
 // ReadDetourGuard：RAII 跟踪 Read 类 Detour 线程数（Phase 11 防 AV 崩溃）
@@ -167,28 +168,7 @@ static void ConvertRecordsFromAnsi(INPUT_RECORD* records, DWORD count) {
     }
 }
 
-// ============================================================
-// 输入事件过滤（BUG-005 修复）
-// ============================================================
-// ConHost 语义：输入模式的 ENABLE_WINDOW_INPUT 未设置时，读取接口
-// 不返回 WINDOW_BUFFER_SIZE_EVENT（事件丢弃，读取继续）。
-// ReadConsoleInputW/A、PeekConsoleInputW/A 共用。
-static size_t FilterByInputMode(INPUT_RECORD* buf, size_t n) {
-    DWORD mode = ConsoleState::Instance().GetInputMode();
-    bool filterResize = (mode & ENABLE_WINDOW_INPUT) == 0;
-    if (!filterResize) return n;
 
-    size_t kept = 0;
-    for (size_t i = 0; i < n; ++i) {
-        if (buf[i].EventType == WINDOW_BUFFER_SIZE_EVENT) {
-            LOG_INFO("InputHooks: drop WINDOW_BUFFER_SIZE_EVENT (ENABLE_WINDOW_INPUT not set)");
-            continue;
-        }
-        if (kept != i) buf[kept] = buf[i];
-        ++kept;
-    }
-    return kept;
-}
 
 // ============================================================
 // ReadConsoleInputW Hook（核心）
@@ -201,7 +181,8 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
     int callId = g_readConsoleInputW_calls.fetch_add(1);
     bool log = (callId < kDiagLogLimit);
     if (log) {
-        LOG_INFO("ReadConsoleInputW_Detour: ENTRY #%d h=%p count=%lu", callId, h, count);
+        LOG_INFO("ReadConsoleInputW_Detour: ENTRY #%d tid=%lu h=%p count=%lu",
+                 callId, GetCurrentThreadId(), h, count);
     }
 
     ENSURE_INITIALIZED();
@@ -224,22 +205,40 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     auto& queue = InputQueue::Instance();
-    // 阻塞循环：从队列出队，空则等待事件信号
-    while (true) {
+    // 单次轮询：出队 → 空则最多等 100ms 后返回空（TRUE + *read=0）
+    // 返回空而非无限阻塞的原因（Textual 退出卡死 BUG 修复）：
+    //   原实现队列空时无限循环（只检查 transport/unloader），调用方主循环被
+    //   永久霸占，无法检查自身退出条件——Textual 事件线程在
+    //   wait_for_handles([hIn],100) 返回后调本 API，队列空即陷入无限循环，
+    //   Ctrl+Q 后 exit_event 永不被检查 → _event_thread.join() 卡死 → 进程永不退出。
+    //   现在空队列时最多等 100ms 即返回空，调用方回到自己的主循环；
+    //   配合 WaitHooks 的 WaitForMultipleObjects* 替换（输入句柄 → InputQueue
+    //   事件），空队列时等待类 API 正常超时轮询，调用方节奏由自身决定。
+    //   对 cmd 等直接循环调 ReadConsoleInputW 的程序：获得约 10Hz 节流（可接受），
+    //   且能及时感知 mediator 断开（返回空 → 再调 → 连接检查命中）。
+    {
         size_t n = queue.DequeueRecords(buf, static_cast<size_t>(count));
 
-        // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
-        n = FilterByInputMode(buf, n);
-
         if (n > 0) {
-            *read = static_cast<DWORD>(n);
+                        *read = static_cast<DWORD>(n);
             if (log) {
                 WORD vk = (buf[0].EventType == KEY_EVENT)
                           ? buf[0].Event.KeyEvent.wVirtualKeyCode : 0;
                 wchar_t ch = (buf[0].EventType == KEY_EVENT)
                              ? buf[0].Event.KeyEvent.uChar.UnicodeChar : 0;
-                LOG_INFO("ReadConsoleInputW_Detour: #%d return n=%zu firstVk=0x%x ch=0x%x",
-                         callId, n, vk, ch);
+                // 打印事件类型，区分 MOUSE_EVENT / KEY_EVENT / 其他
+                // (MOUSE_EVENT 无 vk/ch，只靠 EventType 辨识；坐标转 1-based SGR)
+                if (buf[0].EventType == MOUSE_EVENT) {
+                    LOG_INFO("ReadConsoleInputW_Det: #%d tid=%lu return n=%zu type=MOUSE btn=0x%x flags=0x%x pos=(%d,%d)",
+                             callId, GetCurrentThreadId(), n,
+                             buf[0].Event.MouseEvent.dwButtonState,
+                             buf[0].Event.MouseEvent.dwEventFlags,
+                             buf[0].Event.MouseEvent.dwMousePosition.X,
+                             buf[0].Event.MouseEvent.dwMousePosition.Y);
+                } else {
+                    LOG_INFO("ReadConsoleInputW_Det: #%d return n=%zu type=0x%x vk=0x%x ch=0x%x",
+                             callId, n, buf[0].EventType, vk, ch);
+                }
             }
             return TRUE;
         }
@@ -257,10 +256,12 @@ BOOL WINAPI ReadConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
             return ReadConsoleInputW_orig(h, buf, count, read);
         }
         if (log) {
-            LOG_INFO("ReadConsoleInputW_Detour: #%d queue empty, blocking wait...", callId);
+            LOG_INFO("ReadConsoleInputW_Detour: #%d queue empty, wait up to 100ms then return empty", callId);
         }
-        // 等待数据到达（100ms 超时后重新检查连接）
+        // 等待数据到达（最多 100ms，超时返回空让调用方检查自身状态）
         WaitForSingleObject(queue.GetWaitHandle(), 100);
+        *read = 0;
+        return TRUE;
     }
 }
 
@@ -295,11 +296,10 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     auto& queue = InputQueue::Instance();
-    while (true) {
+    // 单次轮询：同 ReadConsoleInputW_Detour（空队列最多等 100ms 后返回空，
+    // 不再无限阻塞——调用方主循环需能检查自身退出条件）
+    {
         size_t n = queue.DequeueRecords(buf, static_cast<size_t>(count));
-
-        // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
-        n = FilterByInputMode(buf, n);
 
         if (n > 0) {
             ConvertRecordsToAnsi(buf, static_cast<DWORD>(n));
@@ -313,6 +313,8 @@ BOOL WINAPI ReadConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
             return ReadConsoleInputA_orig(h, buf, count, read);
         }
         WaitForSingleObject(queue.GetWaitHandle(), 100);
+        *read = 0;
+        return TRUE;
     }
 }
 
@@ -335,9 +337,6 @@ BOOL WINAPI PeekConsoleInputW_Detour(HANDLE h, PINPUT_RECORD buf,
 
     size_t n = InputQueue::Instance().PeekRecords(buf, static_cast<size_t>(count));
 
-    // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
-    n = FilterByInputMode(buf, n);
-
     *read = static_cast<DWORD>(n);
     return TRUE;
 }
@@ -359,9 +358,6 @@ BOOL WINAPI PeekConsoleInputA_Detour(HANDLE h, PINPUT_RECORD buf,
     }
 
     size_t n = InputQueue::Instance().PeekRecords(buf, static_cast<size_t>(count));
-
-    // BUG-005：按输入模式过滤（ENABLE_WINDOW_INPUT 未设时丢弃 resize 事件）
-    n = FilterByInputMode(buf, n);
 
     if (n > 0) {
         ConvertRecordsToAnsi(buf, static_cast<DWORD>(n));
@@ -477,7 +473,8 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
     int callId = g_readConsoleW_calls.fetch_add(1);
     bool log = (callId < kDiagLogLimit);
     if (log) {
-        LOG_INFO("ReadConsoleW_Detour: ENTRY #%d h=%p len=%lu", callId, h, len);
+        LOG_INFO("ReadConsoleW_Detour: ENTRY #%d tid=%lu h=%p len=%lu",
+                 callId, GetCurrentThreadId(), h, len);
     }
 
     ENSURE_INITIALIZED();
@@ -603,6 +600,20 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
 
         // 发送 VT 回显（按键回显、行重绘、\r\n 等）给 mediator → WT 渲染
         if (!vtOut.empty()) {
+            // Phase 21：子进程行编辑回显前补发 CursorPosition
+            // 父 cmd 启动回显会偏移共享 ConPTY 光标，行编辑相对定位（\r/CSI D）
+            // 从错位位置开始，回车后光标多一行（long_line_enter 失败）。
+            // 仅子进程：目标进程 cmd 的行编辑回显已与 ConPTY 对齐。
+            // 补发用独立消息类型 CursorSync 即时发送（不经 BatchSender），
+            // 保证回显内容消息字节原样（modes 测试精确断言 hex）。
+            if (!IsTargetProcess()) {
+                COORD cur = editor.GetCurrentUiCursor();
+                if (cur.X < 0) cur.X = 0;
+                if (cur.Y < 0) cur.Y = 0;
+                std::string sync = vt::CursorPosition(cur.Y + 1, cur.X + 1);
+                SendToMediator(sync.data(), sync.size(),
+                               protocol::MessageType::CursorSync);
+            }
             SendToMediator(vtOut.data(), vtOut.size());
         }
 
@@ -731,6 +742,16 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
 
         // VT 回显发送给 mediator
         if (!vtOut.empty()) {
+            // Phase 21：子进程行编辑回显前补发 CursorPosition（同 ReadConsoleW 路径）
+            // 独立消息类型 CursorSync 即时发送，内容消息字节保持原样
+            if (!IsTargetProcess()) {
+                COORD cur = editor.GetCurrentUiCursor();
+                if (cur.X < 0) cur.X = 0;
+                if (cur.Y < 0) cur.Y = 0;
+                std::string sync = vt::CursorPosition(cur.Y + 1, cur.X + 1);
+                SendToMediator(sync.data(), sync.size(),
+                               protocol::MessageType::CursorSync);
+            }
             SendToMediator(vtOut.data(), vtOut.size());
         }
 
@@ -777,8 +798,8 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
         callId = g_readFile_stdin_calls.fetch_add(1);
         log = (callId < kDiagLogLimit);
         if (log) {
-            LOG_INFO("ReadFile_Detour: ENTRY #%d h=%p len=%lu isCachedStdin=%d isConsole=%d",
-                     callId, h, len, isCachedStdin, isConsole);
+            LOG_INFO("ReadFile_Detour: ENTRY #%d tid=%lu h=%p len=%lu isCachedStdin=%d isConsole=%d",
+                     callId, GetCurrentThreadId(), h, len, isCachedStdin, isConsole);
         }
     }
 

@@ -296,7 +296,7 @@ def wait_input(h, timeout_ms=5000):
 
 rec("READY", "PASS")
 hwnd = _k.GetConsoleWindow()
-check("WIN_NONZERO", bool(hwnd), "hwnd=0")
+check("WIN_ZERO", not hwnd, "hwnd={}".format(hwnd))
 maxsz = _k.GetLargestConsoleWindowSize(get_std_out())
 check("MAXW_REASONABLE", maxsz.X >= 80 and maxsz.Y >= 24,
       "max=({},{})".format(maxsz.X, maxsz.Y))

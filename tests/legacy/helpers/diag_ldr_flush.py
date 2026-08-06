@@ -40,6 +40,9 @@ from injector import (  # noqa: E402
 )
 from diag_peb_loadcount import find_injected_loadcount  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 
 # ============================================================
 # Win32 API 绑定（用于 CreateRemoteThread 触发 LDR flush）
@@ -226,7 +229,7 @@ def close_wt_window():
 
 def main():
     # 清旧 DLL 日志
-    for f in glob.glob(r"C:\temp\injected_*.log"):
+    for f in glob.glob(paths.injected_log_glob()):
         try:
             os.remove(f)
         except OSError:
@@ -260,7 +263,7 @@ def main():
         mediator_proc.kill()
 
     # 等 DoUnload 完成（Logger::Shutdown 前最后一行日志）
-    dll_log = r"C:\temp\injected_{}.log".format(target_pid)
+    dll_log = paths.injected_log(target_pid)
     print("\n[wait] 等待 DoUnload 完成（shutting down logger 日志）...", flush=True)
     deadline = time.time() + 15.0
     unloaded_log_seen = False
