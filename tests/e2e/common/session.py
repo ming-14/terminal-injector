@@ -45,11 +45,11 @@ class TestSession:
         print("[setup] 启动目标 cmd...")
         self.target_pid = injector.start_target_cmd()
         print("[setup] cmd PID={}".format(self.target_pid))
-        injector.clear_log()
+        injector.clear_log(self.target_pid)
         print("[setup] 启动 WT + mediator...")
         self.mediator_proc = injector.start_wt_mediator(self.target_pid)
         print("[setup] 等待握手...")
-        if not injector.wait_for_handshake(timeout=self.handshake_timeout):
+        if not injector.wait_for_handshake(self.target_pid, timeout=self.handshake_timeout):
             print("[setup] 握手失败")
             self.cleanup()
             raise RuntimeError("handshake failed")
@@ -57,6 +57,10 @@ class TestSession:
         time.sleep(1.0)
         injector.focus_wt()
         time.sleep(0.5)
+        # 确保英文键盘布局：中文 IME 会截走 SendInput 的 VK 字母键
+        # （XAML WT 窗口 ImmGetContext 拿不到 IMC，只能系统级切布局）
+        injector.ensure_english_layout()
+        time.sleep(0.3)
         self.entered = True
         return self
 
@@ -75,22 +79,51 @@ class TestSession:
         return False
 
     # ---- 目标脚本 ----
+    def _ensure_wt_foreground(self) -> None:
+        """发送输入前确认 WT 在前台（SendInput 打给前台窗口）。
+
+        focus_wt() 已做前台验证+重试，这里二次确认：前一个测试的 WT
+        窗口关闭动画/系统弹窗可能重新抢占前台，导致命令全部打空。
+        """
+        if not injector._HAS_WIN32:
+            return
+        import ctypes
+        user32 = ctypes.windll.user32
+        if injector._test_wt_hwnd is not None:
+            if user32.GetForegroundWindow() == injector._test_wt_hwnd:
+                return
+        injector.focus_wt()
+
     def run_target(self, name: str, body: str, ready_key: str = None,
                    ready_timeout: float = 20.0) -> None:
         """生成目标脚本并在注入 cmd 中运行。
 
         ready_key 非空时阻塞等待结果文件中出现该 KEY（脚本就绪）。
+        超时抛 RuntimeError（含前台/结果文件诊断，定位输入丢失）。
         """
         result_mod.clear_result(name)
         script_path = target_mod.write_target(name, body)
         cmd = 'python "{}" "{}"'.format(script_path, result_mod.result_file(name))
+        self._ensure_wt_foreground()
         input_sim.type_text(cmd)
         time.sleep(0.3)
         input_sim.type_enter()
         if ready_key:
             v = self.wait_result(name, ready_key, timeout=ready_timeout)
             if not v:
-                raise RuntimeError("target script not ready: key={}".format(ready_key))
+                import ctypes
+                user32 = ctypes.windll.user32
+                fg = user32.GetForegroundWindow()
+                cls = ctypes.create_unicode_buffer(128)
+                title = ctypes.create_unicode_buffer(512)
+                user32.GetClassNameW(fg, cls, 128)
+                user32.GetWindowTextW(fg, title, 512)
+                print("  [DIAG] READY 超时: 前台=0x{:x} 类={} 标题={}".format(
+                    fg, cls.value, title.value))
+                print("  [DIAG] 结果文件内容: {}".format(
+                    repr(result_mod.read_result(name))))
+                raise RuntimeError(
+                    "target script not ready: key={}".format(ready_key))
             time.sleep(0.5)
 
     def wait_result(self, name: str, key: str, timeout: float = 20.0) -> str:
@@ -102,7 +135,7 @@ class TestSession:
 
     # ---- mediator 日志（输出侧验证） ----
     def log(self) -> vt_capture.MediatorLog:
-        return vt_capture.MediatorLog(paths.TI_LOG_PATH)
+        return vt_capture.MediatorLog(paths.ti_log_path(self.target_pid))
 
     def log_tail(self, n: int = 15) -> None:
         """打印 mediator 日志末尾 n 行（失败时调试用）。"""
@@ -163,35 +196,30 @@ class TestSession:
                              steps=steps, step_sleep=step_sleep)
 
     def wt_rect(self) -> tuple:
-        """WT 窗口屏幕矩形 (left, top, right, bottom)。"""
+        """WT 窗口屏幕矩形 (left, top, right, bottom)。
+
+        只返回测试自己创建的窗口（_test_wt_hwnd）；未记录时返回 None，
+        严禁兜底取任意 WT 窗口（鼠标点击会点到用户窗口，实测事故）。
+        """
         try:
             import win32gui
             hwnd = injector._test_wt_hwnd
             if hwnd is None:
-                hwnds = injector.find_wt_windows()
-                if hwnds:
-                    hwnd = hwnds[-1]
-            if hwnd:
-                return win32gui.GetWindowRect(hwnd)
+                return None
+            return win32gui.GetWindowRect(hwnd)
         except Exception:
             pass
         return None
 
     def wt_center(self) -> tuple:
-        """WT 窗口中心屏幕坐标。"""
+        """WT 窗口中心屏幕坐标（仅测试自建窗口，无则 None）。"""
         try:
             import win32gui
             hwnd = injector._test_wt_hwnd
             if hwnd is None:
-                hwnds = injector.find_wt_windows()
-                if hwnds:
-                    hwnd = hwnds[-1]
-            if hwnd:
-                rect = win32gui.GetWindowRect(hwnd)
-                return ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+                return None
+            rect = win32gui.GetWindowRect(hwnd)
+            return ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
         except Exception:
             pass
-        import ctypes
-        cx = ctypes.windll.user32.GetSystemMetrics(0)
-        cy = ctypes.windll.user32.GetSystemMetrics(1)
-        return (cx // 2, cy // 2)
+        return None

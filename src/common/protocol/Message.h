@@ -68,6 +68,12 @@ enum class MessageType : uint32_t {
     // WT 状态报告（Phase 14）
     // 中介->DLL：WT 窗口尺寸变化或 DSR CPR 响应，用于虚拟 Console 状态反向同步
     WtStateReport       = 0x0080,
+
+    // 子进程光标同步（Phase 21）
+    // DLL->中介：子进程直通写/行编辑回显前补发的 CursorPosition VT 序列。
+    // 独立消息类型（不经 BatchSender 合并），保证紧随其后的 VtOutput 内容
+    // 消息字节原样（modes 测试精确断言 ChildVtOutput hex/len）。
+    CursorSync          = 0x0090,
 };
 
 // 各消息的 payload 结构
@@ -146,12 +152,18 @@ static_assert(sizeof(CpChangePayload) == 8, "CpChangePayload 大小应为 8 字�
 // 父进程的 CreateProcess Hook 捕获到子进程创建后上报
 // 中介据此为子进程创建命名管道实例，等待子进程 DLL 连接
 // 注：ChildExitNotify 复用此 payload（仅需 childPid 即可定位会话）
+//
+// Phase 15（安全审查 HIGH #2）：pipeName 为父 DLL 生成的子会话随机管道名
+//   - 父 DLL 生成随机名，一并通过注入参数（RemotePipeSetup）传给子 DLL
+//   - 本消息把同一名字上报给 mediator 创建服务端，两侧名字必须一致
+//   - 名字不可预测，防同会话进程预创建抢占；DLL 再校验服务端进程身份
 struct ChildProcessNotifyPayload {
     uint32_t childPid;     // 新创建的子进程 PID
     uint32_t parentPid;    // 父进程 PID（即上报方）
+    wchar_t  pipeName[128]; // 子会话随机管道名
 };
-static_assert(sizeof(ChildProcessNotifyPayload) == 8,
-              "ChildProcessNotifyPayload 大小应为 8 字节");
+static_assert(sizeof(ChildProcessNotifyPayload) == 264,
+              "ChildProcessNotifyPayload 大小应为 264 字节");
 
 // ChildExitSync 消息 payload（中介 -> 父进程 DLL）
 // 子进程退出后，中介查询 ConPTY 当前光标，发给父进程 DLL 对齐 ConsoleState 缓存

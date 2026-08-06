@@ -56,6 +56,12 @@ public:
     const std::wstring& GetLine() const { return m_line; }
     size_t GetCursor() const { return m_cursor; }
 
+    // 当前期望光标（UI 坐标，0-based）
+    // 行首 m_startCursor.X + 光标前显示宽度，超出屏幕宽时折行（供 Phase 21
+    // 子进程行编辑回显前补发 CursorPosition 用：父 cmd 启动回显会偏移共享
+    // ConPTY 光标，行编辑相对定位从错位位置开始，回车后光标多一行）
+    COORD GetCurrentUiCursor() const;
+
 private:
     LineEditor();
 

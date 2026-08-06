@@ -16,6 +16,8 @@
 #include "LazyInit.h"
 #include "BatchSender.h"
 #include "DllRecvLoop.h"
+#include "HookManager.h"
+#include "RemoteParams.h"
 #include "logging/Logger.h"
 #include "transport/ITransport.h"
 #include "transport/NamedPipeTransport.h"
@@ -29,6 +31,7 @@
 #include "translator/ConsoleToVt.h"
 #include "translator/VtEscape.h"
 #include "hooks/HookCommon.h"
+#include "hooks/ProtectionHooks.h"
 
 #include <windows.h>
 #include <cstring>
@@ -55,6 +58,52 @@ extern "C" volatile LONG g_probe_eli = 0;
 // 避免懒加载内 Logger 写日志触发 WriteFile Hook → ENSURE_INITIALIZED 死锁
 thread_local bool t_inLazyInit = false;
 
+// 注入日志目录：优先 TI_INJECTED_LOG_DIR（测试/诊断覆盖），否则 GetTempPathW()
+// （系统标准临时目录，无 C:\temp 硬编码，部署到任意机器可用）
+std::wstring GetInjectedLogDir() {
+    wchar_t envBuf[MAX_PATH] = {0};
+    const DWORD n = GetEnvironmentVariableW(L"TI_INJECTED_LOG_DIR", envBuf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        return std::wstring(envBuf);
+    }
+    wchar_t tmpBuf[MAX_PATH] = {0};
+    if (GetTempPathW(MAX_PATH, tmpBuf) == 0) {
+        // 极端环境（无 %TEMP%）回退当前目录，避免日志完全丢失
+        return std::wstring(L".");
+    }
+    return std::wstring(tmpBuf);
+}
+
+// 构造注入日志文件名：injected_<pid>_<YYYYMMDD-HHMMSS-mmm>.log
+// 毫秒时间戳：同一 pid 多次注入（重复会话）与子进程并发各自独立文件，
+// 互不覆盖，测试按 mtime 取最新即本次会话
+void BuildInjectedLogPath(wchar_t* buf, size_t cap, uint32_t pid) {
+    FILETIME ft{};
+    GetSystemTimePreciseAsFileTime(&ft);
+    SYSTEMTIME st{};
+    FileTimeToSystemTime(&ft, &st);
+    swprintf_s(buf, cap,
+               L"%ls\\injected_%lu_%04u%02u%02u-%02u%02u%02u-%03u.log",
+               GetInjectedLogDir().c_str(), pid,
+               st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+}
+
+// 日志级别：TI_LOG_LEVEL 环境变量（TRACE/DEBUG/INFO/WARN/ERROR/FATAL）
+// 未设置或非法值默认 Debug（保持既有诊断粒度），保证部署可调且不降级
+LogLevel GetConfiguredLogLevel() {
+    char envBuf[16] = {0};
+    if (GetEnvironmentVariableA("TI_LOG_LEVEL", envBuf, sizeof(envBuf)) > 0) {
+        if (_stricmp(envBuf, "TRACE") == 0) return LogLevel::Trace;
+        if (_stricmp(envBuf, "DEBUG") == 0) return LogLevel::Debug;
+        if (_stricmp(envBuf, "INFO") == 0)  return LogLevel::Info;
+        if (_stricmp(envBuf, "WARN") == 0)  return LogLevel::Warn;
+        if (_stricmp(envBuf, "ERROR") == 0) return LogLevel::Error;
+        if (_stricmp(envBuf, "FATAL") == 0) return LogLevel::Fatal;
+    }
+    return LogLevel::Debug;
+}
+
 // mediator 传输通道（EnsureLazyInitialized 建立，DLL_PROCESS_DETACH 释放）
 std::unique_ptr<ITransport> g_transport;
 
@@ -74,18 +123,48 @@ bool ConnectToMediatorWithSnapshot(const StateSnapshot& snap,
     wtCursorY = 0;
     isTarget = false;
 
-    // 1. 构造管道名（约定：\\.\pipe\terminjector_<targetPid>）
-    const uint32_t pid = GetCurrentProcessId();
-    const std::wstring pipeName = MakePipeName(pid);
-    LOG_INFO("DLL connecting to mediator, pipe=%ls pid=%u", pipeName.c_str(), pid);
+    // 0. 等待注入器 RemotePipeSetup 传参（随机管道名 + mediatorPid）
+    //    注入器在 LoadLibraryW 完成后立即跨进程调用 RemotePipeSetup，
+    //    但注入器是独立进程：冷启动 + LoadLibraryW 完成实测需 ~2.4s，
+    //    此处轮询最多 5s 兜底（实测注入器传参耗时波动 1~3s）
+    PipeParams params{};
+    for (int i = 0; i < 100 && !GetPipeParams(params); ++i) {
+        Sleep(50);
+    }
+    if (!GetPipeParams(params)) {
+        LOG_ERROR("ConnectToMediator: pipe params not received (RemotePipeSetup "
+                  "not called by injector), aborting mediator connect");
+        return false;
+    }
+    LOG_INFO("ConnectToMediator: using injected pipe params, mediatorPid=%u",
+             params.mediatorPid);
 
-    // 2. 创建 Client 传输并连接（内置 5s 重试）
+    // 1. 创建 Client 传输并连接（内置 5s 重试）
     auto transport = std::make_unique<NamedPipeTransport>(
-        pipeName, NamedPipeTransport::Role::Client);
+        params.pipeName, NamedPipeTransport::Role::Client);
     if (!transport->Connect()) {
         LOG_ERROR("ConnectToMediator: transport Connect failed, pipe=%ls",
-                  pipeName.c_str());
+                  params.pipeName);
         return false;
+    }
+
+    // 1.5 服务端身份校验（安全加固，防伪造 mediator 抢占）
+    //    管道名不可预测是主要防线；此处纵深防御：连接后核对服务端进程
+    //    确为注入参数声明的 mediatorPid，不一致立即断开（宁可握手失败）
+    if (params.mediatorPid != 0) {
+        const uint32_t serverPid = transport->GetServerProcessId();
+        if (serverPid == 0 || serverPid != params.mediatorPid) {
+            LOG_ERROR("ConnectToMediator: server identity check FAILED, "
+                      "serverPid=%u expected=%u, disconnecting",
+                      serverPid, params.mediatorPid);
+            transport->Disconnect();
+            return false;
+        }
+        LOG_INFO("ConnectToMediator: server identity verified (pid=%u)",
+                 serverPid);
+    } else {
+        LOG_WARN("ConnectToMediator: mediatorPid=0, server identity check skipped "
+                 "(manual inject mode)");
     }
 
     // 3. 发送 Hello（携带快照 payload）
@@ -97,9 +176,11 @@ bool ConnectToMediatorWithSnapshot(const StateSnapshot& snap,
                   sent, pkt.size());
         return false;
     }
-    LOG_INFO("Hello sent, pid=%u bitness=%u cols=%u rows=%u cursor=(%u,%u)",
+    LOG_INFO("Hello sent, pid=%u bitness=%u cols=%u rows=%u cursor=(%u,%u) "
+             "protocolVersion=%u",
              hello.targetPid, hello.targetBitness,
-             hello.bufferCols, hello.bufferRows, hello.cursorX, hello.cursorY);
+             hello.bufferCols, hello.bufferRows, hello.cursorX, hello.cursorY,
+             kVersion);
 
     // 4. 等待 HelloAck
     MessageType type;
@@ -139,6 +220,13 @@ void EnsureLazyInitialized() {
     // 快速路径：已完成直接返回
     if (g_initialized) return;
 
+    // DllMain InstallAll 期间（MinHook 内部调用被 Hook 的 API 如
+    // WaitForSingleObjectEx 会命中 Detour）：跳过同步初始化。
+    // ConnectToMediator 轮询 RemotePipeSetup 最长 5s，若在 LoadLibraryW
+    // 线程（DllMain 上下文）内同步执行，会把注入器侧等待卡 6s+。
+    // 由 DllMain 创建的 worker 线程（Sleep 100ms）在 InstallAll 完成后异步初始化。
+    if (HookManager::IsInstalling()) return;
+
     // 当前线程已在懒加载中：直接返回（避免 Logger 写日志触发 WriteFile Hook 死锁）
     if (t_inLazyInit) return;
 
@@ -155,15 +243,16 @@ void EnsureLazyInitialized() {
     t_inLazyInit = true;  // 标记当前线程在懒加载中（Hook 内 pass-through）
 
     // 1. Logger 第一时间启用（后续步骤的日志可落盘）
-    //    每进程独立日志文件：injected_<pid>.log
+    //    每进程独立日志文件：injected_<pid>_<时间戳>.log（GetTempPathW 目录）
     //    原因：所有被注入进程（cmd/python/子进程）共用同一日志文件时，
     //          先打开的进程持有写句柄（FILE_SHARE_READ），后续进程无法写入，
     //          导致子进程（如 python）的 DLL 日志丢失，无法诊断
+    //    时间戳精确到毫秒：同一 pid 多次注入互不覆盖
     const uint32_t pid = GetCurrentProcessId();
-    wchar_t logPath[260];
-    swprintf_s(logPath, L"C:\\temp\\injected_%lu.log", pid);
-    Logger::Initialize(logPath, LogLevel::Debug);
-    LOG_INFO("=== LazyInit starting, pid=%lu ===", pid);
+    wchar_t logPath[MAX_PATH] = {0};
+    BuildInjectedLogPath(logPath, MAX_PATH, pid);
+    Logger::Initialize(logPath, GetConfiguredLogLevel());
+    LOG_INFO("=== LazyInit starting, pid=%lu log=%ls ===", pid, logPath);
 
     // Phase 9：日志文件句柄注册为 protected
     // 防止 Phase 9 CloseHandle Hook 误将日志句柄当作 fake 静默忽略
@@ -218,6 +307,31 @@ void EnsureLazyInitialized() {
     hooks::SendToMediator(vt::kDaPrimaryQuery, strlen(vt::kDaPrimaryQuery),
                           protocol::MessageType::VtOutput);
     LOG_INFO("QueryTerminalCaps: Primary DA query sent to WT");
+
+    // Phase 20：按注入瞬间输入模式判定并补发鼠标启用序列
+    // 背景：Textual 等 VT 型 TUI 的鼠标启用序列（\x1b[?1000h 等）在注入前
+    //       就已写入原 ConHost，被劫持切到 WT 后这些字节已丢失，WT 从未
+    //       进入鼠标跟踪模式 → 不发回任何鼠标事件，DLL 的 SGR→KEY_EVENT
+    //       转换分支永远命中 0 次。
+    // 判定依据：snap.inputMode 含 ENABLE_VIRTUAL_TERMINAL_INPUT(0x200)
+    //   - 0x200 未置（如 cmd 的 0x1F7、vim 未开 VT 输入模式）：跳过，
+    //     杜绝向普通程序注入鼠标启用序列造成误发。
+    //   - 0x200 已置：该进程是 VT 型 TUI，协议上启用鼠标跟踪的写法固定为
+    //     DECSET ?1000/?1003/?1015/?1006，补发即可让 WT 进入鼠标模式。
+    // 不区分 isTarget：当 cmd 为宿主进程、python(Textual) 为子进程时，
+    // TUI 是子进程（isTarget=false），若按 isTarget 门控会漏发；
+    // 且重发序列幂等（重复设置同一鼠标模式无副作用），多进程命中无害。
+    if (snap.inputMode & ENABLE_VIRTUAL_TERMINAL_INPUT) {
+        const char* mouseHi = vt::kEnableMouse;
+        const size_t mouseLen = sizeof(vt::kEnableMouse) - 1;  // 去结尾 \0
+        hooks::SendToMediator(mouseHi, mouseLen,
+                              protocol::MessageType::VtOutput);
+        LOG_INFO("Mouse: re-enabled mouse tracking on WT, %zu bytes (inputMode=0x%lx)",
+                 mouseLen, snap.inputMode);
+    } else {
+        LOG_INFO("Mouse: skip mouse re-enable (inputMode=0x%lx)",
+                 snap.inputMode);
+    }
 
     // Phase 5：用 mediator 回传的 WT 尺寸校正 ConsoleState
     // 原因：注入瞬间 cmd.exe 的控制台可能尚未初始化完成，
@@ -299,6 +413,20 @@ void EnsureLazyInitialized() {
         VirtualConsoleState::Instance().SetCursorPos(lineStart);
         LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
                  cursor.Y);
+
+        // Phase 20 修复：VT 直通模式下 prompt 连排
+        // WriteConsoleW_Detour / WriteFile_Detour 的 VT 直通分支（OutputHooks.cpp）
+        // 不发送前置 CursorPosition（避免污染 TUI 程序的 VT 流）。
+        // ConPTY 光标仍停在上面同步的旧 prompt 末尾 (cursor.X, cursor.Y)，
+        // cmd 被 KickStart 唤醒后输出的新 prompt 会被追加其后，形成
+        //   C:\...>C:\...>
+        // 连排。此处主动把 ConPTY 光标拉到行首，使翻译/VT 直通两种模式下
+        // 新 prompt 都从行首写入，正好覆盖补发的旧 prompt，视觉无缝。
+        {
+            std::string lineStartSync = vt::CursorPosition(termCursorY + 1, 1);
+            hooks::SendToMediator(lineStartSync.data(), lineStartSync.size());
+            LOG_INFO("LazyInit: ConPTY cursor pulled to line start for prompt overwrite");
+        }
         } else {
             // 子进程：不重放屏幕，用 HelloAck 回传的 WT 真实光标对齐缓存
             // （ChildSession Handshake 注释：cursorX/Y 供子进程 DLL 对齐
@@ -328,12 +456,10 @@ void EnsureLazyInitialized() {
     // Phase 9：隐藏原 Console 窗口
     // 原因：静默模式后原 cmd 黑框不再更新（ConHost 不收到输出），
     //       停在注入前状态会让人误以为卡死，隐藏避免干扰
-    // 风险评估：GetConsoleWindow 不 Hook 仍返回真实 HWND（只是隐藏），
-    //           程序用 IsWindowVisible 检查可见性会返回 false
-    //           极少见程序依赖 Console 窗口可见性，接受此风险
+    // 注意：必须走 CallRealGetConsoleWindow（GetConsoleWindow 已 Hook 返回 NULL）
     // 若调试时需查看原 cmd 窗口，注释掉此行
     {
-        HWND hCon = GetConsoleWindow();
+        HWND hCon = hooks::CallRealGetConsoleWindow();
         if (hCon != nullptr && IsWindowVisible(hCon)) {
             ShowWindow(hCon, SW_HIDE);
             LOG_INFO("LazyInit: original console window hidden (hwnd=%p)", hCon);

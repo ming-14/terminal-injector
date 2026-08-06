@@ -8,23 +8,26 @@ import sys
 import time
 import glob
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # Clean old logs
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
         pass
 
-PROJECT_ROOT = r"c:\Users\rikka\Desktop\terminal-injector"
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+PROJECT_ROOT = paths.project_root()
+BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 DLL_PATH = os.path.join(BUILD_BIN, "injected.dll")
 WT_EXE = os.path.join(os.environ.get("LOCALAPPDATA", ""),
                       "Microsoft", "WindowsApps", "wt.exe")
 LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
-ADPLUS = r"c:\Program Files (x86)\Windows Kits\10\Debuggers\x64\adplus.exe"
-DUMP_DIR = r"C:\temp\cmd_dumps"
-PID_FILE = r"C:\temp\debug_pids.txt"
+ADPLUS = os.path.join(paths.cdb_tools(), "adplus.exe")
+DUMP_DIR = os.path.join(paths.dump_dir(), "cmd_dumps")
+PID_FILE = os.path.join(paths.out_dir(), "debug_pids.txt")
 
 try:
     os.makedirs(DUMP_DIR, exist_ok=True)

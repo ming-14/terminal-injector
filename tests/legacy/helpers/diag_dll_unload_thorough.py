@@ -30,6 +30,9 @@ from injector import (  # noqa: E402
     wait_for_handshake,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # ============================================================
 # Win32 API 绑定
 # ============================================================
@@ -195,7 +198,7 @@ def close_wt_window():
 # 主流程
 # ============================================================
 # 清旧 DLL 日志
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
@@ -292,7 +295,7 @@ if found_psapi and base_psapi:
         readable, is_mz, hex_str), flush=True)
 
 # 读 DLL 日志看 DoUnload 是否完成
-log_path = r"C:\temp\injected_{}.log".format(target_pid)
+log_path = paths.injected_log(target_pid)
 if os.path.exists(log_path):
     print("\n[DLL log] 末尾 20 行:", flush=True)
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -303,10 +306,10 @@ if os.path.exists(log_path):
 # 如果仍未卸载，attach cdb 做深度检查
 if not unloaded:
     print("\n[deep-debug] DLL 仍未卸载，attach cdb 做深度检查...", flush=True)
-    TOOLS = r"c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609"
-    SYMSRV = "srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols"
-    IMGPATH = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release"
-    OUT = r"c:\Users\rikka\Desktop\terminal-injector\tests\helpers\cdb_thorough_out.txt"
+    TOOLS = paths.cdb_tools()
+    SYMSRV = paths.symbol_path()
+    IMGPATH = paths.build_bin()
+    OUT = os.path.join(paths.out_dir(), "cdb_thorough_out.txt")
 
     # cdb 命令：
     #   !peb                     显示 PEB（含 Ldr 指针）

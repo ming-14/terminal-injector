@@ -285,8 +285,29 @@ void InputRecordToVt::ConvertMouse(const MOUSE_EVENT_RECORD& me, std::string& ou
             out += buf;
         }
     }
-    // MOUSE_MOVED（无按键变化）和 DOUBLE_CLICK 不发 VT 序列
-    // （WT VT 输入模式默认不报告移动事件，除非启用 mouse tracking）
+    // MOUSE_MOVED：转 SGR 1006 移动序列
+    // 编码标准（xterm）：motion 位=32；无按键=32+3=35（hover），
+    // 按住键移动（drag）=32+键号(0/1/2)，再加修饰位(4/8/16)。
+    // 该事件在目标请求全移动上报（DECSET 1002/1003，DLL 注入时 kEnableMouse
+    // 已含 1003h）时由 WT 发来；收到即转换，保证 hover/drag 透传给目标程序。
+    if (me.dwEventFlags & MOUSE_MOVED) {
+        int btn = 32;
+        int held = 0;
+        if (cur & FROM_LEFT_1ST_BUTTON_PRESSED) held = 0;    // 左键拖拽
+        else if (cur & FROM_LEFT_2ND_BUTTON_PRESSED) held = 1; // 中键拖拽
+        else if (cur & RIGHTMOST_BUTTON_PRESSED) held = 2;    // 右键拖拽
+        else held = 3;                                         // 无按键（hover）
+        btn += held;
+        if (me.dwControlKeyState & SHIFT_PRESSED) btn |= 4;
+        if (me.dwControlKeyState & LEFT_ALT_PRESSED) btn |= 8;
+        if (me.dwControlKeyState & LEFT_CTRL_PRESSED) btn |= 16;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "\x1b[<%d;%d;%dM",
+                      btn, me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1);
+        out += buf;
+        return;
+    }
+    // DOUBLE_CLICK 不发 VT 序列（SGR 1006 无对应编码，应用端以两次 M 区分）
 }
 
 // ============================================================

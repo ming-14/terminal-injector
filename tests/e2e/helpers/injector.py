@@ -3,7 +3,7 @@
 测试流程：
   1. start_target_cmd() 启动注入目标 cmd，返回 PID
   2. start_wt_mediator(pid) 启动 WT 并在其中运行 mediator
-  3. wait_for_handshake() 等待握手成功
+  3. wait_for_handshake(pid) 等待握手成功
   4. focus_wt() 把 WT 设为前台，供 SendInput 发送键盘鼠标
   5. cleanup() 终止测试进程
 
@@ -23,13 +23,22 @@ try:
 except ImportError:
     _HAS_WIN32 = False
 
-# 项目路径：优先读环境变量 TI_PROJECT_ROOT（e2e 在项目外，默认指向 terminal-injector）
-_TI_DEFAULT_ROOT = r"C:\Users\rikka\Desktop\terminal-injector"
-PROJECT_ROOT = os.environ.get("TI_PROJECT_ROOT") or _TI_DEFAULT_ROOT
+# 项目路径：与 common/paths.py 同一套相对解析（e2e 目录位置推导），
+# 不硬编码机器路径；TI_PROJECT_ROOT 环境变量可覆盖
+PROJECT_ROOT = os.environ.get("TI_PROJECT_ROOT") or os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
-LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+
+
+def log_path(target_pid: int) -> str:
+    """按目标 pid 定位 mediator 日志（与 DLL 侧 injected_<pid>.log 约定对齐）。
+
+    mediator 按 pid 分日志文件（main.cpp Run()），并发会话互不干扰；
+    握手扫描只匹配本会话日志，消除旧日志假阳性。
+    """
+    return os.path.join(BUILD_BIN, "terminal-injector-{}.log".format(target_pid))
 
 
 def start_target_cmd() -> int:
@@ -67,25 +76,28 @@ def find_wt_exe() -> str:
     return "wt.exe"
 
 
-def clear_log() -> None:
-    """清空 mediator 日志（测试前调用，确保 wait_for_handshake 匹配新日志）。"""
+def clear_log(target_pid: int) -> None:
+    """清空该会话的 mediator 日志（测试前调用，确保 wait_for_handshake 匹配新日志）。"""
     try:
-        if os.path.exists(LOG_PATH):
-            os.remove(LOG_PATH)
+        path = log_path(target_pid)
+        if os.path.exists(path):
+            os.remove(path)
     except OSError:
         pass
 
 
-def wait_for_handshake(timeout: float = 15.0) -> bool:
-    """等待 mediator 日志出现 'Handshake OK'，表示注入握手成功。
+def wait_for_handshake(target_pid: int, timeout: float = 15.0) -> bool:
+    """等待该会话 mediator 日志（terminal-injector-<pid>.log）出现 'Handshake OK'。
 
+    按 pid 定位日志文件，只扫描本会话，不受其他会话/旧日志干扰。
     返回 True 表示成功，False 表示超时。
     """
+    path = log_path(target_pid)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if os.path.exists(LOG_PATH):
+        if os.path.exists(path):
             try:
-                with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
                     if "Handshake OK" in content:
                         return True
@@ -129,6 +141,16 @@ def start_wt_mediator(target_pid: int) -> subprocess.Popen:
 
     启动前记录已有 WT 窗口，启动后找新增窗口存入 _test_wt_hwnd，
     供 focus_wt 精确聚焦（避免定位到其他遗留 WT 窗口）。
+
+    注意（2026-08-05 全量回归实测）：wt.exe 是单实例进程——桌面上已有
+    WT 窗口（如用户自己的）时，`wt -- cmd` 会**复用**窗口新开标签页，
+    不产生新窗口，_test_wt_hwnd 检测失败，后续 focus 落到任意 WT，
+    SendInput 打进错误窗口（READY 超时）。必须用 `-w <唯一名>` 强制
+    每次新建独立窗口，保证窗口归属检测可靠。
+
+    窗口名必须含时间戳：仅用 pid 时，Windows pid 复用会让 wt.exe 撞上
+    旧测试残留的窗口名，改为**复用旧窗口**而不新建——新窗口检测不到，
+    focus/cleanup 会误操作其他 WT 窗口（实测把用户窗口收到命令并关闭）。
     """
     global _test_wt_hwnd
     _test_wt_hwnd = None
@@ -136,7 +158,10 @@ def start_wt_mediator(target_pid: int) -> subprocess.Popen:
     # 启动前快照已有 WT 窗口
     existing_hwnds = set(find_wt_windows()) if _HAS_WIN32 else set()
 
-    wt_cmd = [find_wt_exe(), "--", MEDIATOR_EXE, "--mediator", "--target-pid", str(target_pid)]
+    # -w <时间戳唯一名>：绕过单实例复用与 pid 撞名，每次新建独立窗口
+    win_name = "ti_e2e_{}_{}".format(target_pid, int(time.time() * 1000))
+    wt_cmd = [find_wt_exe(), "-w", win_name, "--",
+              MEDIATOR_EXE, "--mediator", "--target-pid", str(target_pid)]
     proc = subprocess.Popen(wt_cmd)
 
     # 等待新 WT 窗口出现（最多 10 秒）
@@ -146,33 +171,109 @@ def start_wt_mediator(target_pid: int) -> subprocess.Popen:
             current_hwnds = set(find_wt_windows())
             new_hwnds = current_hwnds - existing_hwnds
             if new_hwnds:
-                # 取第一个新增窗口（通常只有一个）
-                _test_wt_hwnd = sorted(new_hwnds)[0]
+                # 多窗口同时新增时（极端：用户恰好在同一时刻开 WT），
+                # 优先选标题匹配测试窗口的（cmd/mediator 路径）；
+                # 避免把用户窗口当测试窗口（后续 focus/cleanup 会误操作）
+                matched = [h for h in new_hwnds
+                           if _title_looks_test(h)]
+                if len(new_hwnds) > 1 and not matched:
+                    # 无法区分时等 0.5s 重试（测试窗口通常先出现）
+                    time.sleep(0.5)
+                    continue
+                _test_wt_hwnd = sorted(matched or new_hwnds)[0]
                 break
             time.sleep(0.3)
 
     return proc
 
 
-def focus_wt() -> Optional[int]:
-    """把测试启动的 WT 窗口设为前台，返回窗口句柄。供 SendInput 使用。
+def _title_looks_test(hwnd: int) -> bool:
+    """窗口标题是否像测试窗口（cmd.exe / mediator 路径，而非用户窗口）。"""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        t = buf.value.lower()
+        return "cmd.exe" in t or "terminal_injector" in t
+    except Exception:
+        return False
 
-    优先使用 start_wt_mediator 记录的 _test_wt_hwnd（精确锁定测试窗口）；
-    若未记录（如 _HAS_WIN32=False），回退到最新的 WT 窗口。
+
+def focus_wt(max_attempts: int = 5) -> Optional[int]:
+    """把测试用 WT 窗口设为前台，供 SendInput 发送键盘鼠标。
+
+    SetForegroundWindow 受 Windows 前台锁约束（快速连续会话/旧窗口关闭
+    动画中可能被拒绝），因此必须验证前台切换是否真正生效：轮询
+    GetForegroundWindow() 确认是目标窗口，失败重试；最终失败抛异常
+    （明确失败而非静默丢输入——全量回归实测 READY 超时 90% 源于焦点
+    未切换成功导致 SendInput 打空）。
+
+    严禁兜底聚焦"任意 WT 窗口"：_test_wt_hwnd 未记录（检测失败）时
+    直接抛异常——兜底会聚焦到用户自己的 WT 窗口，SendInput 把测试
+    命令打进用户窗口、cleanup 还会把它关掉（2026-08-05 实测事故）。
     """
     if not _HAS_WIN32:
         return None
+    import ctypes
+    user32 = ctypes.windll.user32
     hwnd = _test_wt_hwnd
     if hwnd is None:
-        # 回退：取最新的 WT 窗口（不推荐，可能定位到其他 WT）
-        hwnds = find_wt_windows()
-        if not hwnds:
-            return None
-        hwnd = hwnds[-1]
-    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-    win32gui.SetForegroundWindow(hwnd)
-    time.sleep(0.5)  # 等待前台切换生效
-    return hwnd
+        raise RuntimeError(
+            "no test WT window recorded (_test_wt_hwnd=None): "
+            "refusing to focus arbitrary window")
+    for _ in range(max_attempts):
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        # 前台切换生效等待：轮询确认，覆盖异步拒绝/延迟
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if user32.GetForegroundWindow() == hwnd:
+                return hwnd
+            time.sleep(0.2)
+        time.sleep(0.3)
+    raise RuntimeError(
+        "cannot focus WT window hwnd={}: foreground is {}".format(
+            hex(hwnd), hex(user32.GetForegroundWindow())))
+
+
+# 英文键盘布局的语言 ID（en-US 各变体）
+_ENGLISH_LANGUAGE_IDS = (0x0409, 0x0809, 0x0C09, 0x1009)
+
+
+def ensure_english_layout(max_attempts: int = 5) -> bool:
+    """确保前台窗口使用英文键盘布局，绕过中文 IME 组词拦截。
+
+    背景（2026-08-05）：系统键盘布局中文（Preload 00000804）优先时，
+    中文 IME 激活会把 SendInput 的 VK 字母键截走组词，WT 收不到字符
+    （keyboard 测试 EVENT_COUNT=0）。WT 是 XAML 窗口，ImmGetContext 返回 0，
+    ImmSetOpenStatus 无法关闭其 IME（旧 disable_ime 失效），只能通过系统
+    语言切换快捷键 Win+Space 轮询切到英文布局。
+
+    副作用：切换后系统输入法停留在英文布局，测试不恢复（测试前后均以
+    SendInput 模拟输入，不依赖用户输入法状态）。
+    """
+    if not _HAS_WIN32:
+        return False
+    import ctypes
+    from helpers import input_sim
+    user32 = ctypes.windll.user32
+
+    for _ in range(max_attempts):
+        # Win11 语言切换面板（XAML 瞬态窗口）会暂时成为前台，等待其消失
+        fg = user32.GetForegroundWindow()
+        cls = ctypes.create_unicode_buffer(128)
+        user32.GetClassNameW(fg, cls, 128)
+        if "XamlExplorerHostIslandWindow" in cls.value:
+            time.sleep(1.0)
+            continue
+        tid = user32.GetWindowThreadProcessId(fg, None)
+        hkl = user32.GetKeyboardLayout(tid)
+        if hkl & 0xFFFF in _ENGLISH_LANGUAGE_IDS:
+            return True
+        # 模拟 Win+Space（系统级快捷键，不依赖前台窗口所属线程）
+        input_sim.press_combo([input_sim.VK_LWIN, input_sim.VK_SPACE])
+        time.sleep(0.9)
+    return False
 
 
 def get_wt_window_rect() -> Optional[tuple]:
@@ -229,10 +330,18 @@ def cleanup(target_pid: int, mediator_proc: Optional[subprocess.Popen] = None) -
         try:
             if win32gui.IsWindow(_test_wt_hwnd):
                 win32gui.PostMessage(_test_wt_hwnd, win32con.WM_CLOSE, 0, 0)
+                # 等待窗口真正关闭（残留窗口会让下次 start_wt_mediator 的
+                # 新增窗口检测/焦点归属错乱，全量实测曾累积到 3 个 WT 并存）
+                deadline = time.time() + 5.0
+                while time.time() < deadline and win32gui.IsWindow(_test_wt_hwnd):
+                    time.sleep(0.2)
+                if win32gui.IsWindow(_test_wt_hwnd):
+                    win32gui.PostMessage(_test_wt_hwnd, win32con.WM_CLOSE, 0, 0)
+                    time.sleep(1.0)
         except Exception:
             pass
         _test_wt_hwnd = None
-        time.sleep(1.0)  # 等待 WT 窗口关闭完成
+        time.sleep(0.5)
 
 
 def get_injection_command(target_pid: int) -> str:

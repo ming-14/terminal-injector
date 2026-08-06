@@ -132,7 +132,7 @@ def _call_write_console_output(h_out, cells, rows, cols, region):
 
 
 def _run_tests(f) -> None:
-    # 写入本进程 pid，runner 据此定位 C:\temp\injected_<pid>.log 验证 diff 日志
+    # 写入本进程 pid，runner 据此定位 DLL 注入日志（injected_<pid>_*.log）验证 diff 日志
     f.write("PID {}\n".format(os.getpid()))
     f.flush()
 

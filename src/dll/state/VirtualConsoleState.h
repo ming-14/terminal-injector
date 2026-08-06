@@ -70,6 +70,8 @@ public:
     void SetUserBufferHeight(int32_t height);
     // 模式切换时重置滚动计数
     void ResetScrollback();
+    // Phase 19：VT 直通追踪器滚动计数（内容滚出视口顶部一行）
+    void NotifyScrollLine();
 
 private:
     VirtualConsoleState() = default;

@@ -6,6 +6,7 @@ add_library(terminjector_common STATIC
     logging/RingBufferLogger.cpp
     transport/NamedPipeTransport.cpp
     protocol/MessageSerializer.cpp
+    remote/RemoteCall.cpp
 )
 
 # include 路径：自身目录对内可见（用 #include "logging/Logger.h" 形式）

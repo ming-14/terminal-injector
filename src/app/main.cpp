@@ -14,7 +14,7 @@
 //
 // 参数解析手写（不引入第三方 CLI 库），保持依赖最小
 #include "logging/Logger.h"
-#include "transport/ITransport.h"      // MakePipeName
+#include "transport/NamedPipeTransport.h"  // MakeRandomPipeName
 #include "injector/Injector.h"
 #include "mediator/Mediator.h"
 
@@ -35,7 +35,8 @@ struct CliArgs {
     uint32_t     targetPid = 0;
     uint64_t     dllBase = 0;   // --unload-remote 模式：injected.dll 基址
     std::wstring dllPath;    // 默认 exe 同目录的 injected.dll
-    std::wstring pipeName;   // 默认根据 targetPid 构造
+    std::wstring pipeName;   // 空则按模式生成随机名（防可预测抢占）
+    uint32_t     mediatorPid = 0;  // --mediator-pid：DLL 服务端身份校验目标
 
     bool valid = false;
 };
@@ -83,7 +84,8 @@ static void PrintHelp() {
         "  --mediator            中介模式\n"
         "  --target-pid <pid>    目标进程 PID（mediator 模式必需）\n"
         "  --dll <path>          injected.dll 路径，默认与 exe 同目录\n"
-        "  --pipe <name>         命名管道名，默认 \\\\.\\pipe\\terminjector_<pid>\n"
+        "  --pipe <name>         命名管道名；缺省自动生成随机名（\\.\\.\\pipe\\terminjector_<pid>_<hex>）\n"
+        "  --mediator-pid <pid>  管道服务端进程 PID（DLL 连接后校验身份，0=跳过）\n"
         "  --unload-remote <pid> <dllBase>\n"
         "                        远程卸载模式：远程 FreeLibrary(dllBase)\n"
         "  --version             显示版本号\n"
@@ -135,6 +137,13 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
             args.dllPath = ToWide(argv[++i]);
         } else if (a == "--pipe" && i + 1 < argc) {
             args.pipeName = ToWide(argv[++i]);
+        } else if (a == "--mediator-pid" && i + 1 < argc) {
+            try {
+                args.mediatorPid = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } catch (...) {
+                std::fprintf(stderr, "Invalid mediator-pid: %s\n", argv[i]);
+                return args;
+            }
         } else if (a == "--version") {
             args.mode = CliArgs::Mode::Version;
         } else if (a == "--help" || a == "-h") {
@@ -151,9 +160,10 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
             std::fprintf(stderr, "Mediator mode requires --target-pid\n");
             return args;
         }
-        // 默认管道名
+        // 管道名缺省生成随机后缀（安全加固：防同会话进程预创建抢占）
+        // 运行链路不再使用 pid 约定名
         if (args.pipeName.empty()) {
-            args.pipeName = MakePipeName(args.targetPid);
+            args.pipeName = MakeRandomPipeName(args.targetPid);
         }
     }
 
@@ -393,12 +403,13 @@ static int RunUnloadRemote(uint32_t targetPid, uint64_t dllBase) {
 
 // 主分发逻辑
 static int Run(int argc, char* argv[]) {
-    // 先解析参数，再根据 mode 决定日志路径。
+    // 先解析参数，再根据 mode 决定日志路径（mediator/inject 按目标 pid 分文件）。
     // 原因：--unload-remote 助手进程由 DLL 在 DoUnload 末尾启动，
-    // 与下一次循环的 mediator 并发，若共用 LOG_PATH 会因
+    // 与下一次循环的 mediator 并发。若共用同一日志文件，会因
     // FILE_SHARE_READ 不允许 share write 而冲突（CreateFileW 失败，
-    // mediator 日志写不进，wait_for_handshake 超时）。
-    // --unload-remote 写独立日志文件，避免抢占 mediator 日志句柄。
+    // 日志写不进，wait_for_handshake 超时）。
+    // --unload-remote 写独立日志文件（terminal-injector-unload.log），
+    // mediator 按 pid 分文件（terminal-injector-<pid>.log），互不抢占。
     auto args = ParseArgs(argc, argv);
 
     // 用 exe 同目录的绝对路径写日志，避免 WT 启动时工作目录不确定
@@ -407,9 +418,21 @@ static int Run(int argc, char* argv[]) {
     std::wstring logPath;
     if (args.mode == CliArgs::Mode::UnloadRemote) {
         // 助手进程独立日志：terminal-injector-unload.log
+        // （--unload-remote 由 DLL 在 DoUnload 末尾启动，与后续 mediator 并发）
         logPath = exeDir + L"\\terminal-injector-unload.log";
+    } else if (args.mode == CliArgs::Mode::Mediator) {
+        // mediator 按目标 pid 分文件：terminal-injector-<pid>.log
+        // - 与 DLL 侧 injected_<pid>.log 约定对齐，按会话归档定位
+        // - 并发 mediator（上次循环残留 + 本次）各写独立文件，不再互抢句柄
+        logPath = exeDir + L"\\terminal-injector-" + std::to_wstring(args.targetPid) + L".log";
+    } else if (args.mode == CliArgs::Mode::Inject) {
+        // 注入器进程与 mediator 并发运行且 targetPid 相同，若共用
+        // terminal-injector-<pid>.log（Logger 不 share write）会互斥失败、
+        // 注入器日志全部丢失 → 注入器独立日志文件
+        logPath = exeDir + L"\\terminal-injector-inject-" +
+                  std::to_wstring(args.targetPid) + L".log";
     } else {
-        // mediator / inject 等模式：terminal-injector.log
+        // Help/Version 等模式：terminal-injector.log
         logPath = exeDir + L"\\terminal-injector.log";
     }
     Logger::Initialize(logPath.c_str(), LogLevel::Debug);
@@ -429,9 +452,14 @@ static int Run(int argc, char* argv[]) {
             LOG_INFO("Mode=Inject, pid=%u dll=%ls",
                      args.targetPid, args.dllPath.c_str());
             Injector injector;
-            // 注入模式：管道名仅用于日志（DLL 自发现约定）
-            std::wstring pipeName = MakePipeName(args.targetPid);
-            if (!injector.Inject(args.targetPid, args.dllPath, pipeName)) {
+            // 管道名缺省生成随机名（由 mediator fork 时经 --pipe 传入；
+            // 手动 --inject 无 --pipe 时生成随机名，DLL 收到后无对应服务端，
+            // 连接失败属预期——手动模式本来就没有 mediator）
+            std::wstring pipeName = args.pipeName.empty()
+                                        ? MakeRandomPipeName(args.targetPid)
+                                        : args.pipeName;
+            if (!injector.Inject(args.targetPid, args.dllPath,
+                                 pipeName, args.mediatorPid)) {
                 LOG_ERROR("Inject failed");
                 std::fprintf(stderr, "Inject failed, see terminal-injector.log\n");
                 ret = 1;
@@ -441,10 +469,13 @@ static int Run(int argc, char* argv[]) {
             break;
         }
         case CliArgs::Mode::Mediator: {
-            LOG_INFO("Mode=Mediator, targetPid=%u pipe=%ls dll=%ls",
-                     args.targetPid, args.pipeName.c_str(), args.dllPath.c_str());
+            LOG_INFO("Mode=Mediator, targetPid=%u pipe=%ls dll=%ls mediatorPid=%u",
+                     args.targetPid, args.pipeName.c_str(), args.dllPath.c_str(),
+                     GetCurrentProcessId());
             Mediator mediator;
-            ret = mediator.Run(args.targetPid, args.pipeName, args.dllPath);
+            // mediatorPid 固定为自身 pid：DLL 连接后校验服务端进程身份
+            ret = mediator.Run(args.targetPid, args.pipeName, args.dllPath,
+                               GetCurrentProcessId());
             break;
         }
         case CliArgs::Mode::UnloadRemote: {

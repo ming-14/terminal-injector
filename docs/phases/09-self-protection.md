@@ -1,6 +1,6 @@
 # Phase 9: 自保护
 
-> 本 Phase 实现"防越狱"机制，阻止目标程序脱离中介管道重新绑定到 ConHost，并让 `GetStdHandle` 返回我们控制的句柄、`CloseHandle` 跳过假句柄。同时把前面各 Phase 中"仍调原 API 让 ConHost 同步"的行为改为**静默返回**，消除原 cmd 黑框的更新闪烁。
+> 本 Phase 实现"防越狱"机制，阻止目标程序脱离中介管道重新绑定到 ConHost，让 `GetStdHandle` 返回真实句柄（配合类型拦截）、`CloseHandle` 跳过假句柄、`GetConsoleWindow` 隔离 ConHost 窗口操作。同时把前面各 Phase 中"仍调原 API 让 ConHost 同步"的行为改为**静默返回**，消除原 cmd 黑框的更新闪烁。
 
 ---
 
@@ -10,9 +10,11 @@
    - `AttachConsole`（返回 FALSE，`ERROR_ACCESS_DENIED`）
    - `FreeConsole`（返回 FALSE 或静默成功但不真断开）
    - `AllocConsole`（返回 FALSE，`ERROR_NOT_ENOUGH_MEMORY`）
+   - `GetConsoleWindow`（返回 NULL，隔离 ConHost 原生窗口操作）
 2. Hook `GetStdHandle`：
    - 返回 DLL 控制的"假"标准句柄（标识为 Console，但不指向真实 ConHost）
    - 缓存首次调用结果，保证多次调用返回一致
+   - **最终决策：不 Hook**（见 4.3，读写 API 已按句柄类型拦截）
 3. Hook `CloseHandle`：
    - 对假句柄（Alt Buffer sentinel、fakeWaitHandle、假 std handle）：静默返回 TRUE，不真关
    - 对日志文件句柄：放行
@@ -20,7 +22,7 @@
 4. **改为静默模式**：回顾 Phase 3~8 中所有"仍调原 API"的地方，改为不调（或调但不影响）
    - `WriteConsoleW_orig` / `WriteFile_orig` 等：不再让 ConHost 更新
    - 原理：Hook 后 ConHost 不再收到数据，原 cmd 黑框停止更新（消除闪烁）
-5. 验证：目标程序调 `AllocConsole` 不会弹新黑框；多次 `GetStdHandle` 返回一致；原 cmd 窗口不再闪烁
+5. 验证：目标程序调 `AllocConsole` 不会弹新黑框；多次 `GetStdHandle` 返回一致；原 cmd 窗口不再闪烁；`GetConsoleWindow` 返回 NULL 后程序走"无窗口"分支
 
 ---
 
@@ -185,7 +187,33 @@ BOOL WINAPI FreeConsole_Detour() {
 
 **注意**：`FreeConsole` 返回 TRUE 但不真断开。若程序后续调 `AllocConsole`（被拦返回 FALSE），程序可能进入错误处理路径。需测试常见程序行为。
 
-### 4.5 `CloseHandle` Hook
+### 4.5 `GetConsoleWindow` Hook
+
+Far 等窗口操作型 TUI 拿 ConHost HWND 改标题/置顶/子类化，会旁路 mediator 管道（标题应走 `SetConsoleTitleW` Detour 转发 WT），且可能把 LazyInit 已隐藏的原 ConHost 窗口重新显示。Hook 后返回 NULL 让程序走"无窗口"分支。
+
+```cpp
+DEFINE_ORIG_PTR(GetConsoleWindow, HWND WINAPI());
+
+HWND WINAPI GetConsoleWindow_Detour() {
+    if (IsInLazyInit()) {
+        return GetConsoleWindow_orig();
+    }
+    return NULL;
+}
+```
+
+**风险缓解**：尺寸等信息由 `GetConsoleScreenBufferInfo` Detour 缓存提供，不依赖窗口句柄。
+
+**内部真实 HWND 需求**：DLL 自身需在 LazyInit 隐藏窗口、StateSnapshot 记录可见性、Unloader 恢复显示。这些内部调用统一走封装函数（orig trampoline）绕过 Hook：
+
+```cpp
+// ProtectionHooks.h
+HWND CallRealGetConsoleWindow();  // 返回真实 ConHost HWND
+```
+
+调用点：`LazyInit.cpp` 隐藏窗口、`state/StateSnapshot.cpp` 可见性、`Unloader.cpp` 恢复显示。
+
+### 4.6 `CloseHandle` Hook
 
 ```cpp
 DEFINE_ORIG_PTR(CloseHandle, BOOL WINAPI(HANDLE));
@@ -215,7 +243,7 @@ inline bool IsFakeHandleFast(HANDLE h) {
 }
 ```
 
-### 4.6 静默模式改造（移除 _orig 调用）
+### 4.7 静默模式改造（移除 _orig 调用）
 
 回顾 Phase 3~8，所有 Hook 末尾的 `_orig` 调用需评估：
 
@@ -242,14 +270,14 @@ BOOL WINAPI WriteConsoleW_Detour(...) {
 }
 ```
 
-**效果**：ConHost 不再收到任何输出，原 cmd 黑框停止更新，消除闪烁。但原 cmd 窗口仍可见（空白或停在注入前状态）。可考虑 Phase 11 用 `ShowWindow(GetConsoleWindow(), SW_HIDE)` 隐藏原窗口。
+**效果**：ConHost 不再收到任何输出，原 cmd 黑框停止更新，消除闪烁。但原 cmd 窗口仍可见（空白或停在注入前状态）。可考虑 Phase 11 用 `ShowWindow(CallRealGetConsoleWindow(), SW_HIDE)` 隐藏原窗口（GetConsoleWindow 已 Hook 返回 NULL，内部路径必须走 orig）。
 
-### 4.7 隐藏原 Console 窗口（可选）
+### 4.8 隐藏原 Console 窗口（可选）
 
 ```cpp
-// 在 LazyInit 末尾
+// 在 LazyInit 末尾（GetConsoleWindow 已 Hook，内部必须走 orig）
 void HideOriginalConsole() {
-    HWND hCon = GetConsoleWindow();
+    HWND hCon = hooks::CallRealGetConsoleWindow();
     if (hCon && IsWindowVisible(hCon)) {
         ShowWindow(hCon, SW_HIDE);
         LOG_INFO("Original console window hidden");
@@ -268,6 +296,7 @@ void HideOriginalConsole() {
 | 目标程序调 `AllocConsole()` | 返回 FALSE，无新黑框 |
 | 目标程序调 `AttachConsole(pid)` | 返回 FALSE |
 | 目标程序调 `FreeConsole()` | 返回 TRUE 但仍可正常 IO |
+| 目标程序调 `GetConsoleWindow()` | 返回 NULL |
 | 注入后原 cmd 窗口 | 不再更新（静默模式） |
 | 多次 `GetStdHandle(STD_OUTPUT_HANDLE)` | 返回一致句柄 |
 | `CloseHandle(GetStdHandle(...))` | 静默成功，后续 IO 仍可用 |
@@ -282,14 +311,15 @@ void HideOriginalConsole() {
 | `FreeConsole` 返回 TRUE 但未真断，程序状态混乱 | 文档说明；若程序强制要求真断，需特殊处理 |
 | `CloseHandle` Hook 性能（高频） | 假句柄用魔数位比较，O(1) |
 | 静默模式后程序检测 ConHost 无响应 | 极少见，接受 |
-| 隐藏原窗口导致程序 `GetConsoleWindow` 返回 NULL | `GetConsoleWindow` 不 Hook，仍返回真实 HWND（只是隐藏） |
+| 隐藏原窗口后程序调 `GetConsoleWindow` | Hook 返回 NULL；程序走"无窗口"分支，尺寸走 GCSBI 缓存 |
+| 依赖 Console 窗口可见性的程序（如 `IsWindowVisible`） | 极少见；内部路径（隐藏/恢复/可见性）走 `CallRealGetConsoleWindow` 绕过 |
 | 程序用 `SetStdHandle` 重置 | 极少见，Phase 11 测试覆盖后再决定是否 Hook |
 
 ---
 
 ## 7. 交付物清单
 
-- [ ] `ProtectionHooks.cpp` Alloc/Attach/Free/CloseHandle Hook
+- [ ] `ProtectionHooks.cpp` Alloc/Attach/Free/GetConsoleWindow/CloseHandle Hook
 - [ ] `HandleRegistry` 假句柄管理（含魔数快速判断）
 - [ ] 所有输出/光标类 Hook 改为静默模式（移除 _orig 调用）
 - [ ] 日志文件句柄注册为 protected

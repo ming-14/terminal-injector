@@ -12,6 +12,7 @@
 验证方式: 目标程序自检 + mediator 日志字节
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,7 +62,8 @@ def run() -> int:
                     print("  [FAIL] {}: {}".format(key, v or "no result"))
                     failures += 1
             content = s.log().read_all()
-            if " 23 " in content:
+            # '#' 可能单独成批 flush(hex[1]=23 行尾),也可能与其他字节合并
+            if re.search(r"[ =]23(?=\s|$)", content):
                 print("  [PASS] LOG_FILL_CHARS (填充字符字节命中)")
             else:
                 print("  [FAIL] LOG_FILL_CHARS: 日志未出现 23 字节")

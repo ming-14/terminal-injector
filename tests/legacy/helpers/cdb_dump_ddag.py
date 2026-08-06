@@ -9,11 +9,13 @@ import os
 import subprocess
 import sys
 
-TOOLS = r"c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609"
-# 符号缓存目录用 C:\symbols（e:\Symbol 盘不存在）
-SYMSRV = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols"
-IMGPATH = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release"
-OUT = r"c:\Users\rikka\Desktop\terminal-injector\tests\helpers\cdb_ddag_struct.txt"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paths
+
+TOOLS = paths.cdb_tools()
+SYMSRV = paths.symbol_path()
+IMGPATH = paths.build_bin()
+OUT = os.path.join(paths.out_dir(), "cdb_ddag_struct.txt")
 
 if len(sys.argv) < 2:
     print("用法: python cdb_dump_ddag.py <pid>")

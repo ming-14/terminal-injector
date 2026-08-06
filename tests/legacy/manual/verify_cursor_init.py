@@ -30,9 +30,12 @@ import win32process
 import win32api
 import win32con
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MEDIATOR_EXE = os.path.join(PROJECT_ROOT, "build", "bin", "Release", "terminal_injector.exe")
-PTY_AGENT = r"c:\Users\rikka\Desktop\PTY-Agent\PTY-Agent\app.py"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+PROJECT_ROOT = paths.project_root()
+MEDIATOR_EXE = os.path.join(paths.build_bin(), "terminal_injector.exe")
+PTY_AGENT = paths.pty_agent()
 
 # WT 终端尺寸（与默认 PTY-Agent 80x24 一致，确保不出现折行）
 TERMINAL_SIZE = "120x40"

@@ -4,6 +4,7 @@
 // 注意：本文件在 Hook 安装前调用，直接用真实 Console API
 //       Hook 安装后绝不调用本文件的 Capture（会拿到被 Hook 的假值）
 #include "StateSnapshot.h"
+#include "../hooks/ProtectionHooks.h"
 #include "logging/Logger.h"
 
 namespace terminjector {
@@ -36,8 +37,8 @@ bool StateSnapshot::Capture() {
     if (!GetConsoleTitleW(title, 260)) {
         title[0] = L'\0';
     }
-    // 窗口可见性
-    windowVisible = IsWindowVisible(GetConsoleWindow());
+    // 窗口可见性（GetConsoleWindow 已 Hook 返回 NULL，走 orig 拿真实 HWND）
+    windowVisible = IsWindowVisible(hooks::CallRealGetConsoleWindow());
 
     LOG_INFO("Snapshot: size=%dx%d win=%dx%d cursor=(%d,%d) mode(in=0x%lx out=0x%lx) cp(in=%u out=%u)",
              screenBufferInfo.dwSize.X, screenBufferInfo.dwSize.Y,

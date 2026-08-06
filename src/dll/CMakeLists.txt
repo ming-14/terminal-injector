@@ -11,6 +11,7 @@ add_library(injected_dll SHARED
     dllmain.cpp
     HookManager.cpp
     LazyInit.cpp
+    RemoteParams.cpp
     DllRecvLoop.cpp
     Unloader.cpp
     state/StateSnapshot.cpp
@@ -22,6 +23,7 @@ add_library(injected_dll SHARED
     translator/ConsoleToVt.cpp
     translator/VtEscape.cpp
     translator/VtToInputRecord.cpp
+    translator/VtCursorTracker.cpp
     hooks/HookCommon.cpp
     hooks/OutputHooks.cpp
     hooks/CursorHooks.cpp

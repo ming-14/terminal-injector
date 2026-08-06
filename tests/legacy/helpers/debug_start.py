@@ -3,7 +3,7 @@
 用法：
   python tests\helpers\debug_start.py
   # 输出 cmd PID 后，用 cdb 附加：
-  # cdb -p <cmd_pid> -y "srv*C:\symbols*http://msdl.blackint3.com:88/download/symbols"
+  # cdb -p <cmd_pid> -y "<符号路径, 见 paths.symbol_path()>"
 """
 import os
 import sys
@@ -14,9 +14,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from injector import (start_target_cmd, start_wt_mediator, wait_for_handshake,
                        clear_log, focus_wt)
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # 清空旧日志
 import glob
-for f in glob.glob(r"C:\temp\injected_*.log"):
+for f in glob.glob(paths.injected_log_glob()):
     try:
         os.remove(f)
     except OSError:
@@ -41,7 +44,7 @@ print("[4/4] 等待 5 秒让 LazyInit 完成...")
 time.sleep(5.0)
 
 # 检查 DLL 日志
-log_path = r"C:\temp\injected_{}.log".format(target_pid)
+log_path = paths.injected_log(target_pid)
 if os.path.exists(log_path):
     size = os.path.getsize(log_path)
     print("  DLL 日志: {} ({} bytes)".format(log_path, size))

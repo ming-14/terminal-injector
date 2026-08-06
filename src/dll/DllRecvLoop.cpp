@@ -136,21 +136,21 @@ void RecvLoopMain() {
                 ConsoleState::Instance().SetWindow(win);
 
                 // 注入 WINDOW_BUFFER_SIZE_EVENT 通知等待 ReadConsoleInput 的程序
-                // （如 Textual）窗口尺寸已变化，让其重新查询 GetConsoleScreenBufferInfo
+                // （如 Textual）窗口尺寸已变化，需要重新查询 GetConsoleScreenBufferInfo
                 // 并刷新布局。若不注入，TUI 程序永远不会收到 resize 通知，
                 // 在 WT 尺寸变化后不会重绘，导致布局与窗口不匹配。
-                // BUG-005 一致性：在事件生成点按输入模式过滤（与真实 ConHost 语义
-                // 一致——ConHost 仅在 ENABLE_WINDOW_INPUT 开启时生成该事件）。
+                // 注：真实 ConHost/ConPTY 中 WINDOW_BUFFER_SIZE_EVENT 不受
+                // ENABLE_WINDOW_INPUT 门控——只要 buffer/window 尺寸变化即产生
+                // （见 microsoft/terminal#263 的官方确认，view 变化即发送该事件）。
+                // Textual 的 enable_application_mode() 只设 ENABLE_VIRTUAL_TERMINAL_INPUT，
+                // 若此处按 ENABLE_WINDOW_INPUT 过滤，事件将被吞掉、TUI 永不 resize。
                 // 若仅在读口过滤：GetNumberOfConsoleInputEvents（未过滤计数）会
                 // 报告队列有事件，但 ReadConsoleInputW 读不到，程序阻塞空等。
-                DWORD inMode = ConsoleState::Instance().GetInputMode();
-                if (inMode & ENABLE_WINDOW_INPUT) {
-                    InputQueue::Instance().EnqueueResizeEvent(
-                        static_cast<SHORT>(p.cols),
-                        static_cast<SHORT>(p.rows));
-                } else {
-                    LOG_INFO("DllRecvLoop: resize event dropped (ENABLE_WINDOW_INPUT off)");
-                }
+                // 故这里无条件注入该事件；不读的程序从 ReadConsoleInputW 读到后
+                // 自行调用 GetConsoleScreenBufferInfo 核对，尺寸未变则无害。
+                InputQueue::Instance().EnqueueResizeEvent(
+                    static_cast<SHORT>(p.cols),
+                    static_cast<SHORT>(p.rows));
 
                 // 修复：子进程（python 等）只收 ResizeNotify，与主进程的
                 // WtStateReport resize 路径不同步 VirtualConsoleState，
@@ -170,27 +170,50 @@ void RecvLoopMain() {
                     // 透传模式：原始 VT 字节直接入 raw 队列
                     // vim/less 等程序开 VT 输入模式，期望收到原始 VT 字节
                     InputQueue::Instance().EnqueueRaw(payload.data(), payload.size());
-                    // 同时翻译为 INPUT_RECORD 入 record 队列（ReadConsoleW 路径需要）
-                    // Textual 通过 Python 的 ReadConsoleW 读输入，不走 ReadFile 或 ReadConsoleInputW，
-                    // 若只入 raw 队列，ReadConsoleW_Detour 永远收不到数据
-                    auto records = vtInputParser.Feed(payload.data(), payload.size());
-                    if (!records.empty()) {
-                        std::vector<INPUT_RECORD> keyRecs, mouseRecs;
-                        for (const auto& r : records) {
-                            if (r.EventType == MOUSE_EVENT) {
-                                mouseRecs.push_back(r);
-                            } else {
-                                keyRecs.push_back(r);
+                    // 鼠标 SGR（CSI < b ; c ; r M/m）按 VT 流分帧，逐字节展开为
+                    // KEY_EVENT 序列入 record 队列，供字节流消费者使用：
+                    //   - mimo/Bun（libuv raw 读取器）只消费 KEY_EVENT，把每个
+                    //     KEY_EVENT.UnicodeChar 还原为原始字节喂给 process.stdin，
+                    //     OpenTUI 由这些字节解析 SGR 鼠标序列（0x1b[<b;c;rM）。
+                    //     若交付 MOUSE_EVENT，libuv 丢弃（非 KEY_EVENT 忽略），
+                    //     鼠标永不生效（根因，2026-08-04 实测确认）。
+                    //   - 键盘/普通字符序列：仍走 VtToInputRecord::Parse 翻译为
+                    //     结构化 KEY_EVENT，与工具模式一致。
+                    // 说明（历史）：早期把整个 SGR 汇成单条 MOUSE_EVENT 交付，适合
+                    // 读 ReadConsoleInputW 的 TUI；mimo 读取器逐字节还原则必须保留
+                    // 原始 SGR 字节，故此处逐字节展开而非结构化交付。
+                    auto rawSeqs = vtInputParser.FrameRaw(payload.data(),
+                                                          payload.size());
+                    std::vector<INPUT_RECORD> keyRecs;
+                    for (const auto& seq : rawSeqs) {
+                        bool isMouse = seq.size() >= 3 &&
+                                       static_cast<uint8_t>(seq[0]) == 0x1b &&
+                                       seq[1] == '[' && seq[2] == '<';
+                        if (isMouse) {
+                            // SGR 鼠标序列：逐字节展开为 KEY_EVENT（字符按键）
+                            // 每个 UnicodeChar 即该字节值，bKeyDown 置 TRUE，
+                            // libuv 会将每个字符转换回字节并拼接为原始 SGR 流
+                            for (uint8_t b : seq) {
+                                INPUT_RECORD rec{};
+                                rec.EventType = KEY_EVENT;
+                                rec.Event.KeyEvent.bKeyDown = TRUE;
+                                rec.Event.KeyEvent.wRepeatCount = 1;
+                                rec.Event.KeyEvent.uChar.UnicodeChar =
+                                    static_cast<wchar_t>(b);
+                                rec.Event.KeyEvent.dwControlKeyState = 0;
+                                keyRecs.push_back(rec);
                             }
+                        } else {
+                            // 键盘序列：结构化 KEY_EVENT 翻译
+                            auto recs = VtToInputRecord::Parse(
+                                reinterpret_cast<const uint8_t*>(seq.data()),
+                                seq.size());
+                            keyRecs.insert(keyRecs.end(), recs.begin(), recs.end());
                         }
-                        if (!keyRecs.empty()) {
-                            InputQueue::Instance().EnqueueRecords(keyRecs.data(),
-                                                                  keyRecs.size());
-                        }
-                        if (!mouseRecs.empty()) {
-                            InputQueue::Instance().EnqueueBatched(mouseRecs.data(),
-                                                                  mouseRecs.size());
-                        }
+                    }
+                    if (!keyRecs.empty()) {
+                        InputQueue::Instance().EnqueueRecords(keyRecs.data(),
+                                                              keyRecs.size());
                     }
                     pendingEscTick = 0;  // 透传模式不用 ESC 超时
                 } else {

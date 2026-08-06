@@ -61,6 +61,36 @@ public:
         m_buf.clear();
     }
 
+    // 仅分帧：返回缓冲中所有已完整的 VT 序列原始字节（不做翻译）
+    // 供 VT 透传分支使用：鼠标 SGR 序列需保留原始字节逐字节展开为
+    // KEY_EVENT（mimo/libuv 等字节流消费者只认 KEY_EVENT，需还原原始字节，
+    // 见 DllRecvLoop），键盘序列则由调用方调 VtToInputRecord::Parse 翻译
+    // 不完整部分继续留在 m_buf 等待后续数据（与 Feed 相同的分帧规则）
+    std::vector<std::string> FrameRaw(const uint8_t* data, size_t len) {
+        m_buf.append(reinterpret_cast<const char*>(data), len);
+
+        std::vector<std::string> result;
+        size_t i = 0;
+        size_t bufLen = m_buf.size();
+
+        while (i < bufLen) {
+            size_t seqLen = CalcSequenceLength(m_buf, i, bufLen);
+            if (seqLen == 0) {
+                // 不完整序列，停止解析
+                break;
+            }
+            result.emplace_back(m_buf, i, seqLen);
+            i += seqLen;
+        }
+
+        // 移除已消费部分，保留未完整部分
+        if (i > 0) {
+            m_buf.erase(0, i);
+        }
+
+        return result;
+    }
+
     // 检查是否有悬挂的不完整序列（如单独 ESC 等待超时交付）
     bool HasPending() const {
         return !m_buf.empty();

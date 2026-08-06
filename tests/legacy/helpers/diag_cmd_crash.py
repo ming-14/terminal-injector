@@ -28,14 +28,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import injector
 from runners import test_phase11
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 # 工具路径
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-CDB_EXE = os.path.join(PROJECT_ROOT, ".agents", "skills", "windows-debugging",
-                       "10.0.19041.5609", "cdb.exe")
-SYMBOL_PATH = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols"
+CDB_EXE = paths.cdb_exe()
+SYMBOL_PATH = paths.symbol_path()
 
 # dump 输出目录
-DUMP_DIR = r"C:\temp"
+DUMP_DIR = paths.injected_log_dir()
 DUMP_PATH = os.path.join(DUMP_DIR, "cmd_crash.dmp")
 CDB_LOG = os.path.join(DUMP_DIR, "cdb_cmd_monitor.log")
 

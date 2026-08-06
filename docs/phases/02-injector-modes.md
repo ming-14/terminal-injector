@@ -693,7 +693,7 @@ terminal-injector.exe --inject 1234
 
 预期：
 - 控制台输出 `Inject succeeded`
-- `C:\temp\injected.log` 出现 `injected.dll loaded in pid=1234`
+- 系统临时目录下 `injected_<pid>_<时间戳>.log` 出现 `injected.dll loaded in pid=1234`
 - DebugView 看到 DLL 日志
 - 此时 cmd.exe 行为不变（Phase 2 未装 Hook）
 

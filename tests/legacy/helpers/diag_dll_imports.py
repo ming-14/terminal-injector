@@ -16,6 +16,9 @@ except ImportError:
     print("请先安装 pefile: pip install pefile")
     sys.exit(1)
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
 
 def analyze_imports(dll_path):
     print("[分析] {}".format(dll_path), flush=True)
@@ -87,5 +90,5 @@ if __name__ == "__main__":
         dll_path = sys.argv[1]
     else:
         # 默认 injected.dll
-        dll_path = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release\injected.dll"
+        dll_path = os.path.join(paths.build_bin(), "injected.dll")
     analyze_imports(dll_path)

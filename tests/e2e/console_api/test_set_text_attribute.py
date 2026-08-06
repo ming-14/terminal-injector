@@ -12,6 +12,7 @@
 验证方式: 目标程序自检 + mediator 日志字节
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,7 +60,8 @@ def run() -> int:
             # BUG-001 修复断言：0xC（RED|INTENSITY）应译为 \x1b[1;31;40m
             # （修复前 bit2=红 被当作 VT 索引 4 → 34 蓝）
             content = s.log().read_all()
-            if " 58 " not in content:
+            # 'X' 可能单独成批 flush(hex[1]=58 行尾),也可能与 SGR 合并(…6D 58 1B…)
+            if not re.search(r"[ =]58(?=\s|$)", content):
                 print("  [FAIL] LOG_WRITE_X: 日志未出现 X 字符字节")
                 failures += 1
                 s.log_tail()

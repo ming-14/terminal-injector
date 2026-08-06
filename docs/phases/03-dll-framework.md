@@ -336,7 +336,7 @@ bool StateSnapshot::Capture() {
         title[0] = L'\0';
     }
 
-    windowVisible = IsWindowVisible(GetConsoleWindow());
+    windowVisible = IsWindowVisible(hooks::CallRealGetConsoleWindow());  // Phase 9：GetConsoleWindow 已 Hook，走 orig
 
     LOG_INFO("Snapshot: size=%dx%d win=%dx%d cursor=(%d,%d) mode(in=0x%lx out=0x%lx) cp(in=%u out=%u)",
              screenBufferInfo.dwSize.X, screenBufferInfo.dwSize.Y,
@@ -851,7 +851,7 @@ wt.exe terminal-injector.exe --mediator --target-pid 1234
 | 检查项 | 预期 |
 |--------|------|
 | mediator 日志 | `Handshake OK` 后 `BridgeLoop` 进入 |
-| `C:\temp\injected.log` | 出现 `LazyInit done`、`All hooks enabled` |
+| DLL 日志（系统临时目录下 `injected_<pid>_<时间戳>.log`） | 出现 `LazyInit done`、`All hooks enabled` |
 | WT 窗口 | 显示 cmd 的当前输出（注入前已有的内容不会出现，新输出会显示） |
 | 在原 cmd 窗口输入 `echo hello` | WT 窗口同步出现 `hello` |
 | 在 WT 窗口输入 `echo world` | **不工作**（Phase 6 才实现输入） |
@@ -868,10 +868,10 @@ wt.exe terminal-injector.exe --mediator --target-pid 1234
 ### 5.4 调试技巧
 
 - 用 DebugView 实时看 DLL 日志
-- `C:\temp\injected.log` 看完整 DLL 日志
+- 系统临时目录下 `injected_<pid>_*.log` 看 DLL 整体日志（可用 `TI_INJECTED_LOG_DIR` 覆盖目录）
 - `terminal-injector.log` 看 mediator 日志
 - 若 cmd 无输出到 WT：检查 `IsConsoleHandle` 是否误判、`SendToMediator` 是否成功
-- 若 DLL 未连接：检查 `MakePipeName(GetCurrentProcessId())` 与 mediator 创建的名称是否一致
+- 若 DLL 未连接：检查 DLL 是否拿到注入参数（`RemotePipeSetup`，随机管道名 + mediator PID 身份校验）
 - 用 `windows-debugging` 工具的 cdb/windbg 附加目标进程查看 Hook 是否生效
 
 ---

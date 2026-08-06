@@ -47,6 +47,10 @@ namespace terminjector::hooks {
 //   - Sleep                              (轮询；不 Hook)
 //   - WaitForSingleObject                (等待非 Console 句柄；Phase 8 仅 Hook
 //                                         GetConsoleInputWaitHandle，不 Hook 通用 WaitFor)
+//   - WaitForMultipleObjects / WaitForMultipleObjectsEx
+//       (WaitHooks 目标；仅当句柄组含输入句柄时替换为 InputQueue 事件。
+//        注意：进入本 Hook Detour 后调原 API 用 trampoline（orig），
+//        不会重入；非输入句柄组 pass-through 零副作用)
 //   - AcquireSRWLockExclusive / ReleaseSRWLockExclusive   (SendToMediator 锁)
 //   - std::lock_guard / std::mutex        (InputQueue / ConsoleState 内部锁)
 //
@@ -109,8 +113,15 @@ namespace terminjector::hooks {
 //   - GetCurrentConsoleFontEx / SetCurrentConsoleFontEx / GetConsoleFontSize
 //
 // 保护类（ProtectionHooks 目标）：
-//   - AllocConsole / AttachConsole / FreeConsole
+//   - AllocConsole / AttachConsole / FreeConsole / GetConsoleWindow
 //   - GetConsoleInputWaitHandle           (WaitHooks 目标)
+//   （DLL 内部模块需真实 HWND 时用 CallRealGetConsoleWindow（orig trampoline））
+//
+// 同步类（WaitHooks 目标）：
+//   - WaitForMultipleObjects / WaitForMultipleObjectsEx
+//     (Detour 内禁止调用未带 orig 的版本；本模块的 Detour 用 trampoline 调原实现，
+//     其他 Detour 若需等待非输入句柄，可正常调用——句柄组不含输入句柄时
+//     pass-through，不改变语义)
 //
 // 进程类（ProcessHooks 目标）：
 //   - CreateProcessW / CreateProcessA     (会触发 CreateProcess*_Detour；

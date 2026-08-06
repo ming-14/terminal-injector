@@ -8,10 +8,13 @@ import os
 import sys
 import time
 
-DLL_PATH = r"c:\Users\rikka\Desktop\terminal-injector\build\bin\Release\injected.dll"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+DLL_PATH = os.path.join(paths.build_bin(), "injected.dll")
 
 # Clean old logs
-for f in [r"C:\temp\injected_repro.log"]:
+for f in [os.path.join(paths.injected_log_dir(), "injected_repro.log")]:
     try:
         os.remove(f)
     except OSError:
@@ -64,7 +67,7 @@ time.sleep(3)
 
 # Check log files
 print("[5] Checking log files...")
-for f in [r"C:\temp\injected_{}.log".format(pid), r"C:\temp\injected_repro.log"]:
+for f in [paths.injected_log(pid), os.path.join(paths.injected_log_dir(), "injected_repro.log")]:
     if os.path.exists(f):
         size = os.path.getsize(f)
         print("    {}: {} bytes".format(f, size))

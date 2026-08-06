@@ -1,7 +1,7 @@
 # Terminal-Injector 项目总览
 
 > 本文档是 terminal-injector 项目的顶层规划文档，定义项目目标、架构决策、目录结构、Phase 划分与技术栈。
-> 所有后续 Phase 文档（`01-*.md` ~ `11-*.md`）均以本文档为基线。
+> 所有后续 Phase 文档（`01-*.md` ~ `19-*.md`）均以本文档为基线。
 
 ---
 
@@ -67,7 +67,7 @@
 │  │  - 输出类 API → 翻译成 VT 序列 → IPC 发中介    │              │
 │  │  - 输入类 API ← IPC 收中介 VT ← 翻译成结构体   │              │
 │  │  - 状态类 API → 返回缓存状态（欺骗目标程序）   │              │
-│  │  - 自保护类 API → 拦截 Attach/Free/Alloc       │              │
+│  │  - 自保护类 API → 拦截 Attach/Free/Alloc/GetConsoleWindow       │              │
 │  └───────────────────────────────────────────────┘              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -199,7 +199,7 @@ terminal-injector/
 │   │       ├── WaitHooks.h            # 等待类 Hook 声明
 │   │       ├── WaitHooks.cpp          # WaitForSingleObject/MultipleObjects...
 │   │       └── ProtectionHooks.h      # 自保护 Hook 声明
-│   │       └── ProtectionHooks.cpp    # Attach/Free/Alloc/GetStdHandle/CloseHandle
+│   │       └── ProtectionHooks.cpp    # Attach/Free/Alloc/GetConsoleWindow/CloseHandle
 │   │
 │   └── app/                           # terminal-injector.exe 双模式入口
 │       └── main.cpp                   # 参数解析：--inject <pid> / --mediator
@@ -252,7 +252,7 @@ dll  ──►  common (logging/transport/protocol/console)
 | 6 | 输入链路（VT → INPUT_RECORD） | 输入类 Hook + VtToInputRecord 翻译器 + 鼠标双向翻译 | Phase 5, 12 |
 | 7 | 模式与信号 | Get/SetConsoleMode 状态机、Ctrl+C 信号传递 | Phase 6 |
 | 8 | 高级特性 | Alt Buffer、ConsoleTitle、ConsoleCP、ConsoleFont、Wait 句柄假映射 | Phase 7 |
-| 9 | 自保护 | Attach/Free/Alloc/GetStdHandle/CloseHandle Hook | Phase 8 |
+| 9 | 自保护 | Attach/Free/Alloc/GetConsoleWindow/CloseHandle Hook | Phase 8 |
 | 10 | 状态同步优化与稳定性 | 后台轮询线程、鼠标攒批、死锁防护、性能调优 | Phase 9 |
 | 11 | 卸载清理与多目标测试 | 管道断开卸载、反复注入/卸载 10 次无泄漏 | Phase 10 |
 | 13 | VT 直通模式 | VT 输入模式自动检测与直通转发，LineEditor 行编辑 | Phase 11 |
@@ -261,6 +261,7 @@ dll  ──►  common (logging/transport/protocol/console)
 | 16 | 鼠标坐标状态管理 | 跨 ParseMouse 调用的鼠标按键状态连续性 | Phase 15 |
 | 17 | 字符宽度 | wcwidth 集成，CJK 双宽字符正确处理 | Phase 16 |
 | 18 | 滚动缓冲区 | 回滚行数跟踪、用户缓冲区高度保留、模式切换重置 | Phase 17 |
+| 19 | VT 直通光标跟踪 | VtCursorTracker 解析 VT 直通流维护语义光标，修复"输出后查询"类失败 | Phase 13, 14, 17, 18 |
 
 ### 5.1 Phase 依赖图
 

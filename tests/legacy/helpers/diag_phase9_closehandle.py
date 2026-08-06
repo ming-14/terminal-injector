@@ -22,10 +22,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import injector
 from helpers import input_sim
 
-PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import paths  # noqa: E402
+
+BUILD_BIN = paths.build_bin()
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
-CDB_EXE = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+CDB_EXE = paths.cdb_exe()
 
 # cdb 脚本：检查 kernelbase!CloseHandle 是否被 Hook
 #

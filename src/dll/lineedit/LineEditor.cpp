@@ -180,6 +180,16 @@ void LineEditor::SyncCursor(int deltaY, bool toLineStart) const {
     ConsoleState::Instance().SetCursorPosition(c);
 }
 
+// 当前期望光标：与 SyncCursor 的计算一致（行首 + 光标前显示宽度，折行算 Y）
+COORD LineEditor::GetCurrentUiCursor() const {
+    const int screenW = ConsoleState::Instance().GetBufferSize().X;
+    int posWidth = m_startCursor.X + DisplayWidth(m_line, 0, m_cursor);
+    COORD c;
+    c.X = static_cast<SHORT>(posWidth % screenW);
+    c.Y = static_cast<SHORT>(m_startCursor.Y + posWidth / screenW);
+    return c;
+}
+
 // ============================================================
 // wchar_t → UTF-8
 // ============================================================

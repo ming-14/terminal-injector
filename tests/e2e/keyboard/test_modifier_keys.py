@@ -10,10 +10,11 @@
   - Alt+X：ctrl 含 LEFT_ALT_PRESSED(0x02)（ESC 前缀可推断）
   - 每组合 down+up 各一事件
 
-环境注意（2026-08-02）:
+环境注意（2026-08-05）:
   - 中文输入法开启时，SendInput 的修饰键组合会被 IME 截走组词，
-    目标收不到事件（EVENT_COUNT=0）——测试 setup 时先关闭 WT 窗口
-    IME（ImmSetOpenStatus(false)，见 keyboard/_common.py disable_ime）。
+    目标收不到事件（EVENT_COUNT=0）。TestSession setup 已统一调用
+    injector.ensure_english_layout() 切到英文布局（WT 是 XAML 窗口，
+    ImmSetOpenStatus 拿不到 IMC，只能系统级 Win+Space 切换）。
 
 验证方式: 目标脚本读 KEY_EVENT_RECORD 记录到结果文件
 """
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.session import TestSession
 from common import result as result_mod
 from helpers import input_sim
-from keyboard._common import build_reader, parse_keys, assert_key, disable_ime
+from keyboard._common import build_reader, parse_keys, assert_key
 
 NAME = "modifier_keys"
 
@@ -52,8 +53,6 @@ def run() -> int:
         with TestSession() as s:
             s.run_target(NAME, build_reader(len(combos) * 2), ready_key="READY")
             time.sleep(0.8)
-            disable_ime()
-            time.sleep(0.2)
             for name, vks, flag, vk, char in combos:
                 input_sim.press_combo(vks)
             keys = parse_keys(s, NAME)

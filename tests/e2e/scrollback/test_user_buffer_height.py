@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.session import TestSession
 from common import result as result_mod
+from common.childlog import latest_injected_log
 
 NAME = "user_buffer_height"
 
@@ -78,7 +79,7 @@ def run() -> int:
                 else:
                     print("  [FAIL] set: ok={} Y={}（期望 1/1000）".format(ok, y1))
                     failures += 1
-                log_path = r"C:\temp\injected_{}.log".format(pid)
+                log_path = latest_injected_log(pid)
                 deadline = time.time() + 6.0
                 m = None
                 while time.time() < deadline:

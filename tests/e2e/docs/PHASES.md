@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
 ### 路径与依赖
 
-- `helpers/injector.py` 的 `PROJECT_ROOT`：优先读环境变量 `TI_PROJECT_ROOT`，默认 `C:\Users\rikka\Desktop\terminal-injector`
+- `helpers/injector.py` 的 `PROJECT_ROOT`：优先读环境变量 `TI_PROJECT_ROOT`，默认按 e2e 目录相对解析（与 common/paths.py 一致，不硬编码机器路径）
 - 构建产物：`<TI_PROJECT_ROOT>\build\bin\Release\`
 - 目标脚本内嵌在测试文件里（字符串），运行时写入 `_targets/`，避免 103 份 target 散落
 - 测试期间禁止手动操作 WT 窗口（SendInput 干扰）
@@ -199,7 +199,7 @@ if __name__ == "__main__":
 | 31 | `test_screen_buffer_size.py` | SetConsoleScreenBufferSize + WINDOW_BUFFER_SIZE_EVENT | resize 后 Get 一致；目标收到 resize 事件 |
 | 32 | `test_window_info.py` | SetConsoleWindowInfo（移动/裁剪） | 虚拟窗口坐标正确；事件/序列到达 |
 | 33 | `test_dual_buffer.py` | CreateConsoleScreenBuffer + SetActiveConsoleScreenBuffer | 切换后输出进新缓冲；切换回恢复（含 GetConsoleScreenBufferInfo 区分） |
-| 34 | `test_query_console.py` | GetConsoleWindow / GetLargestConsoleWindowSize / GetConsoleProcessList | 非零句柄/合理尺寸/进程数≥1（不崩溃、返回合理值） |
+| 34 | `test_query_console.py` | GetConsoleWindow / GetLargestConsoleWindowSize / GetConsoleProcessList | 返回 0（Phase 9 设计：隔离 ConHost 原生窗口操作）/合理尺寸/进程数≥1（不崩溃、返回合理值） |
 
 ## 验证标准
 - [x] 7 个文件全部 PASS
@@ -232,9 +232,10 @@ if __name__ == "__main__":
 ## 验证标准
 - [x] 11 个文件全部 PASS
 - [x] 42 Ctrl+C：目标脚本记录 `SIGINT_RECEIVED`，python 被中断退出
-- 备注（2026-08-02）：41 修饰键测试在中文输入法开启时 SendInput 组合键会被
-  IME 截走组词（目标收不到事件）——测试 setup 时关闭 WT 窗口 IME
-  （ImmSetOpenStatus(false)，见 keyboard/_common.py disable_ime）；
+- 备注（2026-08-05）：41 修饰键测试在中文输入法开启时 SendInput 组合键会被
+  IME 截走组词（目标收不到事件）——TestSession setup 统一调用
+  injector.ensure_english_layout() 轮询 Win+Space 切到英文布局
+  （WT 是 XAML 窗口，ImmGetContext 返回 0，ImmSetOpenStatus 无法关闭其 IME）；
   并修复空事件列表时 ctrl 标志检查的假 PASS 分支
 
 ---
@@ -306,7 +307,7 @@ if __name__ == "__main__":
 |---|------|------|------|
 | 63 | `test_click.py` | 左/右/中键 | buttonState 位 0x1/0x2/0x4 正确；down+up 各一 |
 | 64 | `test_double_click.py` | 双击/三击 | MOUSE_DOUBLE_CLICK (0x2)/MOUSE_TRIPLE_CLICK (0x8) 标志正确 |
-| 65 | `test_drag_move.py` | 拖动 MOUSE_MOVED | 按下拖动产生 MOUSE_MOVED 事件序列，坐标连续 |
+| 65 | `test_drag_move.py` | 拖动（按住移动） | down(0x1) → 拖拽按下态重复 down → up(0x0)，释放坐标反映终点（位置移动被 WT 跟踪） |
 | 66 | `test_wheel.py` | 纵向滚轮 | MOUSE_WHEELED 标志 + dwButtonState 高 16 位 delta 符号正确 |
 | 67 | `test_hwheel.py` | 横向滚轮 | MOUSE_HWHEELED 标志 + delta 方向正确 |
 | 68 | `test_coords.py` | 坐标精度（0/1-based 转换） | 点击两处不同位置，坐标差与屏幕像素差一致（±1） |
@@ -317,7 +318,7 @@ if __name__ == "__main__":
 - [x] 68：目标读到的 0-based 坐标与窗口内点击相对位置换算一致（A=49,11 B=72,16，重复点击精确一致）
 - 备注（实际行为与计划差异）：
   - 64：SGR 1006 无双击概念，MOUSE_DOUBLE_CLICK 标志不设置（VtToInputRecord.cpp ParseMouse 无该逻辑）——SKIP 分支记录
-  - 65：WT ConPTY 不输出鼠标移动事件（SendInput MOVE / PostMessage WM_MOUSEMOVE / SetCursorPos 三种方式实测均无效），拖拽仅 down/up 两序列，MOUSE_MOVED 不可达——已记录 LIM-005；释放坐标反映终点（位置跟踪正常）
+  - 65：WT ConPTY 对按下期间移动不输出 FR1（MOUSE_MOVED），而是按当前按钮状态重复输出 FR0 按下事件（4 步移动 → 4 个重复 down，flags 恒 0x0）；未按键悬停移动不输出任何事件（SendInput MOVE / PostMessage WM_MOUSEMOVE / SetCursorPos 三种方式实测均无效）——MOUSE_MOVED 不可达，已记录 LIM-005（2026-08-05 实测修正：拖拽按下态可观测为重复 down）；释放坐标反映终点（位置跟踪正常）
   - 67：SGR 66/67 横滚编码被 ParseMouse 译作垂直滚轮 0xFFFF0000（无 MOUSE_HWHEELED 区分）——已记录 LIM-006
 
 ---
@@ -376,7 +377,7 @@ if __name__ == "__main__":
 - [x] 86/87：结果文件记录"输出后读回内容"一致（乱码即 FAIL）——87 以 mediator 日志 UTF-8 字节断言（`E4 B8 AD E6 96 87`）
 - 备注（实际行为与计划差异）：
   - 目标进程初始 CP 是系统 ANSI 码（936，ConPTY 初始值），非 65001——不做初始值硬编码断言，只验证 Set/Get 缓存一致性
-  - 85：`ModeHooks: CpChange` 日志写 `C:\temp\injected_<pid>.log`（DLL 进程私有），mediator 日志不可见，不在此断言
+  - 85：`ModeHooks: CpChange` 日志写 DLL 进程私有日志（`injected_<pid>_<时间戳>.log`，GetTempPathW 目录，见 common/childlog.py），mediator 日志不可见，不在此断言
   - 87：WriteConsoleA 的 written 按 W 字符数计（中文每字 1），与 UTF-8 字节数不等——仅断言 written>0 + 日志字节全量到达
   - 86：`chcp 936 >nul` 子进程调 SetConsoleOutputCP 命中 Hook，目标缓存同步为 936（ConPTY 全局 CP 同步到缓存）
 
@@ -419,7 +420,7 @@ if __name__ == "__main__":
 - 备注（测试经验/工程行为）：
   - scrollback 递增语义已统一（2026-08-02 修复）：VirtualConsoleState::AdvanceCursor 的 `\n` 分支此前只 clamp 不递增，与 ConsoleState 不一致——已加 `m_scrollbackLines++`；修复后空行/换行输出也计数
   - 子进程 resize 同步已修复（2026-08-02）：DllRecvLoop ResizeNotify 分支此前只更新 ConsoleState，不调 VirtualConsoleState::ApplyWtResize → 子进程 bufferSize/scrollback 不随 WT resize 更新；现与主进程 WtStateReport 路径对齐（子进程注入的 python 目标 resize 后 DLL 日志出现 ApplyWtResize）
-  - 92 cmd 段须读 C:\temp\injected_<pid>.log（DLL 进程私有日志），多匹配取 findall[-1]
+  - 92 cmd 段须读 DLL 进程私有日志（`injected_<pid>_<时间戳>.log`，路径经 common/childlog.py `latest_injected_log(pid)` 定位），多匹配取 findall[-1]
   - 92 绝对值受 cmd 回显/折行影响，断言用">0 + 单调增 + resize 保留"
   - 目标内 ctypes 调 GetConsoleScreenBufferInfo/SetConsoleScreenBufferSize/SetConsoleMode 命中 DLL Hook 返回缓存（需显式 argtypes，64 位指针否则崩溃）
 
@@ -456,14 +457,29 @@ if __name__ == "__main__":
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
-| 100 | `test_full_screen_redraw.py` | 满屏重绘 60fps | WriteConsoleOutput 满屏 N 次，总耗时 < 阈值（如 100ms×N/60），无撕裂（无输出乱码） |
-| 101 | `test_high_freq_output.py` | 高频输出（cat 大文件） | 5MB 输出完成且内容完整（哈希一致）；无卡死 |
-| 102 | `test_mouse_latency.py` | 鼠标端到端延迟 <50ms | 发送点击到目标程序读到的时间差 <50ms（时间戳记录） |
-| 103 | `test_logger_stability.py` | Logger 双路无死锁 | 高频写日志 200 次线程不卡死（复用 phase10 logger_worker 断言） |
+| 100 | `test_full_screen_redraw.py` | 满屏重绘 60fps | 20 帧满屏 WriteConsoleOutputW 全部成功，总耗时 < 20×50ms（单帧 50ms 容差），无撕裂（日志输出字节 >= 单帧格数） |
+| 101 | `test_high_freq_output.py` | 高频输出（cat 大文件） | 5MB 输出完成且内容完整（目标侧 sha256 + 驱动侧字节数精确比对）；无卡死 |
+| 102 | `test_mouse_latency.py` | 鼠标端到端延迟 <50ms | 50 次采样点击到目标读到的时间差 P95 < 50ms（GetTickCount64 双端时间戳） |
+| 103 | `test_logger_stability.py` | Logger 双路无死锁 | 高频写日志 200 次线程不卡死；子进程 DLL 日志持续增长、行数 >= 调用次数 |
 
 ## 验证标准
-- [ ] 102：50 次采样 P95 < 50ms
-- [ ] 101：输出哈希与源文件一致（经 DLL 链路无截断）
+- [x] 102：50 次采样 P95 < 50ms（实测 P95=47ms 稳定 ×4，平均 ~36ms；50ms 为
+  WT 输入节流下留余量的阈值）
+- [x] 101：输出哈希与源文件一致（经 DLL 链路无截断）
+- [x] 100：20 帧满屏（120x30=3600 格）实测 31ms，单帧平均 1.6ms（远超 60fps）
+- [x] 103：200 次调用全部成功，DLL 日志增长 ~16KB / 1200+ 行，worker 持续写入
+- 备注（2026-08-05，测试经验/工程行为）：
+  - 101：mediator 日志 hex 字段只记前 256 字节/包（Mediator.cpp WriteChildVtOutput），
+    5MB 内容无法从日志全量重建 → 完整性 = ChildVtOutput len 总和精确比对
+    （实测 5MB 474ms、62 包、补发字节仅 637B）+ 内容头标记在 hex 流中；
+    目标 DONE 后 BatchSender 仍可能未 flush 最后一批（进程退出时 Shutdown 最终
+    flush），驱动须轮询等待 len 总和达标再断言，否则偶发少 ~130KB
+  - 102：测量点必须紧贴 SendInput down 发送——`input_sim.mouse_click` 内部
+    move sleep 50ms 会在测量中引入固定偏差（实测 110ms 假延迟）；预热点击的
+    down 会被目标计入样本导致配对错位，目标须先 rec FIRST 对齐再开始计数；
+    P95=47ms 每轮完全一致，为 WT 鼠标输入固定节流
+  - 103：子进程 DLL 日志定位 = 会话开始前 glob 快照，新增文件即子进程日志
+    （injected_<pid>_<ts>.log）；200 次调用实测增长 ~16KB（紧凑日志格式）
 
 ---
 
@@ -471,13 +487,27 @@ if __name__ == "__main__":
 
 ## 内容
 1. `run_all.py` 全量运行（预计 1~1.5h），修复所有 FAIL
-2. 汇总报告：103 项 PASS/FAIL/UNSUPPORTED 统计
+2. 汇总报告：107 项 PASS/FAIL/UNSUPPORTED 统计
 3. `README.md` 完善：运行方式、特性矩阵、UNSUPPORTED 清单、结果解读
+   （2026-08-05 完成：`tests/README.md` 增加 performance 类别、UNSUPPORTED
+   清单表——实测 4 个探测：osc_clipboard/osc_color_query 当前 PASS、
+   xtversion/kitty_keyboard 当前 UNSUPPORTED；计数更新 107）
 4. 与 terminal-injector 回归：跑项目 `tests/runners/run_all.py` 确认无回归（若需）
 
 ## 验证标准
-- [ ] 全量 0 FAIL（UNSUPPORTED 除外）
-- [ ] 报告输出 JSON 汇总文件 `results/summary.json`
+- [x] 全量 0 FAIL（UNSUPPORTED 除外）——2026-08-05 实测：
+  - 全部 14 个类别逐类回归（vt_output/console_api/cursor_buffer/keyboard/
+    line_editor/modes/vt_passthrough/mouse/special_sequences/codepage/width/
+    scrollback/lifecycle/performance）：0 FAIL
+  - 已知偶发（非 FAIL 断言）：SetForegroundWindow 失败（环境前台锁）、
+    目标 READY 偶发超时，重跑即过；不修复环境
+  - UNSUPPORTED=2（xtversion、kitty_keyboard），PASS=105
+- [x] 2026-08-06 分批次全量复核（7 批 × 2 类别，107 项）：唯一 FAIL 为
+  `test_set_text_attribute` LOG_WRITE_X——功能正常（ChildVtOutput hex[1]=58
+  已含 'X'），但断言 `" 58 " in content` 依赖 flush 批合并，'X' 单独成批
+  （hex[1]=58 行尾）时漏判；已改正则 `[ =]58(?=\s|$)` 同时覆盖行中/行尾；
+  `test_fill_output` 同类断言（" 23 "）一并加固，console_api 复验 11/11 PASS
+- [x] 报告输出 JSON 汇总文件 `results/summary.json`
 
 ---
 
@@ -505,14 +535,15 @@ if __name__ == "__main__":
 | BUG-002 | Alt Buffer 序列缺尾字节：BufferHooks.cpp `SendToMediator(seq, sizeof(vt::kEnterAltBuffer) - 1)` 中 `kEnterAltBuffer` 是 `const char*` 指针，sizeof=8（64 位），-1 后只发 7 字节，序列 `\x1b[?1049h` 实际发出 `\x1b[?1049`（缺 `h`/`l`），WT 无法识别，Alt Buffer 切换不生效（功能完全失效） | SetConsoleActiveScreenBuffer(伪句柄) → 日志 `ChildVtOutput: len=7 hex[7]=1B 5B 3F 31 30 34 39` | `test_dual_buffer` 的 LOG_ENTER_ALT/LOG_EXIT_ALT | **已修复**（2026-08-02）：`VtEscape.h` `kEnterAltBuffer`/`kExitAltBuffer` 由 `const char*` 改为 `char[]`（数组 sizeof 正确）；`test_dual_buffer` 恢复完整 `1B 5B 3F 31 30 34 39 68/6C` 断言，PASS |
 | BUG-003 | Shift 修饰键标志在 WT→ConPTY 文本流中丢失：SendInput 按 Shift+X，WT 只把按键折叠成大写字符 `'X'` 写入 ConPTY，conhost 从文本无法区分 Shift/CapsLock（实测 Shift+方向键同样无标志），注入链路忠实反映上游 → INPUT_RECORD `dwControlKeyState` 无 SHIFT_PRESSED；Ctrl（控制字符可推断）/Alt（ESC 前缀可推断）不受影响 | press_combo([VK_SHIFT, 0x58]) → 目标 KEY_EVENT ctrl=0x0 而 char='X' | `test_modifier_keys` 的 shift+x ctrl 标志断言（已改为验证大写字符） | 上游限制（终端架构），非工程 bug；如需 SHIFT 需 WT 侧 CSI u 编码 |
 | BUG-004 | Ctrl+Z EOF 未实现：LineEditor.cpp `ProcessKey` 普通字符分支（621 行 `ch != 0`）把 `\x1a`（SUB）当普通字符插入行缓冲，`done=0` 继续等 Enter → ReadConsoleW 永不返回；真实 ConHost 行输入模式收到 `\x1a` 返回 EOF（ok=1 n=0） | 目标 SetConsoleMode(LINE_INPUT) 后 ReadConsoleW + SendInput Ctrl+Z → 日志 `ProcessKey done=0 vtLen=0 lineLen=0`，ReadConsoleW 卡死 | `test_ctrl_z_eof` 的 READ_RET | **已修复**（2026-08-02）：`LineEditor.cpp` ProcessKey 新增 Ctrl+Z 分支（`0x1a`+LEFT_CTRL）→ 截断行缓冲、回显 `^Z\r\n`、返回 EOF（ok=1 n=0）；`test_ctrl_z_eof` 恢复 READ_RET 断言，PASS |
-| BUG-005 | WINDOW_BUFFER_SIZE_EVENT 过滤未实现：ReadConsoleInputW hook 不按 ENABLE_WINDOW_INPUT 标志过滤 resize 事件（InputHooks.cpp 无模式过滤逻辑）；真实 ConHost 关闭 WINDOW_INPUT 后不再返回该事件 | 目标 SetConsoleMode(WINDOW_INPUT) 收到 resize 事件 → SetConsoleMode(0) 后再 resize 仍收到 | `test_window_input` 的 OFF_SEEN | **已修复**（2026-08-02）：`InputHooks.cpp` 新增 `FilterByInputMode()`（按 `ENABLE_WINDOW_INPUT` 丢弃 `WINDOW_BUFFER_SIZE_EVENT`），接入 Read/Peek ConsoleInputW/A 四个读口；后续回归发现读口过滤导致 GetNumberOfConsoleInputEvents（未过滤计数）与读口语义不一致、目标阻塞空等 → 补 `DllRecvLoop.cpp` 入队点按模式过滤（与真实 ConHost"生成事件时检查模式"一致）；`test_window_input` OFF_SEEN 取消 SKIP，PASS |
+| BUG-005 | WINDOW_BUFFER_SIZE_EVENT 过滤与真实行为不符（两轮修正）：(1) 2026-08-02 曾实现 `FilterByInputMode()` 按 ENABLE_WINDOW_INPUT 丢弃 resize 事件，但实测真实 ConHost/ConPTY 对该事件**不受模式门控**——只要 buffer/window 尺寸变化即产生（microsoft/terminal#263/#281 官方确认：view 变化即发送；文档描述与实现不符）；过滤后 Textual 类 TUI 永不 resize、GetNumberOfConsoleInputEvents（未过滤计数）与读口不一致导致空等。(2) 2026-08-05 移除过滤，`DllRecvLoop.cpp` 无条件注入；`test_window_input` OFF_SEEN 改为断言"关闭后仍收到"（与真实 ConPTY 一致） | 目标关 WINDOW_INPUT 后 resize WT → 仍收到 WINDOW_BUFFER_SIZE_EVENT | `test_window_input` | **已修复**（2026-08-05 终版）：`InputHooks.cpp` 移除按模式过滤（FilterByInputMode 删除），`DllRecvLoop.cpp` 无条件 EnqueueResizeEvent；`test_window_input` 按真实 ConPTY 语义断言关闭后仍收到，PASS |
 | LIM-001 | PROCESSED_INPUT 清除后 Ctrl+C 仍中断目标：`\x03` 经 ConPTY 按共享输入模式（cmd 进程默认含 PROCESSED）无条件转 CTRL_C_EVENT → SIGINT；目标进程自身清除 PROCESSED 无法影响 ConPTY 分发（ConPTY 不按进程区分输入模式） | run_target 目标 SetConsoleMode(0) + raw ReadConsoleW + SendInput Ctrl+C → 目标被 SIGINT 中断（实测） | `test_processed_input` 的 GOT_CHAR（已 SKIP） | 架构限制（ConPTY 共享模式），非 DLL 缺陷 |
 | LIM-002 | PROCESSED_OUTPUT 的 `\n`→CRLF 转换不适用：输出模式恒强制 VT_PROCESSING，WriteFile 字节原样直通（OutputHooks.cpp:252），`\n` 保持 0A（ConPTY 侧处理）；原生 ConHost 非 VT 模式写 `\n` 转 `\r\n` | 目标 SetConsoleMode(out, PROCESSED_OUTPUT) + WriteFile(b"a\\nb") → 日志 `ChildVtOutput hex[3]=61 0A 62` | `test_processed_output`（按 VT 直通语义断言，已 PASS） | 架构差异（VT 直通），行为正确 |
 | LIM-003 | WRAP_AT_EOL 标志不影响光标推进：WriteConsoleW_Detour 硬编码 `AdvanceCursor(wrapAtEol=true)`（OutputHooks.cpp:151）；原生 ConHost 关闭 WRAP_AT_EOL 时写满行后光标停在行末 | 目标 SetConsoleMode(out, 0) + 写满一行 → 光标仍折行 | `test_wrap_at_eol` | **已修复**（2026-08-02）：`OutputHooks.cpp:151` `wrapAtEol` 从 `GetOutputMode() & ENABLE_WRAP_AT_EOL_OUTPUT` 读取，关闭时 ConsoleState（真实 ConHost 语义）停在行末（日志 afterCursor=(119,7)）。**ConPTY 限制**：DSR 实测（2026-08-02）ConPTY 不尊重该标志，关闭后仍折行（WT 回报光标折行）；VirtualConsoleState 是 ConPTY 侧状态恒 wrap，GetConsoleScreenBufferInfo 返回该状态 → 程序读到折行位置，与 WT 视觉一致。`test_wrap_at_eol` 新增 WRAP_OFF 段按 ConPTY 实际语义断言，PASS |
 | LIM-004 | VT_INPUT 输入直通行为未实现：`ENABLE_VIRTUAL_TERMINAL_INPUT` 标志缓存一致 + 通知 mediator（ModeSwitchNotify），但 `m_vtInputMode` 无使用方（Mediator.cpp:527 仅 store），按键仍按行编辑 KEY_EVENT 翻译；原生 ConHost 开启后 ReadConsoleInputW 返回 VT 序列 | 目标 SetConsoleMode(in, VT_INPUT) → Get 一致 + 日志 ModeSwitchNotify，但输入无直通 | `test_vt_input_mode`（验证 set/get + 通知，已 PASS） | **已修复**（2026-08-02）：清理 `Mediator.h/.cpp` 无使用方的 `m_vtInputMode`（DLL 侧双队列才是直通决策点，mediator 只转发+日志）；`test_vt_input_mode` 差异注释更新，PASS |
-| LIM-005 | WT ConPTY 不输出鼠标移动事件：SendInput MOUSEEVENTF_MOVE / PostMessage WM_MOUSEMOVE / SetCursorPos 三种驱动方式实测均无效，WT 只输出按下/释放/滚轮 SGR 序列（1002h/1003h 均不报移动）→ MOUSE_MOVED 标志在 WT 链路不可达，拖拽仅 down/up 两事件 | 拖拽（按住移动）→ 目标仅收到 2 个 MOUSE_EVENT，无中间移动事件 | `test_drag_move` 的 MOVED 断言（已 SKIP，坐标位置跟踪正常） | 上游限制（WT/ConPTY），非工程 bug |
+| LIM-005 | WT ConPTY 不输出鼠标移动事件：SendInput MOUSEEVENTF_MOVE / PostMessage WM_MOUSEMOVE / SetCursorPos 三种驱动方式实测均无效；按下期间移动不输出 FR1（MOUSE_MOVED），而是按当前按钮状态重复输出 FR0 按下事件（2026-08-05 实测：4 步移动 → 4 个重复 down，flags 恒 0x0，拖拽按下态可观测）→ MOUSE_MOVED 标志在 WT 链路不可达 | 拖拽（按住移动）→ 目标收到 down(0x1) + 拖拽重复 down + up(0x0)，无 FR1 中间移动事件 | `test_drag_move` 的 MOVED 断言（已 SKIP，改断言拖拽按下态 HOLD + 释放坐标跟踪正常，PASS） | 上游限制（WT/ConPTY），非工程 bug |
 | LIM-006 | SGR 1006 无标准横滚编码：WT 按 xterm 扩展发 `\x1b[<66/67;x;yM`，VtToInputRecord.cpp ParseMouse 仅识别 `btn&64` 为滚轮且 baseBtn=66&3=2 非 0 → 横滚右/左均译作 MOUSE_WHEELED + 0xFFFF0000（无法与垂直下滚区分，MOUSE_HWHEELED 不设置） | SendInput MOUSEEVENTF_HWHEEL ±120 → 目标收到 `ffff0000,0004` ×2 | `test_hwheel` | **已修复**（2026-08-02）：`VtToInputRecord.cpp` ParseMouse 滚轮分支识别 baseBtn 2/3（SGR 66/67）→ `MOUSE_HWHEELED` + 高字 ±1；0/1 → 垂直 `MOUSE_WHEELED`；`test_hwheel` 标志断言改为"应出现 MOUSE_HWHEELED"，PASS |
 | LBUG-001 | 长命令回车后 WT 光标被拉回折行行首（用户报告）：cmd 中输入长命令（软折行）回车后，光标先正确移动到折行下一行，随后被拉回旧行——python 子进程 LazyInit 的屏幕重放分支用 ConHost 陈旧快照光标（注入时刻 cmd 旧位置）同步 WT，覆盖 HelloAck 回传的 WT 真实光标，后续 CursorPosition 把光标拉回旧位置 | 子进程注入后 DLL 日志 `cursor synced to terminal (0,4)` 覆盖 `HelloAck ... cursor=(65,4)` | `test_child_cursor_aligned`（新增） | **已修复**（2026-08-02）：`LazyInit.cpp` 按 `isTarget` 分流——主进程（cmd）保留重放+行首覆盖；子进程跳过重放，仅用 HelloAck 的 `wtCursorX/wtCursorY` 对齐 `ConsoleState`+`VirtualConsoleState`（日志 `child cursor aligned to WT (X,Y) from HelloAck`）；`test_child_cursor_aligned` 断言 aligned 记录存在且无重放分支记录，PASS ×2 |
+| BUG-006 | 补发（resync）序列与内容字节合并：输入/输出补发序列拼接进同一条 VtOutput 消息（len=补发+内容），且 BatchSender 会合并相邻发送，字节边界不可区分 → e2e 精确断言（`ChildVtOutput: len=3 hex[3]=61 0A 62`）被破坏 | 写前置补发/回显补发后目标输出 → 日志 len=10 而非 3 | `test_processed_output` / `test_vt_output_mode` | **已修复**（2026-08-05）：新增协议类型 `CursorSync=0x0090`（DLL→mediator，不经 BatchSender 即时发送先于内容），`ChildSession` 收到即写 stdout；内容消息字节保持原样，断言恢复，PASS（详见 `docs/phases/19-vt-cursor-tracker.md` 第 7 节） |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
 

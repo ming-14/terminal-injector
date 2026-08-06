@@ -50,12 +50,14 @@ bool GetWtCursorPos(uint16_t& cursorX, uint16_t& cursorY) {
 } // namespace
 
 ChildSession::ChildSession(uint32_t childPid,
+                           const std::wstring& pipeName,
                            VtOutputCallback         onVtOutput,
                            ChildNotifyCallback      onChildNotify,
                            ExitCallback             onExit,
                            ModeChangeCallback       onModeChange,
                            ModeSwitchNotifyCallback onModeSwitchNotify)
     : m_childPid(childPid)
+    , m_pipeName(pipeName)
     , m_onVtOutput(std::move(onVtOutput))
     , m_onChildNotify(std::move(onChildNotify))
     , m_onExit(std::move(onExit))
@@ -89,9 +91,12 @@ void ChildSession::Run() {
 
     LOG_INFO("ChildSession: Run start, pid=%u", m_childPid);
 
-    // 1. 创建管道实例 \\.\pipe\terminjector_<child_pid>
+    // 1. 创建管道实例 \\.\pipe\terminjector_<child_pid>_<随机>
+    //    管道名由父 DLL 生成并随 ChildProcessNotify 上报（安全加固，
+    //    名字不可预测，防同会话进程预创建抢占；父 DLL 已把同一名字
+    //    经 RemotePipeSetup 传给子 DLL）
     m_transport = std::make_unique<NamedPipeTransport>(
-        MakePipeName(m_childPid), NamedPipeTransport::Role::Server);
+        m_pipeName, NamedPipeTransport::Role::Server);
     if (!m_transport->Create()) {
         LOG_ERROR("ChildSession: Create pipe failed, pid=%u", m_childPid);
         return;
@@ -224,14 +229,26 @@ void ChildSession::RecvLoop() {
                 }
                 break;
 
+            case MessageType::CursorSync:
+                // Phase 21：子进程直通写/行编辑回显前的光标同步序列
+                // 独立消息（不经 BatchSender 合并）先于内容到达，直接写 WT stdout
+                // 定位 ConPTY 光标，紧随其后的 VtOutput 内容字节保持原样
+                if (m_onVtOutput && !payload.empty()) {
+                    m_onVtOutput(payload.data(), payload.size());
+                }
+                break;
+
             case MessageType::ChildProcessNotify:
                 // 子进程创建了孙进程 → 回调 mediator 创建孙进程 ChildSession
                 if (m_onChildNotify && payload.size() >= sizeof(ChildProcessNotifyPayload)) {
                     ChildProcessNotifyPayload notify{};
                     std::memcpy(&notify, payload.data(), sizeof(notify));
+                    // 提取孙进程随机管道名（子 DLL 生成），供 mediator 创建孙会话
+                    std::wstring grandPipe(notify.pipeName);
                     LOG_INFO("ChildSession RecvLoop: ChildProcessNotify "
-                             "grandchild=%u parent=%u", notify.childPid, notify.parentPid);
-                    m_onChildNotify(notify.childPid, notify.parentPid);
+                             "grandchild=%u parent=%u pipe=%ls",
+                             notify.childPid, notify.parentPid, grandPipe.c_str());
+                    m_onChildNotify(notify.childPid, notify.parentPid, grandPipe);
                 }
                 break;
 

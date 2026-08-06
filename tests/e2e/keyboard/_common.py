@@ -41,30 +41,6 @@ def build_reader(n: int, timeout: float = 8.0, mode: int = 0) -> str:
     return READER_TEMPLATE.format(MODE=mode, TIMEOUT=timeout, N=n)
 
 
-def disable_ime() -> bool:
-    """关闭测试 WT 窗口的输入法（IME）。
-
-    中文输入法开启时，SendInput 的修饰键组合（Ctrl/Alt/Shift 组合）会被
-    IME 截走组词，目标收不到按键事件（EVENT_COUNT=0）。
-    ImmSetOpenStatus(false) 关闭该窗口输入上下文，按键直通 WT。
-    """
-    try:
-        import ctypes
-        from helpers import injector
-        hwnd = injector._test_wt_hwnd
-        if hwnd is None:
-            return False
-        imm32 = ctypes.WinDLL("imm32")
-        ctx = imm32.ImmGetContext(hwnd)
-        if not ctx:
-            return False
-        ok = imm32.ImmSetOpenStatus(ctx, False)
-        imm32.ImmReleaseContext(hwnd, ctx)
-        return bool(ok)
-    except Exception:
-        return False
-
-
 def parse_keys(s, name: str, timeout: float = 5.0) -> list:
     """从结果文件解析 KEY<i> 事件列表（等待全部写出，KEYS 出现为准）。"""
     total = s.wait_result(name, "KEYS", timeout=timeout)

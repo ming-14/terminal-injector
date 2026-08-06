@@ -195,7 +195,7 @@ python tests/helpers/diag_cycle2_crash.py
 ### 6.3 诊断辅助
 
 - `tests/helpers/diag_cycle2_crash.py`：最小复现循环 2 崩溃，抓 WER dump
-- 崩溃 dump 位置：`C:\temp\cmd_dumps\cmd.exe.<pid>.dmp`
+- 崩溃 dump 位置：`<转储目录(默认系统临时目录/terminjector_dumps, 可用 TI_DUMP_DIR 覆盖)>\cmd_dumps\cmd.exe.<pid>.dmp`
 - 分析命令：
   ```
   cdb -z <dump_path> -c ".sympath srv*C:\symbols*...;.exepath ...;.reload;~* kn 50;!analyze -v;q"

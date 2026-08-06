@@ -2,13 +2,7 @@
 
 请检查用户用户名，如果是“rikka”，之后就称用户为Rikka/rikka。若用户没要求，写代码、注释、文档不要把“Rikka”这个名字写进去
 
-# 项目
-
-最低版本Python3.8，禁止引入高于3.8的特性
-
 # 工程规范
-
-## Python3 应该遵循PEP8 语言规范
 
 ## **避免采用降级、兼容、缓解方案**
 不要用任何的降级、兼容、缓解方案，绝对禁止
@@ -44,42 +38,37 @@
 ## 不要硬编码路径 错误:`C:/windows/xxxx.exe` 正确:`WINDIR`
 	
 # 工具：
-- .agents\skills\download-by-mirror	**下载文件，尤其从github下载请使用镜像**
-- .agents\skills\python-win32api
-- .agents\skills\windows-debugging	Window Debugging 套件
-
 需要什么工具自己下载，主动性强一点
-不要用浏览器代理skill/mcp
 
 # 参考资料：
-	reference\
-		xtermjs-docs\
-		tmux-master\
-		terminal-main\
-		MiMo-Code-main\
-		my_rime-master\
-		tcell-v2.13.10\
 *想参考其他什么自己下载，使用webfetch搜索
 
 # **测试与Debug：**
+
 ## 工程必须写测试，最少要写e2e测试，可以自动化操作的尽量用自动化
+
 ## **未查到根本因素时，不要直接改工程源码**
+
 ## 你可以
-	**查日志**
-	**使用工具附加调试（cdb/pdb/...）**，请下载对应符号SRV*e:\Symbol*http://msdl.blackint3.com:88/download/symbols
-	**最小代码复现**等方式debug
-若有些操作无法实现，请寻求用户帮助
-## 复杂功能可以参考成熟开源方案，自己去github下载
-## bug修复后。**需撤销之前的无效修改点**,不能让无效改动污染代码！
-debug完成后，检查
+- **查日志。日志较大时，建议使用子代理阅读，防止占用上下文**
+- **使用工具附加调试（cdb/pdb/...）**，请下载对应符号`SRV*C:\Symbol*http://msdl.blackint3.com:88/download/symbols`
+- **最小代码复现**等方式debug
+
+## 复杂功能可以参考成熟开源方案，自己去Github下载
+
+## bug修复后。**需撤销之前的无效修改点**，不能让无效改动污染代码！
+bug修复后，检查
 - [] 旧改动删了吗
 - [] 旧改动删了后，是否还能正常运行
 	
 # 用户交互
-	**必须与用户对齐需求**，防止实现偏差
-	关键决策点要由用户指定
-	对用户的需求、方案、提出bug现象等信息有疑惑，必须及时追问、用户提出方案有不足时，要及时沟通
+**必须与用户对齐需求**，防止实现偏差
+关键决策点要由用户选择
+对用户的需求、方案、提出bug现象等信息有疑惑，必须及时追问、用户提出方案有不足时，要及时沟通
 
 ---
 
-出现“从命令中解析目标路径失败：${normalizedCommand}”时，请不要用python -c以及复杂脚本（powershell），请使用写脚本文件执行代替
+出现“从命令中解析目标路径失败：${normalizedCommand}”时，请不要用`python -c`，请使用写脚本文件执行代替
+
+
+cdb在C:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609
