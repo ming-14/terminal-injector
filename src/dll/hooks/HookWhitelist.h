@@ -22,6 +22,8 @@
 
 #include <windows.h>
 
+#include "logging/SafeOutputDebugString.h"  // ASSERT_IN_HOOK 的 ODS 出口防重入
+
 namespace terminjector::hooks {
 
 // ============================================================
@@ -34,7 +36,11 @@ namespace terminjector::hooks {
 // --- 允许的 API（已确认不重入我们 Hook）---
 //
 // 日志与调试：
-//   - OutputDebugStringW                 (Logger；不经过 WriteConsole*)
+//   - OutputDebugStringW                 (Logger；不经过 WriteConsole*。2026-08-07 起
+//                                        统一走 SafeOutputDebugStringW 重入保护：
+//                                        ODS 内部 DBWIN 操作会重入被 Hook 的
+//                                        WaitForSingleObjectEx/CloseHandle，
+//                                        无保护会无限递归栈溢出)
 //   - WriteFile(日志文件句柄)             (Logger worker；句柄是 FILE_TYPE_DISK，
 //                                         IsConsoleHandle=false 直接 pass-through)
 //   - CreateFileW(日志文件路径)           (Logger 初始化；非 CONOUT$)
@@ -233,7 +239,7 @@ inline bool CheckNotInReentry() noexcept {
 #define ASSERT_IN_HOOK()                                                  \
     do {                                                                  \
         if (!::terminjector::hooks::CheckNotInReentry()) {                \
-            ::OutputDebugStringW(                                         \
+            ::terminjector::SafeOutputDebugStringW(                       \
                 L"[terminjector] ASSERT_IN_HOOK failed: hook reentry "    \
                 L"depth exceeded, potential deadlock");                   \
             ::DebugBreak();                                               \

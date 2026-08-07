@@ -47,6 +47,11 @@ public:
 
 private:
     static void DoUnload();
+
+    // Phase 22：恢复 ConHost 画面为 WT 会话画面（VT 重放）
+    // 必须在 Hook 禁用（DisableAll）之后调用，内部全走真实 Console API
+    static void ReplaySessionToConHost();
+
     static std::atomic<bool> s_unloading;
     static std::atomic<int>  s_active_read_detours;
 };

@@ -1,5 +1,0 @@
-x cmd!*ls*
-x cmd!*Cls*
-x cmd!*Clear*
-x cmd!*Screen*
-qd

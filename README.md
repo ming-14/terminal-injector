@@ -52,12 +52,15 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe 双模式入口
 ├── tests/
-│   ├── e2e/                    # 端到端测试套件（run_all.py + 12 类 100+ 测试文件）
+│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 107 个测试文件）
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
 │   └── legacy/                 # 早期阶段测试与调试脚本归档
-├── docs/phases/                # Phase 1–18 设计文档
+├── docs/
+│   ├── USAGE.md                # 详细使用手册（CLI 全参数、场景、故障排查）
+│   ├── TECHNICAL.md            # 技术说明（架构、机制、协议、限制）
+│   └── phases/                 # Phase 1–19 设计文档
 └── third_party/minhook/        # MinHook 注入库
 ```
 
@@ -105,7 +108,7 @@ terminal_injector.exe --unload-remote <pid> <dllBase>
 
 ## 测试
 
-e2e 套件（102 个测试文件，覆盖 12 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（107 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e
@@ -121,9 +124,12 @@ python run_all.py --phase 6          # 按 PHASES.md 阶段运行
 
 ## 文档
 
+- [docs/USAGE.md](docs/USAGE.md)：详细使用手册——CLI 全参数参考、三种模式、典型场景、日志与调试、故障排查
+- [docs/TECHNICAL.md](docs/TECHNICAL.md)：技术说明——架构与数据流、Hook/状态/翻译器/协议、卸载机制、已知限制
 - [docs/phases/00-overview.md](docs/phases/00-overview.md)：架构总览、数据流、目录规范、Phase 划分
-- [docs/phases/01-scaffold.md](docs/phases/01-scaffold.md) ~ [18-scrollback-buffer.md](docs/phases/18-scrollback-buffer.md)：各 Phase 设计
-- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md)：e2e 测试套件设计、已知问题清单
+- [docs/phases/01-scaffold.md](docs/phases/01-scaffold.md) ~ [19-vt-cursor-tracker.md](docs/phases/19-vt-cursor-tracker.md)：各 Phase 设计
+- [tests/README.md](tests/README.md)：e2e 测试套件使用与扩展
+- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md)：测试套件设计、特性矩阵、已知问题清单
 
 ## 已知限制
 

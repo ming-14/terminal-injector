@@ -19,6 +19,7 @@ add_library(injected_dll SHARED
     state/VirtualConsoleState.cpp
     state/HandleRegistry.cpp
     state/StatePoller.cpp
+    state/VtReplayBuffer.cpp
     translator/Color.cpp
     translator/ConsoleToVt.cpp
     translator/VtEscape.cpp

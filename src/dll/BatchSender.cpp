@@ -16,6 +16,7 @@
 //      不被另一个 VtOutput 包分割）
 #include "BatchSender.h"
 #include "LazyInit.h"
+#include "state/VtReplayBuffer.h"
 #include "logging/Logger.h"
 #include "transport/ITransport.h"
 #include "protocol/MessageSerializer.h"
@@ -79,6 +80,11 @@ void BatchSender::Shutdown() {
 
 bool BatchSender::EnqueueVtOutput(const void* data, size_t len) {
     if (data == nullptr || len == 0) return true;
+
+    // Phase 22：会话 VT 重放缓冲 —— 记录所有发往 WT 的 VT 字节
+    // 卸载时重放到 ConHost 恢复画面（详见 VtReplayBuffer.h）
+    // 放在最前，保证正常攒批与 fallback 直发两条路径都被记录
+    VtReplayBuffer::Instance().Append(data, len);
 
     // 未初始化时（LazyInit 前 / Shutdown 后）走 fallback：直接 Send
     // 保证功能正确性，只是失去合并优化

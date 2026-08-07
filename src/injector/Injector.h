@@ -39,17 +39,11 @@ public:
                 const std::wstring& pipeName, uint32_t mediatorPid);
 
 private:
-    // 提升 SeDebugPrivilege（注入同权限或更低权限进程时非必需，但建议启用）
-    bool EnableDebugPrivilege();
-
     // 远程调用 LoadLibraryW 加载 DLL
     // 返回远程 HMODULE（完整 64 位基址；失败返回 nullptr）
     // 注意：CreateRemoteThread 退出码只有 32 位，不能直接当 HMODULE 用，
     // 内部用 EnumProcessModulesEx 按文件名匹配拿完整基址
     HMODULE RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath);
-
-    // 枚举目标进程模块，按文件名匹配返回模块基址（不区分大小写）
-    HMODULE FindRemoteModuleByPath(HANDLE hProcess, const std::wstring& name);
 };
 
 } // namespace terminjector

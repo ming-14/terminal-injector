@@ -16,8 +16,10 @@
 #include "logging/Logger.h"
 #include "transport/NamedPipeTransport.h"  // MakeRandomPipeName
 #include "injector/Injector.h"
+#include "injector/ProcessHelper.h"  // EnumerateInjectTargets / EnableDebugPrivilege
 #include "mediator/Mediator.h"
 
+#include <algorithm>  // std::sort（--list-targets）
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,13 +32,14 @@ namespace terminjector {
 
 // 命令行参数
 struct CliArgs {
-    enum class Mode { None, Inject, Mediator, UnloadRemote, Help, Version };
+    enum class Mode { None, Inject, Mediator, UnloadRemote, ListTargets, Help, Version };
     Mode         mode = Mode::None;
     uint32_t     targetPid = 0;
     uint64_t     dllBase = 0;   // --unload-remote 模式：injected.dll 基址
     std::wstring dllPath;    // 默认 exe 同目录的 injected.dll
     std::wstring pipeName;   // 空则按模式生成随机名（防可预测抢占）
     uint32_t     mediatorPid = 0;  // --mediator-pid：DLL 服务端身份校验目标
+    bool         json = false;     // --list-targets 输出 JSON 格式
 
     bool valid = false;
 };
@@ -77,6 +80,8 @@ static void PrintHelp() {
         "      中介模式（由 WT 启动），自动 fork 注入器并桥接 DLL 与 WT\n"
         "  terminal-injector.exe --unload-remote <pid> <dllBase>\n"
         "      远程卸载助手（Phase 11）：在目标进程创建远程线程调 FreeLibrary\n"
+        "  terminal-injector.exe --list-targets [--json]\n"
+        "      列出可注入的进程（权限 + x64 + 控制台程序），附原因标记\n"
         "  terminal-injector.exe --version\n"
         "  terminal-injector.exe --help\n\n"
         "参数:\n"
@@ -86,6 +91,8 @@ static void PrintHelp() {
         "  --dll <path>          injected.dll 路径，默认与 exe 同目录\n"
         "  --pipe <name>         命名管道名；缺省自动生成随机名（\\.\\.\\pipe\\terminjector_<pid>_<hex>）\n"
         "  --mediator-pid <pid>  管道服务端进程 PID（DLL 连接后校验身份，0=跳过）\n"
+        "  --list-targets        列出可注入进程：PID + 进程名 + 状态\n"
+        "  --json                与 --list-targets 搭配，输出 JSON 数组\n"
         "  --unload-remote <pid> <dllBase>\n"
         "                        远程卸载模式：远程 FreeLibrary(dllBase)\n"
         "  --version             显示版本号\n"
@@ -109,6 +116,10 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
             }
         } else if (a == "--mediator") {
             args.mode = CliArgs::Mode::Mediator;
+        } else if (a == "--list-targets") {
+            args.mode = CliArgs::Mode::ListTargets;
+        } else if (a == "--json") {
+            args.json = true;
         } else if (a == "--unload-remote" && i + 2 < argc) {
             // --unload-remote <pid> <dllBase>
             // 由 injected.dll 的 Unloader 启动，独立于 WT 生命周期
@@ -401,6 +412,109 @@ static int RunUnloadRemote(uint32_t targetPid, uint64_t dllBase) {
     return unloaded ? 0 : 1;
 }
 
+// ============================================================
+// --list-targets：列出可注入进程
+// ============================================================
+// 判定由 ProcessHelper::EnumerateInjectTargets 完成：
+//   排除自身/系统进程 → OpenProcess（注入权限）→ x64 → PE CUI（控制台程序）
+// 文本输出 Tab 分隔（PID / 进程名 / 状态），JSON 输出供脚本化使用。
+namespace {
+
+// JSON 字符串转义（进程名可能含引号/反斜杠/控制字符）
+std::string EscapeJson(const std::wstring& s) {
+    std::string out;
+    out.reserve(s.size() * 2 + 2);
+    for (wchar_t c : s) {
+        switch (c) {
+            case L'"':  out += "\\\""; break;
+            case L'\\': out += "\\\\"; break;
+            case L'\n': out += "\\n"; break;
+            case L'\r': out += "\\r"; break;
+            case L'\t': out += "\\t"; break;
+            default:
+                // 非 ASCII 字符按 UTF-8 逐字节输出（保持字节序小端）
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    char mb[4] = {0};
+                    // 用 WideCharToMultiByte 转为 UTF-8，避免直接截断 wchar
+                    int n = WideCharToMultiByte(CP_UTF8, 0, &c, 1, mb, 4,
+                                                nullptr, nullptr);
+                    out.append(mb, n > 0 ? n : 1);
+                }
+        }
+    }
+    return out;
+}
+
+// 生成单条状态文本：可注入 -> injectable；否则为原因标记
+const wchar_t* StatusText(const ProcessHelper::InjectTargetInfo& info) {
+    if (info.injectable) return L"injectable";
+    return info.reason.c_str();
+}
+
+int RunListTargets(bool json) {
+    // 提升 SeDebugPrivilege：管理员运行时能判定更多进程（失败不阻塞，
+    // 同权限进程不受影响；权限不足的系统进程显示 access_denied）
+    ProcessHelper::EnableDebugPrivilege();
+
+    auto targets = ProcessHelper::EnumerateInjectTargets();
+
+    if (json) {
+        std::string out = "[";
+        bool first = true;
+        for (const auto& t : targets) {
+            if (!first) out += ",";
+            first = false;
+            out += "{\"pid\":" + std::to_string(t.pid) +
+                   ",\"name\":\"" + EscapeJson(t.name) + "\"" +
+                   ",\"injectable\":" + (t.injectable ? "true" : "false") +
+                   ",\"x64\":" + (t.x64 ? "true" : "false") +
+                   ",\"console\":" + (t.cui ? "true" : "false") +
+                   ",\"already_injected\":" +
+                   (t.alreadyInjected ? "true" : "false") +
+                   ",\"reason\":\"" +
+                   (t.reason.empty() ? std::string("") : EscapeJson(t.reason)) +
+                   "\"}";
+        }
+        out += "]";
+        std::printf("%s\n", out.c_str());
+        return 0;
+    }
+
+    // 文本输出：可注入在前，其后按 PID 升序
+    std::vector<ProcessHelper::InjectTargetInfo> injectable;
+    std::vector<ProcessHelper::InjectTargetInfo> others;
+    for (const auto& t : targets) {
+        if (t.injectable) injectable.push_back(t);
+        else others.push_back(t);
+    }
+    auto byPid = [](const ProcessHelper::InjectTargetInfo& a,
+                    const ProcessHelper::InjectTargetInfo& b) {
+        return a.pid < b.pid;
+    };
+    std::sort(injectable.begin(), injectable.end(), byPid);
+    std::sort(others.begin(), others.end(), byPid);
+
+    std::printf("PID\tNAME\tSTATUS\n");
+    for (const auto& t : injectable) {
+        if (t.alreadyInjected) {
+            std::printf("%u\t%ls\tinjectable (already injected)\n",
+                        t.pid, t.name.c_str());
+        } else {
+            std::printf("%u\t%ls\tinjectable\n", t.pid, t.name.c_str());
+        }
+    }
+    for (const auto& t : others) {
+        std::printf("%u\t%ls\t%ls\n", t.pid, t.name.c_str(), StatusText(t));
+    }
+    return 0;
+}
+
+} // namespace
+
 // 主分发逻辑
 static int Run(int argc, char* argv[]) {
     // 先解析参数，再根据 mode 决定日志路径（mediator/inject 按目标 pid 分文件）。
@@ -483,6 +597,11 @@ static int Run(int argc, char* argv[]) {
                      args.targetPid,
                      static_cast<unsigned long long>(args.dllBase));
             ret = RunUnloadRemote(args.targetPid, args.dllBase);
+            break;
+        }
+        case CliArgs::Mode::ListTargets: {
+            LOG_INFO("Mode=ListTargets json=%d", args.json ? 1 : 0);
+            ret = RunListTargets(args.json);
             break;
         }
         case CliArgs::Mode::Help:
