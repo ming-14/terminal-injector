@@ -19,6 +19,7 @@
 #include "HookManager.h"
 #include "RemoteParams.h"
 #include "logging/Logger.h"
+#include "logging/SafeOutputDebugString.h"
 #include "transport/ITransport.h"
 #include "transport/NamedPipeTransport.h"
 #include "protocol/Message.h"
@@ -49,10 +50,6 @@ bool g_initialized = false;  // 是否完成（含失败）
 // 本进程是否为注入目标进程（由 HelloAck.isTarget 设置）
 // true=注入目标（DllMain worker 据此 KickStart）；false=子进程
 bool g_isTargetProcess = false;
-
-// === 调试探针（Phase 3 端到端验证用，确认懒加载是否触发）===
-// extern "C" 保证符号名不修饰，cdb 可直接 dd injected!g_probe_eli 读取
-extern "C" volatile LONG g_probe_eli = 0;
 
 // 线程局部标志：当前线程是否正在懒加载中
 // 避免懒加载内 Logger 写日志触发 WriteFile Hook → ENSURE_INITIALIZED 死锁
@@ -233,9 +230,13 @@ void EnsureLazyInitialized() {
     // 原子抢占：仅一个线程进入初始化
     if (InterlockedCompareExchange(&g_initInProgress, 1, 0) != 0) {
         // 另一线程正在初始化，自旋等待（Hook 路径不会高频进入此处）
-        OutputDebugStringW(L"[terminjector] EnsureLazyInitialized: thread waiting for init");
+        // 注意：此处必须走 SafeOutputDebugStringW——ODS 内部 DBWIN 等待
+        // (WaitForSingleObjectEx) 会被 WaitHooks 拦截 → EnsureLazyInitialized
+        // → 再次进入本分支 → 直接 ODS 会无限递归栈溢出（0xC00000FD 崩溃根因，
+        // 见 SafeOutputDebugString.h 头部注释）；重入保护在首个 ODS 出口截断
+        SafeOutputDebugStringW(L"[terminjector] EnsureLazyInitialized: thread waiting for init");
         while (!g_initialized) Sleep(1);
-        OutputDebugStringW(L"[terminjector] EnsureLazyInitialized: thread resumed, init done");
+        SafeOutputDebugStringW(L"[terminjector] EnsureLazyInitialized: thread resumed, init done");
         return;
     }
 
@@ -395,37 +396,62 @@ void EnsureLazyInitialized() {
         hooks::SendToMediator(cursorSync.data(), cursorSync.size());
         LOG_INFO("LazyInit: WT cursor synced to terminal (%d,%d)", termCursorX, termCursorY);
 
-        // 关键：ConsoleState 光标设为行首 (0, cursor.Y) 而非 prompt 末尾
+        // BUG-002：重放结束后补发 SGR 重置，把 VT 流恢复到默认状态。
+        // 快照 cell 可能含反显/下划线/颜色（如 pwsh 横幅 0x4007），状态由
+        // 重放线程输出；重放线程的 thread_local SGR 缓存与主线程隔离，
+        // 若不加重置，主线程首条输出（t_lastAttr 未初始化）不会发出关闭码，
+        // 剩余的反显/下划线会泄漏到后续输出。
+        {
+            const char kResetSgr[] = "\x1b[0m";
+            hooks::SendToMediator(kResetSgr, sizeof(kResetSgr) - 1);
+        }
+
+        // 关键是: 行首覆盖 仅适用于"行编辑 shell"(cmd/pwsh/python REPL)。
         //
-        // 原因：cmd 被 KickStart 唤醒后会从 GetConsoleScreenBufferInfo 拿到的光标位置
-        //       开始输出新 prompt。若 ConsoleState 光标保持在 prompt 末尾 (cursor.X, cursor.Y)，
-        //       cmd 输出的新 prompt 会接在旧 prompt 之后，造成视觉上 prompt 重复：
-        //         C:\Users\rikka>C:\Users\rikka>
-        //       把 ConsoleState 光标设为行首 (0, cursor.Y) 后：
+        // 背景: cmd 被 KickStart 唤醒后从 GetConsoleScreenBufferInfo 读到的在行首位置
+        //       开始输出新 prompt。若光标保持在 prompt 末尾 (cursor.X, cursor.Y)，新 prompt
+        //       会接在旧 prompt 之后，造成视觉上 prompt 重复:C:\Users\rikka>C:\>...
+        //       把 ConsoleState 光标设为行首 (0, cursor.Y) 后:
         //   - WriteConsoleW_Detour 输出前会发 CursorPosition(0, cursor.Y) 同步 WT 光标
         //   - cmd 写新 prompt 字符时从行首开始，正好覆盖补发的旧 prompt
         //   - 新旧 prompt 内容相同（同一工作目录），完全覆盖，视觉无缝
         //
-        // 注意：WT 显示的光标此时在 prompt 末尾，但 cmd 第一次 WriteConsoleW 会立即
-        //       把 WT 光标拉回行首，用户感知不到错位
-        COORD lineStart{0, cursor.Y};
-        ConsoleState::Instance().SetCursorPosition(lineStart);
-        VirtualConsoleState::Instance().SetCursorPos(lineStart);
-        LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
-                 cursor.Y);
+        // 识别依据（实证）: 行编辑 shell 的 inputMode 含 ENABLE_ECHO_INPUT(0x4):
+        //   cmd  in=0x1f7  pwsh in=0x1e4  → 行编辑 shell，需行首覆盖
+        //   vim  in=0x1b8  Textual(vt)    → 不含 0x4，全屏 TUI
+        // 全屏 TUI(vim/Textual/ncurses)自身管理光标，不重打 prompt:
+        //   - ConPTY/WT 光标必须停在 TUI 的真实光标 (termCursorX, termCursorY)
+        //     （上面已同步），否则光标错位(用户反馈：劫持后光标不定位到应用的编辑位置)
+        //   - 不做行首覆盖，后续 VT 输出由 TUI 自己用绝对/相对定位控制
+        const bool isLineShell = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
+        if (isLineShell) {
+            // 行编辑 shell：ConsoleState 光标设行首，覆盖补发的旧 prompt
+            COORD lineStart{0, cursor.Y};
+            ConsoleState::Instance().SetCursorPosition(lineStart);
+            VirtualConsoleState::Instance().SetCursorPos(lineStart);
+            LOG_INFO("LazyInit: ConsoleState cursor set to line start (0,%d) for prompt overwrite",
+                     cursor.Y);
 
-        // Phase 20 修复：VT 直通模式下 prompt 连排
-        // WriteConsoleW_Detour / WriteFile_Detour 的 VT 直通分支（OutputHooks.cpp）
-        // 不发送前置 CursorPosition（避免污染 TUI 程序的 VT 流）。
-        // ConPTY 光标仍停在上面同步的旧 prompt 末尾 (cursor.X, cursor.Y)，
-        // cmd 被 KickStart 唤醒后输出的新 prompt 会被追加其后，形成
-        //   C:\...>C:\...>
-        // 连排。此处主动把 ConPTY 光标拉到行首，使翻译/VT 直通两种模式下
-        // 新 prompt 都从行首写入，正好覆盖补发的旧 prompt，视觉无缝。
-        {
-            std::string lineStartSync = vt::CursorPosition(termCursorY + 1, 1);
-            hooks::SendToMediator(lineStartSync.data(), lineStartSync.size());
-            LOG_INFO("LazyInit: ConPTY cursor pulled to line start for prompt overwrite");
+            // Phase 20 修复：VT 模式下 prompt 连排
+            // WriteConsoleW_Detour / WriteFile_Detour 的 VT 直通分支（OutputHooks.cpp）
+            // 不发送前置 CursorPosition（避免污染 TUI 程序的 VT）。
+            // ConPTY 光标仍停在上面同步的旧 prompt 末尾 (cursor.X, cursor.Y)，
+            // cmd 被 KillStart 唤醒后输出的新 prompt 会被追加其后，形成
+            //   C:\...>C:\...>
+            // 连排。此处主动把 ConPTY 光标拉到行首，使翻译/VT 直通两种模式下
+            // 新 prompt 都从行首写入，正好覆盖补发的旧 prompt，视觉无缝。
+            {
+                std::string lineStartSync = vt::CursorPosition(termCursorY + 1, 1);
+                hooks::SendToMediator(lineStartSync.data(), lineStartSync.size());
+                LOG_INFO("LazyInit: ConPTY cursor pulled to line start (shell prompt overwrite)");
+            }
+        } else {
+            // 全屏 TUI：不执行行首覆盖，光标停留在上面已同步的真实位置
+            // (termCursorY+1, termCursorX+1)。ConsoleState/Virtual 状态保持
+            // 快照光标 (=应用自身光标)，保证 GetConsoleScreenBufferInfo 返回一致。
+            LOG_INFO("LazyInit: fullscreen TUI (inputMode=0x%lx, no ECHO_INPUT): "
+                     "cursor kept at (%d,%d), skip prompt overwrite",
+                     snap.inputMode, termCursorX, termCursorY);
         }
         } else {
             // 子进程：不重放屏幕，用 HelloAck 回传的 WT 真实光标对齐缓存
