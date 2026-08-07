@@ -6,6 +6,7 @@
 // 若 LazyInit 已完成（Logger 就绪）则写日志，否则只写 OutputDebugStringW。
 #include "RemoteParams.h"
 #include "logging/Logger.h"
+#include "logging/SafeOutputDebugString.h"
 
 #include <windows.h>
 
@@ -31,7 +32,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI RemotePipeSetup(const PipeParams* p
         LOG_INFO("RemotePipeSetup installed: pipe=%ls mediatorPid=%u",
                  g_pipeParams.pipeName, g_pipeParams.mediatorPid);
     }
-    OutputDebugStringW(L"[terminjector] RemotePipeSetup installed");
+    SafeOutputDebugStringW(L"[terminjector] RemotePipeSetup installed");
     return TRUE;
 }
 

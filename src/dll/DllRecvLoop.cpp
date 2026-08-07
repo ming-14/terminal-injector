@@ -40,12 +40,10 @@ std::atomic<bool> g_recvRunning{false};
 // 使用 Peek 轮询模式：先非阻塞检查管道有无数据，有数据才调 RecvPacket
 // 避免阻塞 ReadFile 持锁阻止主线程 WriteFile（同步管道句柄一次只能一个 I/O）
 void RecvLoopMain() {
-    ITransport* transport = GetMediatorTransport();
-    if (transport == nullptr) {
-        LOG_WARN("DllRecvLoop: transport is null, exit");
-        return;
-    }
-
+    // Phase 22 修复：transport 指针每次循环重新获取
+    //   DoUnload 的 ReleaseMediatorTransport 会 reset 全局 g_transport，
+    //   若循环外保存指针，卸载完成后线程仍持有已 delete 的对象 → use-after-free。
+    //   循环内获取：release 后 GetMediatorTransport() 返回 nullptr，线程立即退出。
     LOG_INFO("DllRecvLoop started");
     // Phase 6：VT 输入分帧解析器（局部变量，跨 while 循环保持半序列缓冲状态）
     VtInputParser vtInputParser;
@@ -59,6 +57,13 @@ void RecvLoopMain() {
     const DWORD ESC_TIMEOUT_MS = 50;
 
     while (g_recvRunning.load()) {
+        ITransport* transport = GetMediatorTransport();
+        if (transport == nullptr) {
+            // Phase 22：卸载流程已释放 transport，线程退出
+            // 避免在 DLL 卸载后继续执行循环（Execute AV 0xC0000005 根因）
+            LOG_INFO("DllRecvLoop: transport released, exit");
+            break;
+        }
         // 非阻塞 Peek：检查管道内是否有数据可读
         int peeked = transport->Peek(peekBuf, 1);
         // Phase 6 诊断：前 5 次 Peek 打印返回值，确认线程在运行
@@ -340,13 +345,26 @@ void StartDllRecvLoop() {
 }
 
 void StopDllRecvLoop() {
-    if (!g_recvRunning.load()) return;
+    // 请求停止：置 false，线程在下次 while 检查退出（Sleep 轮询最多 10ms；
+    // 若阻塞在 ReadFile，调用方需先断管道让 I/O 失败返回）。
+    // 不处理线程对象：主动卸载路径由 DoUnload 在 ReleaseMediatorTransport
+    // 后调 JoinDllRecvLoop 回收；DETACH 路径调 DetachDllRecvLoop。
     g_recvRunning.store(false);
-    // 轮询模式下线程在 Peek/Sleep 循环中，g_recvRunning=false 后最多 10ms 退出
-    // 注意：ReleaseMediatorTransport 在 DLL_PROCESS_DETACH 才调用
+}
+
+void JoinDllRecvLoop() {
+    // 等待线程退出并回收对象。仅在线程已停止或即将退出时调用：
+    // 若线程阻塞在 ReadFile 且管道未断，会无限等待（调用方保证先断管道）
     if (g_recvThread.joinable()) {
-        // 不 join：避免 DLL_PROCESS_DETACH 中卡死（Loader Lock）
-        // 线程会在下次 while 检查 g_recvRunning 时自然退出
+        g_recvThread.join();
+    }
+}
+
+void DetachDllRecvLoop() {
+    // DllMain DETACH 上下文持有 Loader Lock，不能 join（线程可能在 DLL 代码中
+    // 需要 Loader Lock，join 死锁）；detach 让线程退出后自行回收资源。
+    // 线程已停止（g_recvRunning=false），Sleep 醒来后 while 检查退出。
+    if (g_recvThread.joinable()) {
         g_recvThread.detach();
     }
 }

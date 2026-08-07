@@ -6,6 +6,7 @@
 //                         + RegisterOutputHooks + InstallAll（启用 Hook 提供触发器）
 //   - 首个 Hook Detour 触发 EnsureLazyInitialized（Logger/Capture/Connect/State）
 //   - DLL_PROCESS_DETACH: UninstallAll + MH_Uninitialize + 释放通道 + Logger::Shutdown
+//     （主动卸载路径跳过 UninstallAll/MH_Uninitialize：trampoline 释放竞态，见 DETACH 内注释）
 //
 // Loader Lock 注意事项：
 //   - DllMain 内禁止 GetConsoleScreenBufferInfo 等 Console API（留给懒加载）
@@ -17,8 +18,10 @@
 #include <MinHook.h>
 
 #include "logging/Logger.h"
+#include "logging/SafeOutputDebugString.h"
 #include "HookManager.h"
 #include "LazyInit.h"
+#include "Unloader.h"
 #include "DllRecvLoop.h"
 #include "hooks/OutputHooks.h"
 #include "hooks/CursorHooks.h"
@@ -63,10 +66,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
 
             // 1. 初始化 MinHook（失败则拒绝加载）
             if (MH_Initialize() != MH_OK) {
-                OutputDebugStringW(L"[terminjector] DllMain: MH_Initialize failed");
+                terminjector::SafeOutputDebugStringW(L"[terminjector] DllMain: MH_Initialize failed");
                 return FALSE;
             }
-            OutputDebugStringW(L"[terminjector] DllMain: MH initialized");
+            terminjector::SafeOutputDebugStringW(L"[terminjector] DllMain: MH initialized");
 
             // 2. 注册输出类 Hook（WriteConsoleW/A）
             //    注意：此时 Logger 未初始化，RegisterOutputHooks 内的日志不落盘
@@ -96,12 +99,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             // 3. 安装并启用全部 Hook（提供懒加载触发器）
             //    首个被拦截的 Console API 调用会触发 EnsureLazyInitialized
             if (!terminjector::HookManager::InstallAll()) {
-                OutputDebugStringW(L"[terminjector] DllMain: InstallAll failed");
+                terminjector::SafeOutputDebugStringW(L"[terminjector] DllMain: InstallAll failed");
                 // 不拒绝加载：Hook 失败时目标程序仍可正常运行（无劫持）
             }
             // === 调试探针：确认 DllMain ATTACH 执行完毕 ===
             InterlockedIncrement(&g_probe_dllmain);
-            OutputDebugStringW(L"[terminjector-probe] DllMain ATTACH done, hooks installed");
+            terminjector::SafeOutputDebugStringW(L"[terminjector-probe] DllMain ATTACH done, hooks installed");
 
             // 4. 主动触发懒加载的工作线程
             //    原因：若目标进程注入后不主动调用输出类 API（如 cmd.exe 注入前
@@ -149,13 +152,30 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             terminjector::BatchSender::Instance().Shutdown();
 
             // Phase 5：先停止接收线程，再卸载 Hook 与 transport
+            // Phase 22：主动卸载路径下 DoUnload 已 Stop+Join 该线程
+            //（线程已退出，joinable=false）；此处仅对进程退出路径生效，
+            // Detach 防 std::thread 全局析构 terminate（DllMain 持 Loader Lock
+            // 不能 join，线程已停止，Sleep 醒来后 while 检查退出）
             terminjector::StopDllRecvLoop();
+            terminjector::DetachDllRecvLoop();
 
-            // 卸载 Hook（恢复原 API）
-            if (terminjector::HookManager::IsInstalled()) {
-                terminjector::HookManager::UninstallAll();
+            // 主动卸载（Unloader 触发）不释放 Hook：
+            //   竞态：cmd 主线程被 KickStart 唤醒后可能正走在 trampoline 返回路径上
+            //   （从真实 ReadConsoleW 返回 → trampoline 尾 → detour 收尾），
+            //   此时 UninstallAll/MH_Uninitialize 释放 trampoline 内存 → AV 0xC0000005
+            //   （WER 证据：AppCrash_cmd.exe 故障模块 injected.dll_unloaded, 偏移 0x22402）
+            //   DisableAll 已恢复原函数指令，新调用不再进 detour；
+            //   已 pass-through 的线程走保留的 trampoline 安全返回。
+            //   代价：trampoline 池（进程堆，每会话 ~10KB）泄漏，进程退出时回收。
+            // 进程退出路径（s_unloading=false）无竞态：DETACH 前其他线程已终止，
+            // 只有当前线程执行 DllMain，可安全 UninstallAll + MH_Uninitialize。
+            if (!terminjector::Unloader::IsUnloading()) {
+                // 卸载 Hook（恢复原 API）
+                if (terminjector::HookManager::IsInstalled()) {
+                    terminjector::HookManager::UninstallAll();
+                }
+                MH_Uninitialize();
             }
-            MH_Uninitialize();
 
             // 释放 mediator 传输通道
             terminjector::ReleaseMediatorTransport();

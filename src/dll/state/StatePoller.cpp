@@ -46,9 +46,11 @@ void StatePoller::Start() {
 }
 
 void StatePoller::Stop() {
-    if (!m_running.exchange(false)) {
-        return;  // 未运行
-    }
+    // 无条件清运行标志：PollLoop 3 秒后自然退出时已把 m_running 置 false，
+    // 若用 m_running 判断是否 join，会因"已停止"而跳过 join → 线程对象残留
+    // joinable → DLL_PROCESS_DETACH 时 atexit 析构单例的 std::thread 触发
+    // std::terminate → abort (c0000409)。必须只按 joinable() 判断。
+    m_running = false;
     if (m_thread.joinable()) {
         m_thread.join();
     }

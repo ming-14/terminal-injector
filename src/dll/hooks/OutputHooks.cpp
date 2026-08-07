@@ -83,12 +83,6 @@ DEFINE_ORIG_PTR(ScrollConsoleScreenBufferW, BOOL WINAPI(
 DEFINE_ORIG_PTR(ScrollConsoleScreenBufferA, BOOL WINAPI(
     HANDLE, const SMALL_RECT*, const SMALL_RECT*, COORD, const CHAR_INFO*));
 
-// === 调试探针（Phase 3 端到端验证用，确认各 Detour 是否被 cmd 调用）===
-// extern "C" 保证符号名不修饰，cdb 可直接 dd injected!g_probe_wf 读取
-extern "C" volatile LONG g_probe_wcw = 0;  // WriteConsoleW_Detour 调用计数
-extern "C" volatile LONG g_probe_wca = 0;  // WriteConsoleA_Detour 调用计数
-extern "C" volatile LONG g_probe_wf  = 0;  // WriteFile_Detour 调用计数
-
 // ============================================================
 // Phase 3：文本流输出 Hook
 // ============================================================
@@ -131,13 +125,16 @@ BOOL WINAPI WriteConsoleW_Detour(
     ENSURE_INITIALIZED();
     ASSERT_IN_HOOK();          // 关键 Detour：输出主路径，A→W 复用终点，Logger 重入风险
     HookReentryGuard guard;
+    LOG_INFO("WriteConsoleW_Detour: PROBE1 entry len=%lu", nNumberOfCharsToWrite);
 
     // 非真实 Console 句柄（如日志文件句柄）直接 pass-through
     if (!IsConsoleHandle(hConsoleOutput)) {
+        LOG_INFO("WriteConsoleW_Detour: PROBE1b non-console, pass-through");
         return WriteConsoleW_orig(hConsoleOutput, lpBuffer,
                                   nNumberOfCharsToWrite,
                                   lpNumberOfCharsWritten, lpReserved);
     }
+    LOG_INFO("WriteConsoleW_Detour: PROBE2 is-console");
 
     auto& state = ConsoleState::Instance();
 
@@ -179,7 +176,7 @@ BOOL WINAPI WriteConsoleW_Detour(
     {
         COORD before = ConsoleState::Instance().GetCursorPosition();
         const wchar_t* wbuf = reinterpret_cast<const wchar_t*>(lpBuffer);
-        LOG_INFO("WriteConsoleW_Detour: len=%lu beforeCursor=(%d,%d) firstChars=0x%04X,0x%04X,0x%04X,0x%04X",
+        LOG_INFO("WriteConsoleW_Detour: PROBE3 before len=%lu beforeCursor=(%d,%d) firstChars=0x%04X,0x%04X,0x%04X,0x%04X",
                  nNumberOfCharsToWrite, before.X, before.Y,
                  nNumberOfCharsToWrite > 0 ? static_cast<unsigned>(wbuf[0]) : 0,
                  nNumberOfCharsToWrite > 1 ? static_cast<unsigned>(wbuf[1]) : 0,
@@ -208,7 +205,9 @@ BOOL WINAPI WriteConsoleW_Detour(
     WORD attr = state.GetTextAttribute();
     std::string vt = ConsoleToVt::WriteConsoleW(
         reinterpret_cast<const wchar_t*>(lpBuffer), nNumberOfCharsToWrite, attr);
+    LOG_INFO("WriteConsoleW_Detour: PROBE4 translated vt=%zu", vt.size());
     SendToMediator(vt.data(), vt.size());
+    LOG_INFO("WriteConsoleW_Detour: PROBE5 sent");
 
     // 更新光标缓存（解析 \r \n \b \t 控制字符，行末按输出模式 wrap 或停留）
     // LIM-003 修复：不再硬编码 wrapAtEol=true，
@@ -222,6 +221,7 @@ BOOL WINAPI WriteConsoleW_Detour(
     VirtualConsoleState::Instance().AdvanceCursor(
         reinterpret_cast<const wchar_t*>(lpBuffer),
         static_cast<int>(nNumberOfCharsToWrite));
+    LOG_INFO("WriteConsoleW_Detour: PROBE6 advance done");
 
     // 诊断日志：AdvanceCursor 后
     {
@@ -278,10 +278,6 @@ BOOL WINAPI WriteFile_Detour(
     DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten,
     LPOVERLAPPED lpOverlapped) {
 
-    // === 调试探针 ===
-    InterlockedIncrement(&g_probe_wf);
-    OutputDebugStringW(L"[terminjector-probe] WriteFile_Detour ENTERED");
-
     // 懒加载中的线程直接 pass-through
     // 原因：Logger::LogImpl 内部调 WriteFile 写日志文件，
     //       若不跳过会触发 ENSURE_INITIALIZED → 懒加载 → Logger → WriteFile 死锁
@@ -292,17 +288,6 @@ BOOL WINAPI WriteFile_Detour(
 
     ENSURE_INITIALIZED();
     HookReentryGuard guard;
-
-    // === 诊断：ENSURE_INITIALIZED 后，记录文件句柄类型 ===
-    {
-        char dbg[128];
-        std::snprintf(dbg, sizeof(dbg),
-            "[terminjector] WriteFile_Detour: past ENSURE_INIT, hFile=%p fileType=%lu",
-            hFile, GetFileType(hFile));
-        wchar_t wdbg[256];
-        int wl = MultiByteToWideChar(CP_UTF8, 0, dbg, -1, wdbg, 256);
-        if (wl > 0) OutputDebugStringW(wdbg);
-    }
 
     // 异步 I/O：console 句柄的 OVERLAPPED 写也需捕获（libuv TTY 每帧用 OVERLAPPED）
     // mimo 等 Node 程序的 WriteFile 全部带 lpOverlapped，旧逻辑直接 pass-through

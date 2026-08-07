@@ -40,6 +40,9 @@
 
 #include <windows.h>
 #include <vector>
+#include <atomic>
+#include <cstdint>
+#include <cwchar>
 
 namespace terminjector::hooks {
 
@@ -138,6 +141,16 @@ BOOL WINAPI FreeConsole_Detour() {
 //   3. HandleRegistry::IsFake（查真实 fake 集合）
 //      真实 fake（InputQueue 事件句柄）由 BufferHooks/InputQueue 在 LazyInit
 //      后注册，LazyInit 完成前不会有真实 fake 需要查询。
+//
+// 递归安全（2026-08-07 崩溃根因修复）：
+//   本 Detour 内 LOG_DEBUG → Logger::LogV → OutputDebugStringW 时，ODS 内部
+//   DBWIN 操作（OpenEvent/WaitForSingleObjectEx/CloseHandle）会重入本 Detour
+//   （以及 WaitHooks），若重入路径再次打日志 → 再次 ODS → 无限递归 → 栈溢出
+//   0xC00000FD（历史崩溃 dump 栈：CloseHandle_Detour→LogV→ODS 循环 与
+//   WaitForSingleObjectEx_Detour→EnsureLazyInitialized→ODS 循环两种形态）。
+//   根治点在 Logger 的 ODS 出口（SafeOutputDebugString.h 重入保护，一刀切
+//   截断所有链），本 Detour 无需再单独防重入：重入的 LOG_DEBUG 会在 ODS
+//   出口被跳过，递归深度=2 即终止。
 BOOL WINAPI CloseHandle_Detour(HANDLE h) {
     // 1. 魔数假句柄快路径：纯位运算，无依赖，任何时候安全
     //    必须在 IsLazyInitialized() 之前，覆盖 LazyInit 完成前的假句柄关闭
@@ -160,7 +173,8 @@ BOOL WINAPI CloseHandle_Detour(HANDLE h) {
     }
 
     // 4. 其他句柄（含受保护句柄）：调真实 CloseHandle
-    LOG_DEBUG("ProtectionHooks: CloseHandle(real %p) forwarding", h);
+    LOG_DEBUG("ProtectionHooks: CloseHandle(real %p) forwarding tid=%lu", h,
+              GetCurrentThreadId());
     return CloseHandle_orig(h);
 }
 

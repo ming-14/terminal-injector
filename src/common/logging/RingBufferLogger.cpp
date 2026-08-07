@@ -19,6 +19,7 @@
 //     Compact 后续清理 use_count==1 的 buffer
 
 #include "RingBufferLogger.h"
+#include "SafeOutputDebugString.h"
 
 #include <cstdio>
 #include <cstdarg>
@@ -164,7 +165,7 @@ void RingBufferLogger::Initialize(const std::wstring& logPath, LogLevel minLevel
             nullptr);
         if (m_fileHandle == INVALID_HANDLE_VALUE) {
             // 文件打开失败，仅 ODS 兜底
-            OutputDebugStringW(L"[terminjector] RingBufferLogger: CreateFileW failed, file logging disabled");
+            SafeOutputDebugStringW(L"[terminjector] RingBufferLogger: CreateFileW failed, file logging disabled");
         }
     }
 
@@ -270,11 +271,13 @@ void RingBufferLogger::LogV(LogLevel level, const char* fmt, va_list args) {
     buf[totalLen] = '\0';
 
     // 路 1：OutputDebugStringW（UTF-8 → UTF-16，实时查看 DebugView）
-    // 不依赖任何锁，ODS 内部线程安全
+    // 走 SafeOutputDebugStringW：ODS 内部 DBWIN 操作（OpenEvent/WaitForSingleObjectEx/
+    // CloseHandle）可能重入被 Hook 的 API → 再次进入 LogV → 再次 ODS，会无限递归
+    // 崩溃（0xC00000FD）。重入保护在此处一刀切截断所有链
     wchar_t wbuf[4096];
     int wlen = MultiByteToWideChar(CP_UTF8, 0, buf, totalLen, wbuf, 4096);
     if (wlen > 0) {
-        OutputDebugStringW(wbuf);
+        SafeOutputDebugStringW(wbuf);
     }
 
     // 路 2：入队 thread_local ring buffer（无锁，SPSC）
@@ -339,7 +342,7 @@ void RingBufferLogger::FlushBatch(std::vector<std::string>& batch) {
                 // 写入失败，ODS 报告
                 wchar_t wbuf[128];
                 int wl = MultiByteToWideChar(CP_UTF8, 0, s.data(), -1, wbuf, 128);
-                if (wl > 0) OutputDebugStringW(wbuf);
+                if (wl > 0) SafeOutputDebugStringW(wbuf);
                 break;
             }
         }

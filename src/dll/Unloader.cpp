@@ -6,14 +6,15 @@
 //   2. BatchSender.Shutdown   flush 最后一批 VtOutput（需 transport 仍可用）
 //   3. InputQueue.SignalDataReady  唤醒阻塞在 ReadConsoleInput 上的线程
 //      （Hook 即将卸载，唤醒后下次调用走原 API，不再依赖 InputQueue）
-//  3.5 等待 s_active_read_detours 归零（2s 超时强制继续）
-//      关键：Read 类 Detour 内 pass-through 调 *_orig（trampoline）前必须先 LeaveReadDetour，
-//      否则 UninstallAll 释放 trampoline 时线程还在调用 → AV 0xC0000005
-//      2026-08-01 修复：改为 DisableAll（保留 trampoline），即使超时也不再 AV
 //   4. HookManager.DisableAll   禁用所有 Hook（保留 trampoline）
 //      之后 Console API 走原 API，不再进 Detour
 //      （UninstallAll 会释放 trampoline，→ ReadDetour 线程 AV 崩溃）
 //      DETACH 中 UninstallAll 做真正清理
+//  4.5 等待 s_active_read_detours 归零（5s 超时强制继续）
+//      Phase 22 修复：Read 类 Detour 阻塞型 pass-through 不再提前 release，
+//      计数保持到 detour 函数真正返回；循环内每 300ms KickStartBlockedReaders
+//      （向 ConHost 写回车）唤醒阻塞在原 Read* API 的线程，线程从 orig 返回后
+//      走 detour 尾析构 guard → 计数归零 → 已彻底离开 DLL 代码，FreeLibrary 才安全
 //   5. 恢复 ConsoleState          用真实 API 读 ConHost 状态写回缓存
 //      （目标程序下次 GetConsoleScreenBufferInfo 拿到 ConHost 真值而非过期缓存）
 //   6. 显示原 Console 窗口        Phase 9 隐藏过，恢复可见
@@ -57,11 +58,14 @@
 #include "state/StatePoller.h"
 #include "state/ConsoleState.h"
 #include "state/InputQueue.h"
+#include "state/VirtualConsoleState.h"
+#include "state/VtReplayBuffer.h"
 #include "BatchSender.h"
 #include "logging/Logger.h"
 #include "protocol/Message.h"
 #include "protocol/MessageSerializer.h"
 #include "transport/ITransport.h"
+#include "hooks/InputHooks.h"
 #include "hooks/ProtectionHooks.h"
 
 #include <windows.h>
@@ -101,15 +105,29 @@ void Unloader::DoUnload() {
     //    Hook 即将卸载，唤醒后 ReadConsoleInput 会返回（无数据），下次调用走原 API
     InputQueue::Instance().SignalDataReady();
 
-    // 3.5 等待所有 Read 类 Detour 线程离开 DLL 代码（2026-07-25 修复 cmd AV 崩溃）
-    //     根因：SignalDataReady 唤醒主线程后立即 UninstallAll 会释放 trampoline，
-    //           主线程被调度回来调用 ReadConsoleW_orig（trampoline）→ AV 0xC0000005
-    //     修复：Detour 入口 EnterReadDetour（计数++），
-    //           pass-through 调 orig 前 LeaveReadDetour（计数--，让 Unloader 可继续）
-    //     超时 2s 兜底防死锁（极端情况下 Detour 卡住，仍要继续卸载）
+    // 4. 禁用所有 Hook（保留 trampoline，不释放）
+    //    之后目标程序调 Console API 直接走系统 API，不再进 Detour
+    //    用 DisableAll 而非 UninstallAll：MH_RemoveHook 会释放 trampoline
+    //    内存，若 ReadDetour 线程尚未完全退出，后续调用 *_orig 会 AV 崩溃
+    //    （0xC0000005）。DLL_PROCESS_DETACH 中 UninstallAll 做最终清理。
+    HookManager::DisableAll();
+
+    // 4.5 等待所有 Read 类 Detour 线程离开 DLL 代码（Phase 22 卸载竞态修复）
+    //     根因（cdb 取证 <Unloaded_injected.dll>+0x97a1 Access violation）：
+    //       线程在真实 ReadConsoleW 返回后经 trampoline 尾跳回 detour 主体时，
+    //       DLL 已被远程 FreeLibrary → AV。旧方案在 pass-through 调 orig 前
+    //       LeaveReadDetour（提前减计数），Unloader 看到 count==0 时线程仍在
+    //       orig 内部 → 等待失效。
+    //     修复：Read 类 Detour 阻塞型 pass-through 不再提前 release，计数保持
+    //       到 detour 函数真正返回（guard 析构）才归零；此处（DisableAll 后）
+    //       反复 KickStart 向 ConHost 写回车，唤醒阻塞在原 API 的线程返回，
+    //       线程走完 detour 尾（析构 guard）→ 计数归零 → 线程已完全离开 DLL 代码，
+    //       之后 FreeLibrary 才安全。
+    //     超时兜底防死锁：极端情况（如阻塞在重定向管道读）仍要继续卸载。
     {
-        constexpr int kWaitTotalMs = 2000;
+        constexpr int kWaitTotalMs = 5000;
         constexpr int kSleepStepMs = 10;
+        constexpr int kKickEveryMs = 300;
         int waited = 0;
         int lastCount = -1;
         while (waited < kWaitTotalMs) {
@@ -126,19 +144,18 @@ void Unloader::DoUnload() {
             waited += kSleepStepMs;
             // 持续唤醒：避免有线程错过第一次 SetEvent 信号
             InputQueue::Instance().SignalDataReady();
+            // 周期性踢 ConHost：唤醒阻塞在原 ReadConsoleW/ReadFile/ReadConsoleInput
+            // 的线程（它们从 orig 返回后走 detour 尾析构 guard，计数归零）
+            if ((waited % kKickEveryMs) < kSleepStepMs) {
+                hooks::KickStartBlockedReaders();
+            }
         }
         if (ActiveReadDetours() != 0) {
-            LOG_WARN("Unload: %d read detour(s) still active after %dms, force uninstall (may crash)",
+            LOG_WARN("Unload: %d read detour(s) still active after %dms, force continue "
+                     "(trampoline kept by DisableAll, FreeLibrary may still AV if thread blocked)",
                      ActiveReadDetours(), kWaitTotalMs);
         }
     }
-
-    // 4. 禁用所有 Hook（保留 trampoline，不释放）
-    //    之后目标程序调 Console API 直接走系统 API，不再进 Detour
-    //    用 DisableAll 而非 UninstallAll：MH_RemoveHook 会释放 trampoline
-    //    内存，若 ReadDetour 线程尚未完全退出，后续调用 *_orig 会 AV 崩溃
-    //    （0xC0000005）。DLL_PROCESS_DETACH 中 UninstallAll 做最终清理。
-    HookManager::DisableAll();
 
     // 5. 恢复 ConsoleState 到真实 ConHost 状态
     //    Hook 已卸载，GetConsoleScreenBufferInfo 直接读 ConHost 真值
@@ -157,6 +174,13 @@ void Unloader::DoUnload() {
     } else {
         LOG_WARN("Unload: GetConsoleScreenBufferInfo failed err=%lu", GetLastError());
     }
+
+    // 5.5 恢复 ConHost 画面为 WT 会话画面（Phase 22 VT 重放）
+    //     Hook 已禁用（步骤 4），以下 Console API 调用直接作用于真实 ConHost
+    //     原理：会话期间 ConHost 被冻结，画面停留在注入时快照；
+    //     把会话期间发往 WT 的 VT 增量流重放到 ConHost（ConHost 原生支持 VT 处理），
+    //     最终 ConHost 画面 = 快照 + 增量 = WT 会话画面
+    ReplaySessionToConHost();
 
     // 6. 显示原 Console 窗口（Phase 9 隐藏过，恢复可见让用户能继续操作）
     //    GetConsoleWindow 已 Hook 返回 NULL，走 orig 拿真实 HWND
@@ -185,9 +209,25 @@ void Unloader::DoUnload() {
         }
     }
 
-    // 8. 释放 mediator 传输通道（断开命名管道）
-    //    之后 SendToMediator 调用会因 transport=nullptr 直接返回 false
+    // 8. 停止接收线程（置 g_recvRunning=false）
+    //    Phase 22 修复：原实现只在 DLL_PROCESS_DETACH 停 DllRecvLoop 线程，
+    //    而 DETACH 需远程 FreeLibrary 成功才触发 → 循环依赖：线程持续执行
+    //    DLL 代码 → LDR 延迟卸载（LdrModulesReadyToUnload）→ 卸载在线程
+    //    Sleep 时完成 → 线程醒来继续执行已释放的 DLL 代码 → Execute AV
+    //    （cdb 取证：<Unloaded_injected.dll>+0x97a1 RecvLoopMain 循环内 jmp，
+    //    procdump 确认未处理异常 0xC0000005）。此处主动停线程，打破依赖。
+    StopDllRecvLoop();
+
+    // 8.5 释放 mediator 传输通道（断开命名管道）
+    //    之后 SendToMediator 调用会因 transport=nullptr 直接返回 false；
+    //    DllRecvLoop 线程下次循环 GetMediatorTransport() 返回 nullptr → 退出；
+    //    若线程正阻塞在 RecvPacket(ReadFile)，管道断开后立即失败返回
     ReleaseMediatorTransport();
+
+    // 8.6 等待接收线程真正退出
+    //    线程已不在 DLL 代码中，远程 FreeLibrary 才能顺利让 LoadCount 归零
+    //    （无残留 ThreadBlob 引用，不再需要 LDR flush 强制卸载）
+    JoinDllRecvLoop();
 
     // 9. 启动助手进程远程 FreeLibrary（主路径）
     //    助手进程独立于 WT 生命周期，能在 WT 关闭后存活
@@ -273,6 +313,96 @@ void Unloader::DoUnload() {
     //     引用，远程 FreeLibrary 仍无法让 LoadCount 归零。ExitThread 让线程退出，
     //     LDR 释放 ThreadBlob，助手进程的远程 FreeLibrary 才能把 LoadCount 减到 0。
     ExitThread(0);
+}
+
+// 恢复 ConHost 画面为 WT 会话画面（Phase 22）
+// 详见 docs/phases/22-conhost-replay.md
+//
+// 流程（全部走真实 API，Hook 已在 DoUnload 步骤 4 禁用）：
+//   1. 将 ConHost 缓冲 resize 到会话最终尺寸（先缩视口再缩缓冲，避免 API 失败）
+//   2. 视口定位到会话窗口区域（尽力而为，失败仅记日志）
+//   3. 开启 ConHost 的 ENABLE_VIRTUAL_TERMINAL_PROCESSING
+//   4. 用 WriteFile 分块重放会话 VT 流
+//      （翻译器输出 UTF-8 字节，ConHost VT 模式按 UTF-8 解析，
+//        与 WT 收到的一致字节流 → 最终画面一致）
+//   5. 恢复 ConHost 输出模式
+//
+// 不使用 WriteConsoleW：会把 UTF-8 字节当 UTF-16 宽字符写入，中文会乱码
+// 重放前不清屏：ConHost 旧画面即注入时快照，增量流在快照之上重放
+void Unloader::ReplaySessionToConHost() {
+    const std::string& vt = VtReplayBuffer::Instance().Data();
+    if (vt.empty()) {
+        LOG_INFO("Replay: no session VT recorded, skip ConHost replay");
+        return;
+    }
+
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut == INVALID_HANDLE_VALUE) {
+        LOG_WARN("Replay: GetStdHandle(STD_OUTPUT_HANDLE) failed err=%lu", GetLastError());
+        return;
+    }
+
+    // 会话最终尺寸（虚拟状态，由 Set* Hook 与 WT resize 维护）
+    const COORD targetBuf = VirtualConsoleState::Instance().GetBufferSize();
+    const SMALL_RECT targetWin = VirtualConsoleState::Instance().GetWindowRect();
+
+    CONSOLE_SCREEN_BUFFER_INFO cur{};
+    if (!GetConsoleScreenBufferInfo(hOut, &cur)) {
+        LOG_WARN("Replay: GetConsoleScreenBufferInfo failed err=%lu", GetLastError());
+        return;
+    }
+    LOG_INFO("Replay: session buf=(%d,%d) win=(%d,%d,%d,%d), cur buf=(%d,%d), vt=%zu bytes%s",
+             targetBuf.X, targetBuf.Y, targetWin.Left, targetWin.Top,
+             targetWin.Right, targetWin.Bottom, cur.dwSize.X, cur.dwSize.Y,
+             vt.size(), VtReplayBuffer::Instance().IsTruncated() ? " (truncated)" : "");
+
+    // 1. resize 缓冲到会话尺寸
+    //    目标缓冲小于当前时，先收缩视口到目标缓冲范围内，否则 SetConsoleScreenBufferSize 失败
+    if (targetBuf.X < cur.dwSize.X || targetBuf.Y < cur.dwSize.Y) {
+        SMALL_RECT shrink = cur.srWindow;
+        if (shrink.Right >= targetBuf.X) shrink.Right = targetBuf.X - 1;
+        if (shrink.Bottom >= targetBuf.Y) shrink.Bottom = targetBuf.Y - 1;
+        if (!SetConsoleWindowInfo(hOut, TRUE, &shrink)) {
+            LOG_WARN("Replay: pre-shrink SetConsoleWindowInfo failed err=%lu", GetLastError());
+        }
+    }
+    if (cur.dwSize.X != targetBuf.X || cur.dwSize.Y != targetBuf.Y) {
+        if (!SetConsoleScreenBufferSize(hOut, targetBuf)) {
+            LOG_WARN("Replay: SetConsoleScreenBufferSize(%d,%d) failed err=%lu "
+                     "(keep current buffer, replay may clip)",
+                     targetBuf.X, targetBuf.Y, GetLastError());
+        }
+    }
+
+    // 2. 视口定位到会话窗口区域（尺寸超 ConHost 最大窗口时失败，保持当前视口）
+    if (!SetConsoleWindowInfo(hOut, TRUE, &targetWin)) {
+        LOG_WARN("Replay: SetConsoleWindowInfo failed err=%lu", GetLastError());
+    }
+
+    // 3. 开启 VT 处理（ConHost 原生支持，重放会话 VT 流）
+    DWORD origMode = 0;
+    GetConsoleMode(hOut, &origMode);
+    if (!SetConsoleMode(hOut, origMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+        LOG_WARN("Replay: SetConsoleMode(VT) failed err=%lu", GetLastError());
+        return;  // 无 VT 处理能力则无法重放，跳过
+    }
+
+    // 4. 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
+    constexpr DWORD kChunkBytes = 64 * 1024;
+    size_t offset = 0;
+    while (offset < vt.size()) {
+        DWORD n = static_cast<DWORD>((kChunkBytes < vt.size() - offset) ? kChunkBytes : (vt.size() - offset));
+        DWORD written = 0;
+        if (!WriteFile(hOut, vt.data() + offset, n, &written, nullptr) || written == 0) {
+            LOG_WARN("Replay: WriteFile failed err=%lu at offset=%zu", GetLastError(), offset);
+            break;
+        }
+        offset += written;
+    }
+    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost", offset, vt.size());
+
+    // 5. 恢复 ConHost 输出模式（含 VT 位原状）
+    SetConsoleMode(hOut, origMode);
 }
 
 } // namespace terminjector

@@ -15,10 +15,6 @@
 #include <cstring>
 #include <cwctype>
 #include <algorithm>
-#include <vector>
-
-#include <psapi.h>   // EnumProcessModulesEx / GetModuleFileNameExW
-#pragma comment(lib, "psapi.lib")
 
 namespace terminjector {
 
@@ -53,7 +49,7 @@ bool Injector::Inject(uint32_t targetPid, const std::wstring& dllPath,
     }
 
     // 1. 提升 SeDebugPrivilege（非必需，但管理员运行时能注入更多进程）
-    if (!EnableDebugPrivilege()) {
+    if (!ProcessHelper::EnableDebugPrivilege()) {
         LOG_WARN("EnableDebugPrivilege failed (may continue for same-permission targets)");
     }
 
@@ -107,41 +103,6 @@ bool Injector::Inject(uint32_t targetPid, const std::wstring& dllPath,
             return false;
         }
         LOG_INFO("Injection complete, pid=%u (pipe params delivered)", targetPid);
-    }
-    return true;
-}
-
-bool Injector::EnableDebugPrivilege() {
-    HANDLE hToken = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(),
-                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-        LOG_ERROR("OpenProcessToken failed: %lu", GetLastError());
-        return false;
-    }
-    HandleGuard tokenGuard(hToken);
-
-    LUID luid{};
-    // 注意：SE_DEBUG_NAME 在未定义 UNICODE 时展开为窄字符串，
-    // LookupPrivilegeValueW 要求 LPCWSTR，故显式使用 L"SeDebugPrivilege"
-    if (!LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &luid)) {
-        LOG_ERROR("LookupPrivilegeValueW failed: %lu", GetLastError());
-        return false;
-    }
-
-    TOKEN_PRIVILEGES tp{};
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-    // AdjustTokenPrivileges 返回 TRUE 不代表权限真正获得，需检查 GetLastError
-    if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr)) {
-        LOG_ERROR("AdjustTokenPrivileges failed: %lu", GetLastError());
-        return false;
-    }
-    DWORD err = GetLastError();
-    if (err == ERROR_NOT_ALL_ASSIGNED) {
-        LOG_WARN("SeDebugPrivilege not assigned (need admin)");
-        return false;
     }
     return true;
 }
@@ -236,7 +197,7 @@ HMODULE Injector::RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath
         return nullptr;
     }
 
-    HMODULE hRemoteDll = FindRemoteModuleByPath(hProcess, L"injected.dll");
+    HMODULE hRemoteDll = ProcessHelper::FindRemoteModuleByPath(hProcess, L"injected.dll");
     if (hRemoteDll == nullptr) {
         LOG_ERROR("Remote LoadLibraryW succeeded but module '%ls' not found "
                   "in target (%lu)", L"injected.dll", GetLastError());
@@ -244,48 +205,6 @@ HMODULE Injector::RemoteLoadLibrary(HANDLE hProcess, const std::wstring& dllPath
     }
 
     return hRemoteDll;
-}
-
-HMODULE Injector::FindRemoteModuleByPath(HANDLE hProcess, const std::wstring& name) {
-    // 枚举目标进程模块，按文件名（不区分大小写）匹配，返回完整 64 位基址
-    // EnumProcessModulesEx 需要 psapi（#pragma comment 链接）
-    DWORD cb = 0;
-    if (!EnumProcessModulesEx(hProcess, nullptr, 0, &cb,
-                              LIST_MODULES_ALL)) {
-        LOG_ERROR("FindRemoteModuleByPath: EnumProcessModulesEx(query) failed: %lu",
-                  GetLastError());
-        return nullptr;
-    }
-    std::vector<HMODULE> mods(cb / sizeof(HMODULE));
-    if (!EnumProcessModulesEx(hProcess, mods.data(), cb, &cb,
-                              LIST_MODULES_ALL)) {
-        LOG_ERROR("FindRemoteModuleByPath: EnumProcessModulesEx failed: %lu",
-                  GetLastError());
-        return nullptr;
-    }
-
-    std::wstring lower(name);
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
-
-    for (HMODULE hMod : mods) {
-        wchar_t path[MAX_PATH] = {0};
-        if (GetModuleFileNameExW(hProcess, hMod, path, MAX_PATH) == 0) {
-            continue;
-        }
-        // 取文件名部分，与目标名比对
-        std::wstring base(path);
-        size_t pos = base.find_last_of(L"\\/");
-        std::wstring file = (pos != std::wstring::npos) ? base.substr(pos + 1) : base;
-        std::transform(file.begin(), file.end(), file.begin(),
-                       [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
-        if (file == lower) {
-            LOG_INFO("FindRemoteModuleByPath: '%ls' found at %p",
-                     name.c_str(), hMod);
-            return hMod;
-        }
-    }
-    return nullptr;
 }
 
 } // namespace terminjector
