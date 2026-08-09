@@ -307,6 +307,140 @@ std::string ConsoleToVt::WriteConsoleOutput(
     return out;
 }
 
+// ===== Phase 10：全量缓冲（含滚动历史）流式重放 =====
+// 方案 A（见 LazyInit Phase 10 注释）：逐行 \r\n 推进，不用绝对行号定位。
+//
+// 与 WriteConsoleOutput 的关键区别：
+//   - WriteConsoleOutput 逐行用 CursorPosition(行,列) 绝对定位。当行号超过
+//     ConPTY 缓冲高度（= 视口行数，约 30）时越界，行被 clamp/覆盖，
+//     内容错位重叠（用户反馈：dir 输出尾部 "32个目录..." 插进 prompt 行）。
+//   - 本函数行间只发 \r\n，不跳绝对行号；ConPTY 缓冲写满后自然滚动，
+//     滚出的行进入 WT 自身 scrollback（WT 维护历史），最后视口恰好停在
+//     缓冲区的可见窗口（writeRegion 底部），与 WriteConsoleOutput 的
+//     "WT 视口顶部恒对应 srWindow.Top" 不变量一致。
+//
+// 行内定位只用 CursorForward（本行内右移）或 \r 回行首，绝不用绝对行号。
+// 宽字符（leading cell）占 2 显示列，trailing cell 跳过不输出，光标列用
+// curCol 跟踪（leading 后 +2、单宽后 +1），后续 CursorForward 按差值补齐。
+std::string ConsoleToVt::ReplayScreenStreamed(
+    const CHAR_INFO* buffer, COORD bufferSize, COORD bufferCoord,
+    SMALL_RECT writeRegion) {
+
+    if (buffer == nullptr || bufferSize.X <= 0 || bufferSize.Y <= 0) return {};
+
+    const int rows = writeRegion.Bottom - writeRegion.Top + 1;
+    const int cols = writeRegion.Right - writeRegion.Left + 1;
+    if (rows <= 0 || cols <= 0) return {};
+
+    // 裁剪尾部全空行：只重放 [Top .. 最后一个内容行]。
+    // 原因：全量缓冲高可达 9000+ 行，光标以下全是默认空格行（无内容）。
+    // 若整段流式输出，ConPTY 会把数千空行推入 WT scrollback，注入后内容行
+    // 与当前 prompt 之间出现巨大空行带（用户反馈：dir 输出后 prompt 与
+    // 几百行空行 + 再一个 prompt）。滚动历史（Top 以上的行）保留不受影响。
+    int lastRow = writeRegion.Top - 1;
+    for (int r = writeRegion.Top; r <= writeRegion.Bottom; ++r) {
+        const int srcRow = bufferCoord.Y + r;
+        if (srcRow < 0 || srcRow >= bufferSize.Y) break;
+        const CHAR_INFO* rowPtr = buffer + srcRow * bufferSize.X;
+        bool hasContent = false;
+        for (int c = 0; c < cols; ++c) {
+            const CHAR_INFO& ci = rowPtr[bufferCoord.X + c];
+            if (!(ci.Attributes & COMMON_LVB_TRAILING_BYTE) && !IsDefaultBlank(ci)) {
+                hasContent = true;
+                break;
+            }
+        }
+        if (hasContent) lastRow = r;
+    }
+
+    std::string out;
+    // 容量预估：每行非空内容通常仅占整行一小部分（其余是默认空格被跳过），
+    // 按每行 8 字节预留，不足自动增长。
+    out.reserve(static_cast<size_t>(rows) * 8);
+
+    // 光标归位到 (1,1)：流式输出起点。后续行间仅用 \r\n 前进。
+    out += vt::CursorPosition(1, 1);
+
+    WORD lastAttr = 0xFFFF;  // 初始无效值，首个非空 cell 必输出 SGR
+
+    for (int r = writeRegion.Top; r <= lastRow; ++r) {
+        const int srcRow = bufferCoord.Y + r;
+        if (srcRow >= bufferSize.Y) break;
+
+        if (r > writeRegion.Top) {
+            // 行间推进：\r\n 使光标到下一行行首。
+            // ConPTY 缓冲写满后滚动，滚出的行进入 WT scrollback，
+            // 最终视口停在 writeRegion 底部（= ConHost 可见窗口）。
+            out += "\r\n";
+        }
+
+        const CHAR_INFO* rowPtr = buffer + srcRow * bufferSize.X;
+        WORD rowAttr = lastAttr;
+
+        // 光标当前所在显示列（0-based）。显示列号 == 缓冲列号：
+        //   - 单宽字符输出后 +1
+        //   - 宽字符 leading 输出后 +2（trailing cell 不输出，光标已越过）
+        int curCol = 0;
+        bool rowStarted = false;  // 本行是否已输出过内容
+
+        for (int c = 0; c < cols; ++c) {
+            const CHAR_INFO& ci = rowPtr[bufferCoord.X + c];
+
+            // 跳过双宽字符 trailing cell（leading 已占 2 列宽，再输出会重复）
+            if (ci.Attributes & COMMON_LVB_TRAILING_BYTE) {
+                continue;  // 不重置 rowStarted：光标已随 leading 越过该列
+            }
+            // 跳过默认空格（WT 初始状态，无需输出）
+            if (IsDefaultBlank(ci)) {
+                rowStarted = false;  // 中断连续输出
+                continue;
+            }
+
+            // 颜色变化时输出 SGR
+            if (ci.Attributes != rowAttr) {
+                out += vt::SgrFromAttribute(ci.Attributes);
+                rowAttr = ci.Attributes;
+                lastAttr = rowAttr;
+            }
+
+            // 定位到本 cell 所在列：仅用本行内相对移动，不用绝对行号。
+            // 光标已被 \r\n / 前次字符推到当前行，curCol 跟踪其列。
+            if (!rowStarted) {
+                const int fwd = c - curCol;
+                if (fwd > 0) {
+                    out += vt::CursorForward(fwd);
+                } else if (fwd < 0) {
+                    // 兜底（正常数据不会出现）：光标超前于目标列时回行首再前移
+                    out += "\r";
+                    if (c > 0) out += vt::CursorForward(c);
+                }
+                rowStarted = true;
+            }
+
+            // 字符转 UTF-8
+            char utf8[4];
+            const int len = WideCharToMultiByte(CP_UTF8, 0, &ci.Char.UnicodeChar, 1,
+                                                utf8, sizeof(utf8), nullptr, nullptr);
+            if (len > 0) {
+                out.append(utf8, static_cast<size_t>(len));
+            }
+
+            // 更新光标列：宽字符 leading 占 2 列，其余占 1 列
+            curCol = c + ((ci.Attributes & COMMON_LVB_LEADING_BYTE) ? 2 : 1);
+        }
+    }
+
+    // 流式重放走了非 WriteConsoleOutput 路径，失效 diff 缓存
+    // （下次 WriteConsoleOutput 需全量输出，避免基于陈旧基线跳 cell）
+    InvalidateOutputCache();
+
+    LOG_INFO("ReplayScreenStreamed: region=(%d,%d,%d,%d) emitted=%d rows outBytes=%zu",
+             writeRegion.Left, writeRegion.Top, writeRegion.Right, writeRegion.Bottom,
+             lastRow - writeRegion.Top + 1, out.size());
+
+    return out;
+}
+
 // ===== Phase 4：WriteConsoleOutputCharacter =====
 // 在 (writeCoord.X, writeCoord.Y) 写一串字符（不改颜色）
 // VT 策略：光标定位 + UTF-8 字符串

@@ -60,6 +60,7 @@
 #include "state/InputQueue.h"
 #include "state/VirtualConsoleState.h"
 #include "state/VtReplayBuffer.h"
+#include "state/PromptTracker.h"
 #include "BatchSender.h"
 #include "logging/Logger.h"
 #include "protocol/Message.h"
@@ -72,9 +73,35 @@
 #include <thread>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace terminjector {
+
+namespace {
+
+// 获取可用于 console API 的输出句柄。
+// 某些场景（cmd 批处理等待子进程等）下 GetStdHandle(STD_OUTPUT_HANDLE) 返回的
+// 句柄对 console API 无效（GetConsoleScreenBufferInfo 报 err=6 ERROR_INVALID_HANDLE），
+// 而 CONOUT$ 打开的总是当前进程真实控制台。优先用 std 句柄，失败回退 CONOUT$。
+// 返回 (handle, shouldClose)：shouldClose=true 时调用方用完需 CloseHandle。
+std::pair<HANDLE, bool> GetConsoleOutHandle() {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO tmp{};
+    if (h != nullptr && h != INVALID_HANDLE_VALUE &&
+        GetConsoleScreenBufferInfo(h, &tmp)) {
+        return {h, false};
+    }
+    HANDLE hCon = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, 0, nullptr);
+    if (hCon != INVALID_HANDLE_VALUE) {
+        return {hCon, true};
+    }
+    return {h, false};
+}
+
+} // namespace
 
 std::atomic<bool> Unloader::s_unloading{false};
 std::atomic<int>  Unloader::s_active_read_detours{0};
@@ -112,7 +139,33 @@ void Unloader::DoUnload() {
     //    （0xC0000005）。DLL_PROCESS_DETACH 中 UninstallAll 做最终清理。
     HookManager::DisableAll();
 
-    // 4.5 等待所有 Read 类 Detour 线程离开 DLL 代码（Phase 22 卸载竞态修复）
+    // 4.5 先恢复 ConHost 画面（Phase 22 VT 重放），再唤醒 cmd 读取线程。
+    //     竞态修复：若先唤醒 cmd（KickStart 回车）让它在重放前直接写新 prompt
+    //     （hooks 已移除），重放内容会与 cmd 的 prompt 叠加 → 解除后双 prompt /
+    //     拼行。先重放（此时 cmd 仍阻塞在读取，不干扰），重放后 ConHost 光标
+    //     已推进到正确位置，再唤醒 cmd → cmd 的新 prompt 落在下一行。
+    ReplaySessionToConHost();
+
+    // 5. 恢复 ConsoleState 到真实 ConHost 状态
+    //    Hook 已卸载，GetConsoleScreenBufferInfo 直接读 ConHost 真值
+    //    写回 ConsoleState 缓存，让目标程序下次查询拿到 ConHost 真值
+    const auto [hOut, hCloseOut] = GetConsoleOutHandle();
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (GetConsoleScreenBufferInfo(hOut, &info)) {
+        ConsoleState::Instance().SetBufferSize(info.dwSize);
+        ConsoleState::Instance().SetCursorPosition(info.dwCursorPosition);
+        ConsoleState::Instance().SetWindow(info.srWindow);
+        LOG_INFO("Unload: ConsoleState restored buf=(%d,%d) cursor=(%d,%d) win=(%d,%d,%d,%d)",
+                 info.dwSize.X, info.dwSize.Y,
+                 info.dwCursorPosition.X, info.dwCursorPosition.Y,
+                 info.srWindow.Left, info.srWindow.Top,
+                 info.srWindow.Right, info.srWindow.Bottom);
+    } else {
+        LOG_WARN("Unload: GetConsoleScreenBufferInfo failed err=%lu", GetLastError());
+    }
+    if (hCloseOut) CloseHandle(hOut);
+
+    // 5.5 等待所有 Read 类 Detour 线程离开 DLL 代码（Phase 22 卸载竞态修复）
     //     根因（cdb 取证 <Unloaded_injected.dll>+0x97a1 Access violation）：
     //       线程在真实 ReadConsoleW 返回后经 trampoline 尾跳回 detour 主体时，
     //       DLL 已被远程 FreeLibrary → AV。旧方案在 pass-through 调 orig 前
@@ -124,6 +177,8 @@ void Unloader::DoUnload() {
     //       线程走完 detour 尾（析构 guard）→ 计数归零 → 线程已完全离开 DLL 代码，
     //       之后 FreeLibrary 才安全。
     //     超时兜底防死锁：极端情况（如阻塞在重定向管道读）仍要继续卸载。
+    //     （本步在重放之后：cmd 被回车唤醒后写新 prompt 时，重放已完成，
+    //       ConHost 光标已推进到正确位置，新 prompt 落在下一行，不再拼行。）
     {
         constexpr int kWaitTotalMs = 5000;
         constexpr int kSleepStepMs = 10;
@@ -156,31 +211,6 @@ void Unloader::DoUnload() {
                      ActiveReadDetours(), kWaitTotalMs);
         }
     }
-
-    // 5. 恢复 ConsoleState 到真实 ConHost 状态
-    //    Hook 已卸载，GetConsoleScreenBufferInfo 直接读 ConHost 真值
-    //    写回 ConsoleState 缓存，让目标程序下次查询拿到 ConHost 真值
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO info{};
-    if (GetConsoleScreenBufferInfo(hOut, &info)) {
-        ConsoleState::Instance().SetBufferSize(info.dwSize);
-        ConsoleState::Instance().SetCursorPosition(info.dwCursorPosition);
-        ConsoleState::Instance().SetWindow(info.srWindow);
-        LOG_INFO("Unload: ConsoleState restored buf=(%d,%d) cursor=(%d,%d) win=(%d,%d,%d,%d)",
-                 info.dwSize.X, info.dwSize.Y,
-                 info.dwCursorPosition.X, info.dwCursorPosition.Y,
-                 info.srWindow.Left, info.srWindow.Top,
-                 info.srWindow.Right, info.srWindow.Bottom);
-    } else {
-        LOG_WARN("Unload: GetConsoleScreenBufferInfo failed err=%lu", GetLastError());
-    }
-
-    // 5.5 恢复 ConHost 画面为 WT 会话画面（Phase 22 VT 重放）
-    //     Hook 已禁用（步骤 4），以下 Console API 调用直接作用于真实 ConHost
-    //     原理：会话期间 ConHost 被冻结，画面停留在注入时快照；
-    //     把会话期间发往 WT 的 VT 增量流重放到 ConHost（ConHost 原生支持 VT 处理），
-    //     最终 ConHost 画面 = 快照 + 增量 = WT 会话画面
-    ReplaySessionToConHost();
 
     // 6. 显示原 Console 窗口（Phase 9 隐藏过，恢复可见让用户能继续操作）
     //    GetConsoleWindow 已 Hook 返回 NULL，走 orig 拿真实 HWND
@@ -323,8 +353,9 @@ void Unloader::DoUnload() {
 //   2. 视口定位到会话窗口区域（尽力而为，失败仅记日志）
 //   3. 开启 ConHost 的 ENABLE_VIRTUAL_TERMINAL_PROCESSING
 //   4. 用 WriteFile 分块重放会话 VT 流
-//      （翻译器输出 UTF-8 字节，ConHost VT 模式按 UTF-8 解析，
-//        与 WT 收到的一致字节流 → 最终画面一致）
+//      （翻译器输出 UTF-8 字节，重放前切输出代码页为 UTF-8，
+//        否则 ConHost(如 GBK/936) 会把 UTF-8 多字节按本地代码页解码 → 中文乱码；
+//        重放结束后恢复原代码页）
 //   5. 恢复 ConHost 输出模式
 //
 // 不使用 WriteConsoleW：会把 UTF-8 字节当 UTF-16 宽字符写入，中文会乱码
@@ -336,9 +367,11 @@ void Unloader::ReplaySessionToConHost() {
         return;
     }
 
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut == INVALID_HANDLE_VALUE) {
-        LOG_WARN("Replay: GetStdHandle(STD_OUTPUT_HANDLE) failed err=%lu", GetLastError());
+    // std 句柄可能对 console API 无效（cmd 批处理等场景），回退 CONOUT$；
+    // 整个重放过程（resize/设窗/开 VT/WriteFile）都用该可靠句柄
+    const auto [hOut, hCloseOut] = GetConsoleOutHandle();
+    if (hOut == nullptr || hOut == INVALID_HANDLE_VALUE) {
+        LOG_WARN("Replay: no usable console output handle, skip ConHost replay");
         return;
     }
 
@@ -356,42 +389,160 @@ void Unloader::ReplaySessionToConHost() {
              targetWin.Right, targetWin.Bottom, cur.dwSize.X, cur.dwSize.Y,
              vt.size(), VtReplayBuffer::Instance().IsTruncated() ? " (truncated)" : "");
 
-    // 1. resize 缓冲到会话尺寸
-    //    目标缓冲小于当前时，先收缩视口到目标缓冲范围内，否则 SetConsoleScreenBufferSize 失败
-    if (targetBuf.X < cur.dwSize.X || targetBuf.Y < cur.dwSize.Y) {
-        SMALL_RECT shrink = cur.srWindow;
-        if (shrink.Right >= targetBuf.X) shrink.Right = targetBuf.X - 1;
-        if (shrink.Bottom >= targetBuf.Y) shrink.Bottom = targetBuf.Y - 1;
-        if (!SetConsoleWindowInfo(hOut, TRUE, &shrink)) {
-            LOG_WARN("Replay: pre-shrink SetConsoleWindowInfo failed err=%lu", GetLastError());
-        }
-    }
-    if (cur.dwSize.X != targetBuf.X || cur.dwSize.Y != targetBuf.Y) {
-        if (!SetConsoleScreenBufferSize(hOut, targetBuf)) {
+    // 1. resize 缓冲到会话尺寸 —— 只放大,绝不缩小。
+    //    缩小(如从 9001 行压到视口 32 行)会丢弃 ConHost 缓冲中的滚动历史
+    //    scrollback(用户反馈:卸载重放后 ConHost 没有历史)。
+    //    背景:WT resize 会把 VirtualConsoleState 的虚拟缓冲压到视口高
+    //    (ApplyWtResize 中 bufferSize = max(rows, rows+scrollbackLines),
+    //    而 scrollbackLines 在 9001 行缓冲下几乎不会触发),卸载时若照此
+    //    SetConsoleScreenBufferSize 缩小,缓冲顶部历史整段丢失。
+    //    ConHost 缓冲在注入时冻结,已保留全部历史(滚动区+可见区);
+    //    回放把会话增量写在快照之上,保持原尺寸(必要时增大)即可容纳全部内容。
+    if (targetBuf.X > cur.dwSize.X || targetBuf.Y > cur.dwSize.Y) {
+        COORD newBuf;
+        newBuf.X = (targetBuf.X > cur.dwSize.X) ? targetBuf.X : cur.dwSize.X;
+        newBuf.Y = (targetBuf.Y > cur.dwSize.Y) ? targetBuf.Y : cur.dwSize.Y;
+        if (!SetConsoleScreenBufferSize(hOut, newBuf)) {
             LOG_WARN("Replay: SetConsoleScreenBufferSize(%d,%d) failed err=%lu "
                      "(keep current buffer, replay may clip)",
-                     targetBuf.X, targetBuf.Y, GetLastError());
+                     newBuf.X, newBuf.Y, GetLastError());
         }
     }
 
     // 2. 视口定位到会话窗口区域（尺寸超 ConHost 最大窗口时失败，保持当前视口）
-    if (!SetConsoleWindowInfo(hOut, TRUE, &targetWin)) {
-        LOG_WARN("Replay: SetConsoleWindowInfo failed err=%lu", GetLastError());
+    //    重要：不能直接用 targetWin（VirtualConsoleState 的窗口被 LazyInit
+    //    Phase 14 用 WT 尺寸覆盖成顶部锚定 [0..rows-1]）。重放 VT 的光标同步是
+    //    视口相对坐标（termCursorY = 注入时 cursor.Y - srWindow.Top），行号基准
+    //    是【注入时】的 srWindow.Top。窗口顶部必须保持该值，行号才映射到正确
+    //    绝对行。尺寸用会话最终尺寸。
+    {
+        const SMALL_RECT injWin = VirtualConsoleState::Instance().GetInjectionWindow();
+        SMALL_RECT replayWin;
+        replayWin.Left   = injWin.Left;
+        replayWin.Top    = injWin.Top;
+        replayWin.Right  = static_cast<SHORT>(
+            (targetWin.Right - targetWin.Left) + replayWin.Left);
+        replayWin.Bottom = static_cast<SHORT>(
+            (targetWin.Bottom - targetWin.Top) + replayWin.Top);
+        if (!SetConsoleWindowInfo(hOut, TRUE, &replayWin)) {
+            LOG_WARN("Replay: SetConsoleWindowInfo(%d,%d)-(%d,%d) failed err=%lu",
+                     replayWin.Left, replayWin.Top,
+                     replayWin.Right, replayWin.Bottom, GetLastError());
+        }
     }
 
     // 3. 开启 VT 处理（ConHost 原生支持，重放会话 VT 流）
     DWORD origMode = 0;
     GetConsoleMode(hOut, &origMode);
+
+    // 3.1 重放前把光标移回窗口内（prompt 行行首）。会话期 cmd 交互（KickStart
+    //     回车等）可能把 ConHost 光标移到窗口下方（如 (0,92) vs 窗口 [61..90]），
+    //     此时重放 VT 的 CUP 视口相对定位会被 ConHost 异常解释。光标归位到
+    //     (0, 注入光标行)，即使后续 CUP 失效，文本也落在行首覆盖旧 prompt。
+    //     同时记录重放前光标：重放后若光标未动（惰性重放 = 会话无可视内容），
+    //     5.5 据此把光标抬到擦除行上一行，让 KickStart 回显的 \r\n 把 cmd
+    //     新 prompt 推回注入前原位（无多余空行）。
+    bool hasPreCur = false;
+    COORD preReplayCur{0, 0};
+    {
+        CONSOLE_SCREEN_BUFFER_INFO now{};
+        if (GetConsoleScreenBufferInfo(hOut, &now)) {
+            hasPreCur = true;
+            preReplayCur = now.dwCursorPosition;
+            if (now.dwCursorPosition.Y > now.srWindow.Bottom ||
+                now.dwCursorPosition.Y < now.srWindow.Top ||
+                now.dwCursorPosition.X < now.srWindow.Left ||
+                now.dwCursorPosition.X > now.srWindow.Right) {
+                const COORD injCur = VirtualConsoleState::Instance().GetInjectionCursor();
+                COORD home;
+                home.X = 0;
+                home.Y = injCur.Y;
+                if (SetConsoleCursorPosition(hOut, home)) {
+                    LOG_INFO("Replay: cursor outside window (%d,%d), moved to line start (%d,%d)",
+                             now.dwCursorPosition.X, now.dwCursorPosition.Y,
+                             home.X, home.Y);
+                } else {
+                    LOG_WARN("Replay: SetConsoleCursorPosition(%d,%d) failed err=%lu",
+                             home.X, home.Y, GetLastError());
+                }
+            }
+        }
+    }
+
     if (!SetConsoleMode(hOut, origMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
         LOG_WARN("Replay: SetConsoleMode(VT) failed err=%lu", GetLastError());
         return;  // 无 VT 处理能力则无法重放，跳过
     }
 
-    // 4. 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
+    // 3.5 切换输出代码页到 UTF-8
+    // 会话 VT 流是 UTF-8 字节；不切换则 ConHost 按本地代码页（如 GBK/936）
+    // 解码多字节字符 → 中文乱码。重放结束后恢复原代码页
+    UINT origCp = GetConsoleOutputCP();
+    if (origCp != CP_UTF8) {
+        if (SetConsoleOutputCP(CP_UTF8)) {
+            LOG_INFO("Replay: output codepage switched %u -> 65001(UTF-8)", origCp);
+        } else {
+            LOG_WARN("Replay: SetConsoleOutputCP(65001) failed err=%lu, "
+                     "replay may show mojibake for CJK", GetLastError());
+        }
+    } else {
+        LOG_INFO("Replay: output codepage already UTF-8");
+    }
+
+    // 4. 确定重放终点：行编辑 shell 停在 prompt 时，截断到最后 prompt 起点
+    //     写-读序列语义（PromptTracker）：行编辑 shell 的循环是"画 prompt →
+    //     阻塞 ReadConsole"，prompt = "行编辑读入口之前的最后一次输出写入"，
+    //     不需要猜内容是否以 > 结尾。
+    //     截断效果：该 prompt 不进 ConHost（重放终点 = prompt 写入起点），
+    //     快照里的旧 prompt 行由 4.1 在重放前擦除，shell 被唤醒后重绘的新
+    //     prompt 成为唯一 → 单 prompt 无缝；旧启发式"擦除 prompt 样末行"
+    //     因此移除。
+    //     仅当行编辑读当前活动（shell 正停在 prompt 等输入）时截断：
+    //       命令执行中卸载（长输出如 tree /f）不截断，避免丢输出；
+    //       TUI 全屏程序（无 ECHO_INPUT）不记录，永不截断。
+    const auto promptOff = PromptTracker::Instance().TruncateOffset();
+    size_t replayEnd = vt.size();
+    if (promptOff.has_value()) {
+        replayEnd = *promptOff;
+        LOG_INFO("Replay: truncating at line-shell prompt offset %zu, "
+                 "replay %zu/%zu bytes", *promptOff, replayEnd, vt.size());
+    } else {
+        LOG_INFO("Replay: no active line-shell prompt, replay full %zu bytes",
+                 vt.size());
+    }
+
+    // 4.1 擦掉快照 prompt 行（截断命中时，重放前）。
+    //     截断 = 重放终点为最后 prompt 写入起点，重放内容【不含】该 prompt
+    //     文本——重放只在当前光标处写 vt[0,replayEnd)，快照里的旧 prompt
+    //     （注入光标行，行编辑 shell 停在 prompt 等输入时 injCur.Y 即 prompt
+    //     行）永不会被重放覆盖；cmd 唤醒后重绘的新 prompt 又落在其后一行
+    //     （KickStart 回车回显 \r\n 推下行）→ 空会话反复注入/卸载会累积双
+    //     prompt。重放前确定性擦掉该行（非内容启发式），cmd 的新 prompt
+    //     成为唯一；若重放内容恰要写该行，也会直接覆盖擦除后的空白。
+    //     重放终点 = 0（会话只有 prompt）时同样适用。
+    if (promptOff.has_value()) {
+        CONSOLE_SCREEN_BUFFER_INFO now{};
+        if (GetConsoleScreenBufferInfo(hOut, &now)) {
+            COORD rowStart;
+            rowStart.X = 0;
+            rowStart.Y = VirtualConsoleState::Instance().GetInjectionCursor().Y;
+            if (rowStart.Y >= 0 && rowStart.Y < now.dwSize.Y) {
+                DWORD filled = 0;
+                FillConsoleOutputCharacterW(hOut, L' ', now.dwSize.X, rowStart, &filled);
+                FillConsoleOutputAttribute(hOut, now.wAttributes,
+                                           now.dwSize.X, rowStart, &filled);
+                LOG_INFO("Replay: truncated at prompt, erased snapshot prompt row %d "
+                         "(replayEnd=%zu)", rowStart.Y, replayEnd);
+            }
+        }
+    }
+
+    // 4.2 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
     constexpr DWORD kChunkBytes = 64 * 1024;
     size_t offset = 0;
-    while (offset < vt.size()) {
-        DWORD n = static_cast<DWORD>((kChunkBytes < vt.size() - offset) ? kChunkBytes : (vt.size() - offset));
+    while (offset < replayEnd) {
+        DWORD n = static_cast<DWORD>(
+            (kChunkBytes < replayEnd - offset) ? kChunkBytes : (replayEnd - offset));
         DWORD written = 0;
         if (!WriteFile(hOut, vt.data() + offset, n, &written, nullptr) || written == 0) {
             LOG_WARN("Replay: WriteFile failed err=%lu at offset=%zu", GetLastError(), offset);
@@ -399,10 +550,62 @@ void Unloader::ReplaySessionToConHost() {
         }
         offset += written;
     }
-    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost", offset, vt.size());
+    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost", offset, replayEnd);
 
     // 5. 恢复 ConHost 输出模式（含 VT 位原状）
     SetConsoleMode(hOut, origMode);
+
+    // 5.5 重放后光标处理。
+    //     已截断（行编辑 shell 停在 prompt）：重放终点 = prompt 写入起点，
+    //     cursor 停在重放内容末尾（行编辑读入口）；不推进——cmd 唤醒后
+    //     KickStart 回车回显 \r\n 会自然把新 prompt 推到下一行，快照旧
+    //     prompt 行已在 4.1 擦除，单 prompt 成立。
+    //       惰性重放（重放前后光标未动 = 会话无可视内容，空会话）：光标
+    //       抬到擦除行上一行，回显 \r\n 恰好把 cmd 新 prompt 推回注入前
+    //       原位（prompt 行），画面与注入前逐像素一致，无多余空行。
+    //     未截断（命令执行中卸载 / TUI 全屏）：光标停在会话末输出末尾，推进
+    //     到下一行行首，cmd 处理 KickStart 队列里的回车后写新 prompt 时落新行，
+    //     避免拼到输出末行（用户反馈：解除后 prompt 拼到输出末行
+    //     "或批处理文件。>"）。
+    if (!promptOff.has_value()) {
+        CONSOLE_SCREEN_BUFFER_INFO end{};
+        if (GetConsoleScreenBufferInfo(hOut, &end)) {
+            COORD next;
+            next.X = 0;
+            next.Y = static_cast<SHORT>(end.dwCursorPosition.Y + 1);
+            if (next.Y >= end.dwSize.Y) next.Y = static_cast<SHORT>(end.dwSize.Y - 1);
+            SetConsoleCursorPosition(hOut, next);
+        }
+    } else if (hasPreCur) {
+        // 已截断 + 惰性重放：光标抬到擦除行上一行（见 5.5 注释）
+        CONSOLE_SCREEN_BUFFER_INFO end{};
+        if (GetConsoleScreenBufferInfo(hOut, &end) &&
+            end.dwCursorPosition.X == preReplayCur.X &&
+            end.dwCursorPosition.Y == preReplayCur.Y) {
+            const COORD injCur = VirtualConsoleState::Instance().GetInjectionCursor();
+            COORD target;
+            target.X = 0;
+            target.Y = static_cast<SHORT>(injCur.Y - 1);
+            if (target.Y < 0) target.Y = 0;
+            if (SetConsoleCursorPosition(hOut, target)) {
+                LOG_INFO("Replay: inert replay, cursor raised to row %d (echo \\r\\n "
+                         "will put shell prompt back at injection row %d)",
+                         target.Y, injCur.Y);
+            } else {
+                LOG_WARN("Replay: SetConsoleCursorPosition(%d,%d) failed err=%lu",
+                         target.X, target.Y, GetLastError());
+            }
+        }
+    }
+
+    // 6. 恢复 ConHost 输出代码页（先关 VT 再改代码页，还原原始解码规则）
+    if (origCp != CP_UTF8 && origCp != 0) {
+        SetConsoleOutputCP(origCp);
+        LOG_INFO("Replay: output codepage restored %u", origCp);
+    }
+
+    // 回退路径打开的 CONOUT$ 句柄用完即关（std 句柄路径 hCloseOut=false）
+    if (hCloseOut) CloseHandle(hOut);
 }
 
 } // namespace terminjector

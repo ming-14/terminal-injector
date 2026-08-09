@@ -40,6 +40,17 @@ public:
     SMALL_RECT GetWindowRect() const;
     void SetWindowRect(SMALL_RECT rect);
 
+    // === 注入时 ConHost 可见窗口 ===
+    // LazyInit 捕获（未被子会话 resize 覆盖）。卸载重放的 VT 行号是视口相对
+    // 坐标（termCursorY = 注入时 cursor.Y - srWindow.Top），ConHost 重放时窗口
+    // 顶部必须保持注入时位置，行号才映射到正确绝对行（否则新 prompt 写到
+    // 目录中间/重复 → 解除后双 prompt）。
+    SMALL_RECT GetInjectionWindow() const;
+
+    // === 注入时 ConHost 光标 ===
+    // 卸载重放前光标归位用（会话期 cmd 交互可能移动 ConHost 光标到窗口外）。
+    COORD GetInjectionCursor() const;
+
     // === 文本属性 ===
     WORD GetAttributes() const;
     void SetAttributes(WORD attr);
@@ -78,8 +89,10 @@ private:
 
     mutable std::mutex m_lock;
     COORD m_cursorPos{0, 0};
+    COORD m_injectionCursor{0, 0};     // 注入时 ConHost 光标（卸载重放光标归位基准）
     COORD m_bufferSize{80, 25};
     SMALL_RECT m_windowRect{0, 0, 79, 24};
+    SMALL_RECT m_injectionWindow{0, 0, 0, 0};  // 注入时 ConHost 可见窗口（卸载重放基准）
     std::atomic<WORD> m_attributes{FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED};
     std::atomic<int32_t> m_terminalCaps{0};  // Phase 15：终端能力标识（DA 响应）
     std::atomic<bool> m_initialized{false};

@@ -20,6 +20,7 @@ add_library(injected_dll SHARED
     state/HandleRegistry.cpp
     state/StatePoller.cpp
     state/VtReplayBuffer.cpp
+    state/PromptTracker.cpp
     translator/Color.cpp
     translator/ConsoleToVt.cpp
     translator/VtEscape.cpp

@@ -7,15 +7,43 @@
 #include "../hooks/ProtectionHooks.h"
 #include "logging/Logger.h"
 
+#include <utility>
+
 namespace terminjector {
 
+namespace {
+
+// 获取可用于 console API 的输出句柄。
+// 某些场景（cmd 批处理等待子进程等）下 GetStdHandle(STD_OUTPUT_HANDLE) 返回的
+// 句柄对 console API 无效（GetConsoleScreenBufferInfo 报 err=6 ERROR_INVALID_HANDLE），
+// 而 CONOUT$ 打开的总是当前进程真实控制台。故优先用 std 句柄，失败回退 CONOUT$。
+// 返回 (handle, shouldClose)：shouldClose=true 时调用方用完需 CloseHandle（仅回退路径）。
+std::pair<HANDLE, bool> GetConsoleOutHandle() {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO tmp{};
+    if (h != nullptr && h != INVALID_HANDLE_VALUE &&
+        GetConsoleScreenBufferInfo(h, &tmp)) {
+        return {h, false};
+    }
+    HANDLE hCon = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, 0, nullptr);
+    if (hCon != INVALID_HANDLE_VALUE) {
+        return {hCon, true};
+    }
+    return {h, false};
+}
+
+} // namespace
+
 bool StateSnapshot::Capture() {
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    const auto [hOut, hCloseOut] = GetConsoleOutHandle();
     HANDLE hIn  = GetStdHandle(STD_INPUT_HANDLE);
 
     // 屏幕缓冲区信息（含光标、窗口、尺寸、属性）
     if (!GetConsoleScreenBufferInfo(hOut, &screenBufferInfo)) {
         LOG_ERROR("Snapshot: GetConsoleScreenBufferInfo failed: %lu", GetLastError());
+        if (hCloseOut) CloseHandle(hOut);
         return false;
     }
     // 光标显隐与大小（失败仅警告，不中断）
@@ -54,22 +82,23 @@ bool StateSnapshot::Capture() {
     // ReadConsoleOutputW 未被 Hook，直接读真实 ConHost 屏幕缓冲区
     CaptureScreenContent();
 
+    // 回退路径打开的 CONOUT$ 句柄用完即关（std 句柄路径 hCloseOut=false）
+    if (hCloseOut) CloseHandle(hOut);
+
     return true;
 }
 
-// Phase 10：读取可见区屏幕内容到 screenCells
-// 将 srWindow 区域的内容读入 screenCells，screenRegion 映射到 WT 的 (0,0)
-// 后续 LazyInit 用 ConsoleToVt::WriteConsoleOutput 转成 VT 补发给 mediator
-void StateSnapshot::CaptureScreenContent() {
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+// 读取指定 ConHost 缓冲区域到 screenCells（screenRegion 映射到 WT 的 (0,0)）
+// 返回 false 表示读取失败（screenCells 已清空，screenRegion 未设置）
+bool StateSnapshot::CaptureRegion(SMALL_RECT region) {
+    const auto [hOut, hCloseOut] = GetConsoleOutHandle();
 
-    // 可见区尺寸
-    SMALL_RECT& win = screenBufferInfo.srWindow;
-    int width  = win.Right - win.Left + 1;
-    int height = win.Bottom - win.Top + 1;
+    int width  = region.Right - region.Left + 1;
+    int height = region.Bottom - region.Top + 1;
     if (width <= 0 || height <= 0) {
-        LOG_WARN("Snapshot: invalid srWindow %dx%d, skip screen capture", width, height);
-        return;
+        if (hCloseOut) CloseHandle(hOut);
+        LOG_WARN("Snapshot: invalid region %dx%d, skip screen capture", width, height);
+        return false;
     }
 
     // 分配 CHAR_INFO 矩阵并读取
@@ -80,23 +109,53 @@ void StateSnapshot::CaptureScreenContent() {
     COORD bufCoord{0, 0};  // 写入 screenCells 的起始位置
 
     // ReadConsoleOutputW 的 readRegion 是 ConHost 缓冲区坐标（输入+输出）
-    // 输入 srWindow，输出实际读取的区域（通常等于 srWindow）
-    SMALL_RECT readRegion = win;
+    // 输入 region，输出实际读取的区域（通常等于 region）
+    SMALL_RECT readRegion = region;
     if (!ReadConsoleOutputW(hOut, screenCells.data(), bufSize, bufCoord, &readRegion)) {
-        LOG_WARN("Snapshot: ReadConsoleOutputW failed: %lu", GetLastError());
+        LOG_WARN("Snapshot: ReadConsoleOutputW(%dx%d) failed: %lu",
+                 width, height, GetLastError());
         screenCells.clear();
-        return;
+        if (hCloseOut) CloseHandle(hOut);
+        return false;
     }
+    if (hCloseOut) CloseHandle(hOut);
 
     // screenRegion 用于 VT 输出：映射到 WT 的 (0,0)
-    // WT 坐标系从 (0,0) 开始，srWindow 内容放在 WT 的 (0,0)-(width-1,height-1)
+    // WT 坐标系从 (0,0) 开始，抓取区域放在 WT 的 (0,0)-(width-1,height-1)
     screenRegion.Left   = 0;
     screenRegion.Top    = 0;
     screenRegion.Right  = static_cast<SHORT>(width - 1);
     screenRegion.Bottom = static_cast<SHORT>(height - 1);
+    return true;
+}
 
-    LOG_INFO("Snapshot: screen content captured %dx%d (from srWindow %d,%d-%d,%d)",
-             width, height, win.Left, win.Top, win.Right, win.Bottom);
+// 读取屏幕内容到 screenCells
+// 区域由 kCaptureFullScrollback 决定：
+//   - true：整个屏幕缓冲区（dwSize，含滚动历史），screenRegion=dwSize
+//   - false：仅 srWindow 可见区
+// 后续 LazyInit 用 ConsoleToVt::WriteConsoleOutput 转成 VT 补发给 mediator
+// 注意：读整个缓冲时（9001 行 × 120 列）ReadConsoleOutputW 一次调用即可完成，
+//       CHAR_INFO 矩阵 ~4.3MB，无需分块；若 ConHost 缓冲异常巨大导致失败，
+//       回退到仅读可见区保证握手不中断。
+void StateSnapshot::CaptureScreenContent() {
+    if (kCaptureFullScrollback) {
+        // 全量：整个屏幕缓冲区（含滚动历史）
+        SMALL_RECT full = {0, 0,
+                           static_cast<SHORT>(screenBufferInfo.dwSize.X - 1),
+                           static_cast<SHORT>(screenBufferInfo.dwSize.Y - 1)};
+        if (CaptureRegion(full)) {
+            LOG_INFO("Snapshot: screen content captured %dx%d (full buffer incl. scrollback)",
+                     full.Right - full.Left + 1, full.Bottom - full.Top + 1);
+            return;
+        }
+        // 全量读取失败（罕见）：回退到仅可见区，保证注入流程继续
+        LOG_WARN("Snapshot: full-buffer capture failed, fallback to srWindow-only");
+    }
+    if (CaptureRegion(screenBufferInfo.srWindow)) {
+        LOG_INFO("Snapshot: screen content captured %dx%d (srWindow visible region)",
+                 screenBufferInfo.srWindow.Right - screenBufferInfo.srWindow.Left + 1,
+                 screenBufferInfo.srWindow.Bottom - screenBufferInfo.srWindow.Top + 1);
+    }
 }
 
 protocol::HelloPayload StateSnapshot::ToHelloPayload() const {

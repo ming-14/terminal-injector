@@ -46,6 +46,8 @@ struct InjectTargetInfo {
     bool        injectable = false;  // 权限 + x64 + CUI 全部满足
     bool        alreadyInjected = false; // 已加载 injected.dll（仍可注入，重复无意义）
     std::wstring reason;             // 不可注入原因（可注入时为空串）
+    std::wstring startTime;          // 启动时间（本地时间，如 2026-08-08 12:30:45）
+    std::wstring cmdLine;            // 启动命令行（可能较长，GUI 折行显示）
 };
 
 // 枚举全部进程并判定可注入性（--list-targets 数据源）

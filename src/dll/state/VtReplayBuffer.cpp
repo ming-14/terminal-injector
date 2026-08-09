@@ -12,9 +12,9 @@ VtReplayBuffer& VtReplayBuffer::Instance() {
     return instance;
 }
 
-void VtReplayBuffer::Append(const void* data, size_t len) {
-    if (data == nullptr || len == 0) return;
-    if (m_truncated.load()) return;  // 已截断，不再追加（保持前缀语义）
+std::int64_t VtReplayBuffer::Append(const void* data, size_t len) {
+    if (data == nullptr || len == 0) return -1;
+    if (m_truncated.load()) return -1;  // 已截断，不再追加（保持前缀语义）
 
     AcquireSRWLockExclusive(&m_lock);
 
@@ -31,11 +31,13 @@ void VtReplayBuffer::Append(const void* data, size_t len) {
                      "replay will end at truncation point", kMaxBytes);
         }
         ReleaseSRWLockExclusive(&m_lock);
-        return;
+        return -1;
     }
 
+    std::int64_t start = static_cast<std::int64_t>(m_data.size());
     m_data.append(static_cast<const char*>(data), len);
     ReleaseSRWLockExclusive(&m_lock);
+    return start;
 }
 
 bool VtReplayBuffer::IsTruncated() const {

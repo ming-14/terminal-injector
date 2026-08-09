@@ -20,6 +20,7 @@
 #include "../HookManager.h"
 #include "../state/ConsoleState.h"
 #include "../state/InputQueue.h"
+#include "../state/PromptTracker.h"
 #include "../LazyInit.h"
 #include "../Unloader.h"
 #include "../lineedit/LineEditor.h"
@@ -552,6 +553,12 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
     editor.BeginSession();
     LOG_INFO("ReadConsoleW_Detour: BeginSession done, echo=%d", echoEnabled);
 
+    // PromptTracker：行编辑读活动 + prompt 候选快照（卸载重放截断用，
+    // 见 PromptTracker.h）。写-读序列语义："行编辑读入口之前的最后一次
+    // 输出写入"就是该读的 prompt。仅回显行编辑（echoEnabled）记录；
+    // 读活动计数供 Unloader 判断"当前是否停在 prompt 等输入"。
+    PromptTracker::LineReadScope promptScope(echoEnabled);
+
     // 行编辑临时变量（提升到函数作用域避免与 TLS 基址缓存栈布局冲突，
     // 详见 Phase 11 诊断：std::wstring/string 在循环内构造时其 SSO 缓冲区
     // 可能覆盖编译器缓存的 TLS 基址 [rbp-71h]，导致 HookReentryGuard 析构
@@ -718,6 +725,9 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
     // ---- 行编辑模式（ENABLE_LINE_INPUT 已设置）：LineEditor 行编辑 ----
     auto& editor = LineEditor::Instance();
     editor.BeginSession();
+
+    // PromptTracker：同 ReadConsoleW_Detour（行编辑读活动 + prompt 候选）
+    PromptTracker::LineReadScope promptScope(echoEnabled);
 
     // 行编辑临时变量（提升到函数作用域避免与 TLS 基址缓存栈布局冲突，同 ReadConsoleW_Detour）
     std::wstring lineOut;

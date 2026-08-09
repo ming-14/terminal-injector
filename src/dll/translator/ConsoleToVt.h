@@ -56,6 +56,29 @@ public:
         const CHAR_INFO* buffer, COORD bufferSize, COORD bufferCoord,
         SMALL_RECT writeRegion);
 
+    // 全量缓冲（含滚动历史）流式重放：把 ConHost 整个屏幕缓冲区转成 VT 发给 WT。
+    //
+    // 与 WriteConsoleOutput 的区别（方案 A，见 LazyInit Phase 10）：
+    //   - WriteConsoleOutput 用绝对定位 CursorPosition 逐行输出，只适合
+    //     行号不超过 ConPTY 视口（≈30 行）的可见窗口重放。
+    //   - 全量缓冲可达 9000+ 行，绝对定位的 CursorPosition 超过 ConPTY
+    //     buffer 高度时越界（ConPTY 缓冲行数=视口行数），行被 clamp/覆盖，
+    //     造成内容错位重叠（用户反馈：dir 输出尾部 "32个目录..." 插进
+    //     prompt 行）。
+    //   - 本函数改为逐行流式：行间只发 \r\n，不跳绝对行号；ConPTY 缓冲
+    //     写满后自然滚动，滚出的行进入 WT 自身 scrollback（WT 维护历史），
+    //     最后视口恰好停在缓冲区的可见窗口（writeRegion 底部）。
+    // 注意：流式行推动由 ConPTY 的 scrollback 完成，因此重复输出不会残留
+    //       绝对行号；调用方仍应像 WriteConsoleOutput 一样在返回后同步光标。
+    // buffer: 全量缓冲 CHAR_INFO 矩阵（row-major，总 bufferSize.Y 行）
+    // bufferSize: 矩阵尺寸（X=列数, Y=行数）
+    // bufferCoord: 缓冲读取起始坐标（通常 {0,0}）
+    // writeRegion: 要重放的目标区域（映射到 WT 的 (0,0)），仅输出
+    //              [writeRegion.Top .. writeRegion.Bottom] 之间的行
+    static std::string ReplayScreenStreamed(
+        const CHAR_INFO* buffer, COORD bufferSize, COORD bufferCoord,
+        SMALL_RECT writeRegion);
+
     // Phase 10 任务6：失效 WriteConsoleOutput 的 diff 缓存
     // 在屏幕内容被非 WriteConsoleOutput 路径改变时调用：
     //   - FillConsoleOutputCharacter/Attribute（cls/改颜色）

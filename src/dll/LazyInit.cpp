@@ -29,9 +29,11 @@
 #include "state/VirtualConsoleState.h"
 #include "state/HandleRegistry.h"
 #include "state/StatePoller.h"
+#include "state/InputQueue.h"
 #include "translator/ConsoleToVt.h"
 #include "translator/VtEscape.h"
 #include "hooks/HookCommon.h"
+#include "hooks/BufferHooks.h"
 #include "hooks/ProtectionHooks.h"
 
 #include <windows.h>
@@ -298,7 +300,8 @@ void EnsureLazyInitialized() {
     // WT 响应 \x1b[row;colR 后由 mediator VtParser 检测并发送 WtStateReport(type=1)
     // 给 DLL 更新 VirtualConsoleState，使程序查询到的光标与 WT 一致
     hooks::SendToMediator(vt::kDsrCprQuery, strlen(vt::kDsrCprQuery),
-                          protocol::MessageType::VtOutput);
+                          protocol::MessageType::VtOutput,
+                          /*recordReplay=*/false);
     LOG_INFO("QueryWtCursorPos: DSR CPR query sent to WT");
 
     // Phase 15：发送 Primary DA 查询获取终端能力标识
@@ -306,7 +309,8 @@ void EnsureLazyInitialized() {
     // WT 响应 \x1b[?1;Psc 后由 mediator VtParser 检测并发送 WtStateReport(type=2)
     // 给 DLL 存储至 VirtualConsoleState，后续可查询终端能力
     hooks::SendToMediator(vt::kDaPrimaryQuery, strlen(vt::kDaPrimaryQuery),
-                          protocol::MessageType::VtOutput);
+                          protocol::MessageType::VtOutput,
+                          /*recordReplay=*/false);
     LOG_INFO("QueryTerminalCaps: Primary DA query sent to WT");
 
     // Phase 20：按注入瞬间输入模式判定并补发鼠标启用序列
@@ -381,9 +385,31 @@ void EnsureLazyInitialized() {
         bufSize.X = static_cast<SHORT>(snap.screenRegion.Right - snap.screenRegion.Left + 1);
         bufSize.Y = static_cast<SHORT>(snap.screenRegion.Bottom - snap.screenRegion.Top + 1);
         COORD bufCoord{0, 0};
-        std::string vt = ConsoleToVt::WriteConsoleOutput(
-            snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
-        hooks::SendToMediator(vt.data(), vt.size());
+        std::string vt;
+        if (kCaptureFullScrollback) {
+            // Phase 10 方案 A：全量缓冲（含滚动历史）用流式重放。
+            // WriteConsoleOutput 逐行 CursorPosition 绝对定位，行号可达 9000+，
+            // 远超 ConPTY 缓冲高度（=视口行数，约 30），越界行被 clamp/覆盖，
+            // 内容错位重叠（用户反馈：dir 输出尾部 "32个目录..." 插进 prompt 行）。
+            // ReplayScreenStreamed 逐行 \r\n 推进，ConPTY 自然滚动把历史推入
+            // WT scrollback，视口恰好停在缓冲底部（= ConHost 可见窗口），
+            // 与下方光标换算 cursor.Y - srWindow.Top 的不变量保持一致。
+            vt = ConsoleToVt::ReplayScreenStreamed(
+                snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
+        } else {
+            vt = ConsoleToVt::WriteConsoleOutput(
+                snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
+        }
+        // recordReplay=false：全量重流只发 WT（WT 空屏，需要内容），不进卸载
+        // 重放缓冲 VtReplayBuffer。
+        // 原因：ConHost 缓冲在注入时冻结，本身已保留这份快照内容（滚动区+可见区）。
+        // 若把它也记入重放缓冲，卸载回放到 ConHost 时（视口相对坐标，CUP(1,1)
+        // 落在 srWindow.Top 行）会从窗口顶重写全部行，而窗口顶以上的冻结内容
+        // 未被覆盖，造成前几行重复（用户反馈：srWindow.Top>0 时顶部历史重复）。
+        // 卸载回放只需 [光标同步 + 会话增量]，叠在冻结快照上即可还原会话画面。
+        hooks::SendToMediator(vt.data(), vt.size(),
+                              protocol::MessageType::VtOutput,
+                              /*recordReplay=*/false);
         LOG_INFO("LazyInit: screen content replayed to WT, %zu bytes", vt.size());
 
         // 同步 WT 光标到 prompt 末尾位置（相对 srWindow 左上角）
@@ -393,8 +419,106 @@ void EnsureLazyInitialized() {
         SHORT termCursorY = static_cast<SHORT>(cursor.Y - snap.screenBufferInfo.srWindow.Top);
         // VT CursorPosition 是 1-based
         std::string cursorSync = vt::CursorPosition(termCursorY + 1, termCursorX + 1);
-        hooks::SendToMediator(cursorSync.data(), cursorSync.size());
+        // recordReplay=false：该 CUP 定位到 prompt【末尾】(termCursorX)，只用于
+        // WT 光标对齐。若记入卸载重放缓冲，ConHost 重放时先定位到 prompt 末尾，
+        // 后续 line-start 的 CUP 又不可靠地移回行首 → 新 prompt 追加到旧 prompt
+        // 之后（解除后双 prompt）。卸载重放只需 line-start（行首覆盖）。
+        hooks::SendToMediator(cursorSync.data(), cursorSync.size(),
+                              protocol::MessageType::VtOutput,
+                              /*recordReplay=*/false);
         LOG_INFO("LazyInit: WT cursor synced to terminal (%d,%d)", termCursorX, termCursorY);
+
+        // 注入尺寸对齐（2026-08-08 opencode 实测修复）：
+        // 目标 TUI 跑在 42 行控制台而 WT 只有 30 行时（rows=42 vs wtRows=30），
+        // 屏幕重放 42 行内容到 30 行 WT 被滚动裁剪、光标同步到第 37 行超界被
+        // ConPTY 夹到末行；opencode 持续按 42 行布局重绘 → 光标错位且刷新不归位。
+        // 修复：把目标真实 ConHost 窗口 resize 到 WT 尺寸，并向目标进程注入
+        // WINDOW_BUFFER_SIZE_EVENT（InputQueue::EnqueueResizeEvent），TUI 程序
+        // （opencode/vim/ncurses）收到后按 WT 尺寸重新布局重绘，逐帧正确。
+        // 注意：必须放在屏幕重放+光标同步之后——resize 触发的重绘输出
+        // （走 WriteFile_Detour 直通 WT）会覆盖重放的临时画面，最终正确。
+        // 仅 isTarget：子进程尺寸由 WT 位置决定，不参与对齐。
+        if (wtCols > 0 && wtRows > 0 && isTarget) {
+            // 取真实控制台句柄：注入目标在 ConPTY 客户端（opencode/vim）里
+            // GetStdHandle(STD_OUTPUT_HANDLE) 拿的是 ConPTY 管道句柄，
+            // 对其调 GetConsoleScreenBufferInfo / SetConsole* 全部失败——
+            // 实测 2026-08-09 verify 里对齐块因此静默跳过、resize 事件未注入。
+            // CreateFileW("CONOUT$") 打开的是该进程控制台的 ConHost 屏幕
+            // （真实 ConHost 或 ConPTY conhost），尺寸操作与 EnqueueResizeEvent
+            // 注入才真正落到目标控制台。
+            HANDLE hOut = CreateFileW(
+                L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, 0, nullptr);
+            if (hOut != INVALID_HANDLE_VALUE) {
+                CONSOLE_SCREEN_BUFFER_INFO cur{};
+                // LazyInit 期间 GetConsoleScreenBufferInfo_Detour 走 orig，拿到真实值
+                if (GetConsoleScreenBufferInfo(hOut, &cur)) {
+                    const SHORT winW = static_cast<SHORT>(
+                        cur.srWindow.Right - cur.srWindow.Left + 1);
+                    const SHORT winH = static_cast<SHORT>(
+                        cur.srWindow.Bottom - cur.srWindow.Top + 1);
+                    if (winW != static_cast<SHORT>(wtCols) ||
+                        winH != static_cast<SHORT>(wtRows)) {
+                        const COORD newBuf{static_cast<SHORT>(wtCols),
+                                           static_cast<SHORT>(wtRows)};
+                        const SMALL_RECT newWin{0, 0,
+                                                static_cast<SHORT>(wtCols - 1),
+                                                static_cast<SHORT>(wtRows - 1)};
+                        // 走 orig 绕过 BufferHooks Detour（Detour 只更新缓存不调原
+                        // API）；真实 ConHost 尺寸与虚拟状态（上方已按 WT 校正）一致。
+                        // 顺序必须：先缩窗口、后缩缓冲——缓冲 42 行 > 新缓冲 30 行时
+                        // 先缩缓冲会因窗口越界报 ERROR_INVALID_PARAMETER(87)。
+                        // 实测（2026-08-08）：SetConsoleScreenBufferSize 在注入进程里
+                        // 每次调用被 conhost server 阻塞约 28 秒才返回 err=87
+                        // （tall=42 行 alt buffer 场景，疑似 server 端潜在锁/队列），
+                        // 8 次重试累计 280 秒——绝对不可接受，仅尝试一次。
+                        // 失败走"虚拟对齐"fallback：TUI 收到 resize 事件后按 WT 尺寸
+                        // 布局重绘（WriteFile 直通 WT），ConHost 底部 12 行成为未使用
+                        // 区，不影响 WT/ConPTY 正确性；ConHost 缓冲尺寸允许保持原值。
+                        LOG_INFO("LazyInit: align begin win=%dx%d buf=%dx%d target=%ux%u",
+                                 winW, winH,
+                                 static_cast<SHORT>(cur.dwSize.X),
+                                 static_cast<SHORT>(cur.dwSize.Y),
+                                 wtCols, wtRows);
+                        const bool winOk = hooks::CallRealSetConsoleWindowInfo(
+                            hOut, TRUE, &newWin);
+                        const DWORD winErr = GetLastError();
+                        LOG_INFO("LazyInit: align SetWindowInfo done winOk=%d err=%lu",
+                                 winOk ? 1 : 0, winErr);
+                        const bool bufOk = hooks::CallRealSetConsoleScreenBufferSize(
+                            hOut, newBuf);
+                        const DWORD bufErr = GetLastError();
+                        LOG_INFO("LazyInit: align SetScreenBufferSize ok=%d err=%d",
+                                 bufOk ? 1 : 0, bufErr);
+                        if (winOk && bufOk) {
+                            LOG_INFO("LazyInit: real console resize OK "
+                                     "(win %dx%d -> %ux%u)",
+                                     winW, winH, wtCols, wtRows);
+                        } else {
+                            LOG_WARN("LazyInit: align target console to %ux%u failed "
+                                     "(win=%d err=%lu, buf=%d err=%lu), "
+                                     "using virtual alignment fallback",
+                                     wtCols, wtRows, winOk ? 1 : 0, winErr,
+                                     bufOk ? 1 : 0, bufErr);
+                        }
+                        // 无论真实 resize 是否成功，都注入 resize 事件让 TUI 按 WT
+                        // 尺寸重绘（虚拟对齐成功路径的 B 部分；真对齐失败时是唯一
+                        // 保证 ConPTY 30 行布局正确的路径）。ConHost 底部多余行在
+                        // TUI 重绘后成为未使用区。
+                        InputQueue::Instance().EnqueueResizeEvent(
+                            static_cast<SHORT>(wtCols), static_cast<SHORT>(wtRows));
+                        LOG_INFO("LazyInit: target console aligned to WT %ux%u "
+                                 "(was win %dx%d), resize event injected for TUI relayout",
+                                 wtCols, wtRows, winW, winH);
+                    } else {
+                        LOG_INFO("LazyInit: target console size matches WT %ux%u, "
+                                 "skip alignment", wtCols, wtRows);
+                    }
+                }
+                CloseHandle(hOut);
+            }
+        }
 
         // BUG-002：重放结束后补发 SGR 重置，把 VT 流恢复到默认状态。
         // 快照 cell 可能含反显/下划线/颜色（如 pwsh 横幅 0x4007），状态由
@@ -423,7 +547,22 @@ void EnsureLazyInitialized() {
         //   - ConPTY/WT 光标必须停在 TUI 的真实光标 (termCursorX, termCursorY)
         //     （上面已同步），否则光标错位(用户反馈：劫持后光标不定位到应用的编辑位置)
         //   - 不做行首覆盖，后续 VT 输出由 TUI 自己用绝对/相对定位控制
-        const bool isLineShell = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
+        //
+        // TUI-CURSOR-BUG 修复（2026-08-08 实测）：
+        // 仅凭 ECHO_INPUT 判别会把"未改输入模式的 VT 全屏 TUI"误判为行编辑 shell。
+        // 实测 python 全屏 VT 脚本 (inputMode=0x1f7 含 ECHO_INPUT, 已切 alt buffer)：
+        //   - ConHost 光标 = (44,23)，DLL 发 CUP(24;45) 后 ConPTY 光标正确 = (44,23)
+        //   - 随后行首覆盖 CUP(24;1) 把 ConPTY/WT 光标拉进左 gutter → 用户反馈的错位
+        // 补充信号：alt buffer 无滚动历史 ⇒ 缓冲区尺寸 == 窗口尺寸；
+        // 行编辑 shell (cmd/pwsh) 的缓冲区远高于窗口（9001 行滚动），不受影响。
+        const bool echoInput = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
+        const SHORT winW = static_cast<SHORT>(
+            snap.screenBufferInfo.srWindow.Right - snap.screenBufferInfo.srWindow.Left + 1);
+        const SHORT winH = static_cast<SHORT>(
+            snap.screenBufferInfo.srWindow.Bottom - snap.screenBufferInfo.srWindow.Top + 1);
+        const bool bufMatchesWin = snap.screenBufferInfo.dwSize.X == winW &&
+                                   snap.screenBufferInfo.dwSize.Y == winH;
+        const bool isLineShell = echoInput && !bufMatchesWin;
         if (isLineShell) {
             // 行编辑 shell：ConsoleState 光标设行首，覆盖补发的旧 prompt
             COORD lineStart{0, cursor.Y};
@@ -442,16 +581,27 @@ void EnsureLazyInitialized() {
             // 新 prompt 都从行首写入，正好覆盖补发的旧 prompt，视觉无缝。
             {
                 std::string lineStartSync = vt::CursorPosition(termCursorY + 1, 1);
-                hooks::SendToMediator(lineStartSync.data(), lineStartSync.size());
+                // recordReplay=false：该 CUP 只用于把 WT/ConPTY 光标拉到行首
+                // （覆盖旧 prompt）。ConHost 卸载重放时由 Unloader 用
+                // SetConsoleCursorPosition 归位 + 纯文本重放，CUP 视口相对行号
+                // 在 ConHost 上不可靠（落错位置 → 新 prompt 拼到旧 prompt 之后）。
+                hooks::SendToMediator(lineStartSync.data(), lineStartSync.size(),
+                                      protocol::MessageType::VtOutput,
+                                      /*recordReplay=*/false);
                 LOG_INFO("LazyInit: ConPTY cursor pulled to line start (shell prompt overwrite)");
             }
         } else {
             // 全屏 TUI：不执行行首覆盖，光标停留在上面已同步的真实位置
             // (termCursorY+1, termCursorX+1)。ConsoleState/Virtual 状态保持
             // 快照光标 (=应用自身光标)，保证 GetConsoleScreenBufferInfo 返回一致。
-            LOG_INFO("LazyInit: fullscreen TUI (inputMode=0x%lx, no ECHO_INPUT): "
-                     "cursor kept at (%d,%d), skip prompt overwrite",
-                     snap.inputMode, termCursorX, termCursorY);
+            // 注意：TUI 分支不要求"无 ECHO_INPUT"——未改输入模式的 VT 全屏程序
+            // (如 python VT 探针 inputMode=0x1f7) 也可能含 ECHO_INPUT，
+            // 判别依据是 bufMatchesWin（alt buffer 缓冲==窗口，见上注释）。
+            LOG_INFO("LazyInit: fullscreen TUI (inputMode=0x%lx, buf=%dx%d win=%dx%d, "
+                     "isLineShell=false): cursor kept at (%d,%d), skip prompt overwrite",
+                     snap.inputMode,
+                     snap.screenBufferInfo.dwSize.X, snap.screenBufferInfo.dwSize.Y,
+                     winW, winH, termCursorX, termCursorY);
         }
         } else {
             // 子进程：不重放屏幕，用 HelloAck 回传的 WT 真实光标对齐缓存
@@ -495,7 +645,9 @@ void EnsureLazyInitialized() {
     g_initialized = true;
     InterlockedExchange(&g_initInProgress, 0);
     t_inLazyInit = false;
-    LOG_INFO("LazyInit done");
+    LOG_INFO("LazyInit done (hooksInstalled=%d registered=%zu)",
+             HookManager::IsInstalled() ? 1 : 0,
+             HookManager::RegisteredCount());
 
     // Phase 10 任务1：启动后台状态轮询线程
     // LazyInit 完成后立即启动，3 秒内 100ms 高频轮询 ConHost 真实状态

@@ -17,6 +17,15 @@
 
 namespace terminjector {
 
+// ==== 快照内容范围配置 ====
+// 劫持瞬间 ConHost 缓冲内容抓取范围。
+//   true (默认): 读整个屏幕缓冲区（含滚动历史 scrollback，区域 = dwSize）
+//   false:       仅读可见窗口（srWindow），不包含历史
+// 写入源码即为最终行为，无需运行时开关；按总行数全量抓取会让 WT 获得
+// 注入前 ConHost 保有的全部历史，代价是 ReadConsoleOutputW 内存与握手
+// 阶段 VT 传输量随缓冲高增大（9001 行 × 120 列 ≈ 4.3MB CHAR_INFO）。
+static constexpr bool kCaptureFullScrollback = true;
+
 // 注入瞬间的 Console 状态快照（值类型，可拷贝）
 struct StateSnapshot {
     // 屏幕缓冲区信息（含光标位置、窗口位置、尺寸、属性）
@@ -36,9 +45,12 @@ struct StateSnapshot {
     // 窗口可见性
     BOOL  windowVisible = FALSE;
 
-    // Phase 10：可见区屏幕内容（srWindow 区域的 CHAR_INFO 矩阵）
-    // Capture() 中用 ReadConsoleOutputW 读取，握手后补发给 WT
-    // screenRegion 为 VT 输出目标区域（0-based，映射 srWindow 到 WT 的 0,0）
+    // 屏幕内容（CHAR_INFO 矩阵）
+    // 范围由 kCaptureFullScrollback 决定：
+    //   - 全量: 整个屏幕缓冲区（含滚动历史，region=dwSize）
+    //   - 可见区: 仅 srWindow
+    // Capture() 中用 ReadConsoleOutputW 读取，握手后由 LazyInit 补发给 WT
+    // screenRegion 为 VT 输出目标区域（0-based，映射抓取区域到 WT 的 (0,0)）
     std::vector<CHAR_INFO> screenCells;
     SMALL_RECT screenRegion{};
 
@@ -47,7 +59,11 @@ struct StateSnapshot {
     // Phase 10：同时读取可见区屏幕内容到 screenCells
     bool Capture();
 
-    // Phase 10：读取可见区屏幕内容（srWindow 区域）到 screenCells
+    // 读取指定 ConHost 缓冲区域到 screenCells（screenRegion 映射到 WT 的 (0,0)）
+    // 返回 false 表示读取失败（screenCells 已清空，screenRegion 未设置）
+    bool CaptureRegion(SMALL_RECT region);
+
+    // Phase 10：读取屏幕内容（全量或可见区，由 kCaptureFullScrollback 控制）
     // 在 Capture() 内部调用，也可单独调用
     void CaptureScreenContent();
 
