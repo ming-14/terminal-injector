@@ -191,7 +191,7 @@ terminal_injector.exe --unload-remote 1234 0x7ffa00000000
 
 ## 8. 自动化测试
 
-e2e 套件（107 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
+e2e 套件（108 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
 
 ```powershell
 cd tests/e2e

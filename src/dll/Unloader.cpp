@@ -442,13 +442,17 @@ void Unloader::ReplaySessionToConHost() {
     //     同时记录重放前光标：重放后若光标未动（惰性重放 = 会话无可视内容），
     //     5.5 据此把光标抬到擦除行上一行，让 KickStart 回显的 \r\n 把 cmd
     //     新 prompt 推回注入前原位（无多余空行）。
+    //
+    // 注意：preReplayCur 必须记录【归位后】的光标。此前记录归位前的值
+    // （KickStart 回车回显 \r\n 后的 (0,N+1)），而空会话重放只有 SGR
+    // （\x1b[0m，不移动光标），重放后光标 (0,N) 与记录值 (0,N+1) 不等，
+    // 惰性分支永不触发 → 每次卸载 prompt 下移一行、快照 prompt 行留空，
+    // 注入/卸载循环后统计行与 prompt 间的空行累积（用户反馈 BUG）。
     bool hasPreCur = false;
     COORD preReplayCur{0, 0};
     {
         CONSOLE_SCREEN_BUFFER_INFO now{};
         if (GetConsoleScreenBufferInfo(hOut, &now)) {
-            hasPreCur = true;
-            preReplayCur = now.dwCursorPosition;
             if (now.dwCursorPosition.Y > now.srWindow.Bottom ||
                 now.dwCursorPosition.Y < now.srWindow.Top ||
                 now.dwCursorPosition.X < now.srWindow.Left ||
@@ -461,11 +465,16 @@ void Unloader::ReplaySessionToConHost() {
                     LOG_INFO("Replay: cursor outside window (%d,%d), moved to line start (%d,%d)",
                              now.dwCursorPosition.X, now.dwCursorPosition.Y,
                              home.X, home.Y);
+                    // 归位成功后以新位置作为重放前基准
+                    now.dwCursorPosition = home;
                 } else {
                     LOG_WARN("Replay: SetConsoleCursorPosition(%d,%d) failed err=%lu",
                              home.X, home.Y, GetLastError());
                 }
             }
+            // 归位之后记录重放前光标（见 3.1 注释：惰性重放判据基准）
+            hasPreCur = true;
+            preReplayCur = now.dwCursorPosition;
         }
     }
 
