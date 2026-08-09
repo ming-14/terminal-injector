@@ -52,7 +52,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe 双模式入口
 ├── tests/
-│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 107 个测试文件）
+│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 108 个测试文件）
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
@@ -108,7 +108,7 @@ terminal_injector.exe --unload-remote <pid> <dllBase>
 
 ## 测试
 
-e2e 套件（107 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（108 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e

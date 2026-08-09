@@ -176,6 +176,10 @@ injected_dll（运行时独立编译注入）
 5. 助手等待 2s（DoUnload 线程 + Logger worker 退出、LDR 释放 ThreadBlob 后 LoadCount 降到 1）→ 重试最多 3 次远程 `FreeLibrary(dllBase)`。
 6. LDR 可能延迟卸载（模块处于 `LdrModulesReadyToUnload`）→ 触发 **LDR flush**：远程 `LoadLibraryW("kernel32.dll")` 调起 `LdrpFlushUnloadCompleteProcessing`，模块真正从模块列表消失。
 7. `DLL_PROCESS_DETACH` → MinHook 清理 → 目标进程恢复原生 Console 行为。
+8. **卸载前画面恢复**（`ReplaySessionToConHost`，详见 [Phase 22](phases/22-conhost-replay.md)）：把会话期增量 VT 流重放到 ConHost 冻结缓冲之上。关键点：
+   - 重放终点截断到最后一次 prompt 写入起点（`PromptTracker` 写-读序列语义：行编辑读入口之前的最后一次内容写入即该读的 prompt，无内容猜测）→ prompt 文本不进 ConHost；重放前确定性擦除快照 prompt 行。
+   - 光标归位后 **`preReplayCur` 记录归位后光标**（2026-08-10 修复：此前记录归位前位置，空会话 SGR 重放不移动光标 → 惰性判定恒失败 → 每轮 prompt 下移一行、空行累积，`test_blankline_accumulation` 回归覆盖）。
+   - 惰性重放（空会话，重放前后光标未动）：光标抬到擦除行上一行，KickStart 回车回显 `\r\n` 恰好把 cmd 新 prompt 推回注入前原位。
 
 ## 11. 自保护（Phase 9）
 
@@ -203,6 +207,6 @@ injected_dll（运行时独立编译注入）
 
 ## 15. 相关文档
 
-- 各 Phase 设计：[phases/00-overview.md](phases/00-overview.md) ~ [19-vt-cursor-tracker.md](phases/19-vt-cursor-tracker.md)
+- 各 Phase 设计：[phases/00-overview.md](phases/00-overview.md) ~ [22-conhost-replay.md](phases/22-conhost-replay.md)
 - 使用手册：[USAGE.md](USAGE.md)
 - 测试套件：[tests/README.md](../tests/README.md)、[tests/e2e/docs/PHASES.md](../tests/e2e/docs/PHASES.md)

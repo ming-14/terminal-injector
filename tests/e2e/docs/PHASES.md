@@ -29,7 +29,7 @@
 | 14 | 性能与稳定性 | 满屏重绘/高频输出/鼠标延迟/Logger | 4 |
 | 15 | 全量回归与收尾 | 全量跑通、README 完善、结果报告 | 汇总 |
 
-共 **103 个特性测试文件**。
+共 **108 个特性测试文件**。
 
 ---
 
@@ -435,6 +435,7 @@ if __name__ == "__main__":
 | 97 | `test_unload_clean.py` | 管道断开卸载（Phase 11） | 关闭 WT → DLL 模块消失（Toolhelp 校验）→ cmd 恢复原控制台可操作 |
 | 98 | `test_repeat_inject_unload.py` | 反复注入/卸载 10 次 | 每次注入成功、卸载后模块消失；无泄漏（句柄/进程数） |
 | 99 | `test_self_protection.py` | Attach/Free/Alloc 静默拦截（Phase 9） | 目标程序调 Alloc/Free/Attach 返回 0（被拦截）；注入状态不受影响 |
+| 100 | `test_blankline_accumulation.py` | 同进程反复注入/卸载不累积空行（2026-08-10 新增） | dir 制造滚动历史后循环注入/卸载，卸载后 prompt 上方空行数恒等于 baseline（不得逐轮 +1） |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -450,6 +451,7 @@ if __name__ == "__main__":
   - 字节断言必须限定日志来源行（输入转发日志 stdin→router 与输出 VtOutput hex 都含文本字节，只搜字节会误匹配）
   - 模块枚举用 Toolhelp TH32CS_SNAPMODULE + Module32First/NextW
   - 98 泄漏检查用"循环前快照 WT 窗口、循环后比较新增"——避免历史遗留 WT 窗口误报
+  - 100（blankline_accumulation）：必须先执行 `dir` 制造滚动历史（bug 触发条件 = prompt 行进入滚动区、光标在窗口外，重放走光标归位路径）；命令注入用 AttachConsole 后 `WriteConsoleInputW`（CONIN$ CreateFile 在部分宿主环境 PATH_NOT_FOUND，回退 GetStdHandle）；屏幕读取同（CONOUT$ → GetStdHandle）；blanks 定义 = prompt 行（csbi 光标行）上方连续空行数，baseline=1（cmd 原生空行），断言每轮 == baseline
 
 ---
 
@@ -543,6 +545,7 @@ if __name__ == "__main__":
 | LIM-005 | WT ConPTY 不输出鼠标移动事件：SendInput MOUSEEVENTF_MOVE / PostMessage WM_MOUSEMOVE / SetCursorPos 三种驱动方式实测均无效；按下期间移动不输出 FR1（MOUSE_MOVED），而是按当前按钮状态重复输出 FR0 按下事件（2026-08-05 实测：4 步移动 → 4 个重复 down，flags 恒 0x0，拖拽按下态可观测）→ MOUSE_MOVED 标志在 WT 链路不可达 | 拖拽（按住移动）→ 目标收到 down(0x1) + 拖拽重复 down + up(0x0)，无 FR1 中间移动事件 | `test_drag_move` 的 MOVED 断言（已 SKIP，改断言拖拽按下态 HOLD + 释放坐标跟踪正常，PASS） | 上游限制（WT/ConPTY），非工程 bug |
 | LIM-006 | SGR 1006 无标准横滚编码：WT 按 xterm 扩展发 `\x1b[<66/67;x;yM`，VtToInputRecord.cpp ParseMouse 仅识别 `btn&64` 为滚轮且 baseBtn=66&3=2 非 0 → 横滚右/左均译作 MOUSE_WHEELED + 0xFFFF0000（无法与垂直下滚区分，MOUSE_HWHEELED 不设置） | SendInput MOUSEEVENTF_HWHEEL ±120 → 目标收到 `ffff0000,0004` ×2 | `test_hwheel` | **已修复**（2026-08-02）：`VtToInputRecord.cpp` ParseMouse 滚轮分支识别 baseBtn 2/3（SGR 66/67）→ `MOUSE_HWHEELED` + 高字 ±1；0/1 → 垂直 `MOUSE_WHEELED`；`test_hwheel` 标志断言改为"应出现 MOUSE_HWHEELED"，PASS |
 | LBUG-001 | 长命令回车后 WT 光标被拉回折行行首（用户报告）：cmd 中输入长命令（软折行）回车后，光标先正确移动到折行下一行，随后被拉回旧行——python 子进程 LazyInit 的屏幕重放分支用 ConHost 陈旧快照光标（注入时刻 cmd 旧位置）同步 WT，覆盖 HelloAck 回传的 WT 真实光标，后续 CursorPosition 把光标拉回旧位置 | 子进程注入后 DLL 日志 `cursor synced to terminal (0,4)` 覆盖 `HelloAck ... cursor=(65,4)` | `test_child_cursor_aligned`（新增） | **已修复**（2026-08-02）：`LazyInit.cpp` 按 `isTarget` 分流——主进程（cmd）保留重放+行首覆盖；子进程跳过重放，仅用 HelloAck 的 `wtCursorX/wtCursorY` 对齐 `ConsoleState`+`VirtualConsoleState`（日志 `child cursor aligned to WT (X,Y) from HelloAck`）；`test_child_cursor_aligned` 断言 aligned 记录存在且无重放分支记录，PASS ×2 |
+| BUG-007 | 同进程反复注入/卸载后 ConHost 空行逐轮累积（用户报告）：dir 统计行与 prompt 间空行每轮 +1、prompt 逐轮下移一行。根因：`Unloader.cpp` 步骤 3.1 在光标归位**前**记录 `preReplayCur`（= KickStart 回车回显后的 `(0,N+1)`，窗口外）；空会话重放仅 `ESC[0m`（SGR 不移动光标），重放后光标 `(0,N)` ≠ `(0,N+1)` → 惰性重放分支（5.5）永不触发 → cmd 回显 `\r\n` 后新 prompt 写 N+1 行、快照 prompt 行留空 | 修复前 6 轮注入/卸载，blanks 1→2→…→7（每轮 +1，DLL 日志快照光标 97→101） | `test_blankline_accumulation`（新增） | **已修复**（2026-08-10）：`Unloader.cpp` 步骤 3.1 光标归位成功后记录归位后位置为 `preReplayCur`；修复后 6 轮 blanks 恒 = baseline（1），对照实验（旧 DLL）blanks 1→7 复现 |
 | BUG-006 | 补发（resync）序列与内容字节合并：输入/输出补发序列拼接进同一条 VtOutput 消息（len=补发+内容），且 BatchSender 会合并相邻发送，字节边界不可区分 → e2e 精确断言（`ChildVtOutput: len=3 hex[3]=61 0A 62`）被破坏 | 写前置补发/回显补发后目标输出 → 日志 len=10 而非 3 | `test_processed_output` / `test_vt_output_mode` | **已修复**（2026-08-05）：新增协议类型 `CursorSync=0x0090`（DLL→mediator，不经 BatchSender 即时发送先于内容），`ChildSession` 收到即写 stdout；内容消息字节保持原样，断言恢复，PASS（详见 `docs/phases/19-vt-cursor-tracker.md` 第 7 节） |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
