@@ -195,10 +195,30 @@ BOOL WINAPI WriteConsoleW_Detour(
     //
     // 修复：每次 WriteConsoleW 前发送 CursorPosition，强制 ConPTY 光标 = DLL 缓存，
     // 确保 ConPTY 写入位置与 DLL 预期一致。开销仅 7 字节/次，可接受。
+    //
+    // 重要：ConPTY/WT 把 CursorPosition 行号按【视口相对】解释（视口约 30 行），
+    // 而 ConsoleState 光标是 ConHost 缓冲【绝对】行号（0~9000）。长输出（如 dir
+    // 40+ 行）后绝对行号超过视口高，ConPTY 会把 CUP 行号 clamp/回卷到错误行，
+    // 后续文本覆盖到错误位置 → 内容互相插入错乱（用户反馈：dir 长输出插行、
+    // prompt 落在列表中间）。故同步行/列需 clamp 到视口尺寸内：
+    //   同步行 = min(绝对行, 视口高-1)，列同理。
+    // 顺序输出时 ConPTY 光标在缓冲写满后停在视口底部（视口高-1），clamp 后
+    // 与该位置一致；TUI 全屏程序光标本就落在视口内，clamp 不影响。
     {
         COORD cur = state.GetCursorPosition();
-        std::string cursorSync = CursorPosition(cur.Y + 1, cur.X + 1);
-        SendToMediator(cursorSync.data(), cursorSync.size());
+        const COORD viewport = VirtualConsoleState::Instance().GetLargestWindowSize();
+        SHORT rows = (viewport.Y > 0) ? viewport.Y : 30;
+        SHORT cols = (viewport.X > 0) ? viewport.X : 120;
+        SHORT syncY = (cur.Y < rows) ? cur.Y : static_cast<SHORT>(rows - 1);
+        SHORT syncX = (cur.X < cols) ? cur.X : static_cast<SHORT>(cols - 1);
+        std::string cursorSync = CursorPosition(syncY + 1, syncX + 1);
+        // recordReplay=false：该 CUP 只用于强制 ConPTY 光标=DLL 缓存（WT 侧）。
+        // 若记入卸载重放缓冲，ConHost 重放时按视口相对解释会落错位置
+        // （用户反馈：解除后 prompt 拼到命令输出末行 "或批处理文件。>"）。
+        // ConHost 重放只需文本，光标靠 \r\n 自然推进。
+        SendToMediator(cursorSync.data(), cursorSync.size(),
+                       protocol::MessageType::VtOutput,
+                       /*recordReplay=*/false);
     }
 
     // 翻译为 VT 序列并发给 mediator

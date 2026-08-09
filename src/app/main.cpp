@@ -477,7 +477,10 @@ int RunListTargets(bool json) {
                    (t.alreadyInjected ? "true" : "false") +
                    ",\"reason\":\"" +
                    (t.reason.empty() ? std::string("") : EscapeJson(t.reason)) +
-                   "\"}";
+                   "\"" +
+                   ",\"start_time\":\"" + EscapeJson(t.startTime) + "\"" +
+                   ",\"cmd_line\":\"" + EscapeJson(t.cmdLine) + "\"" +
+                   "}";
         }
         out += "]";
         std::printf("%s\n", out.c_str());

@@ -18,6 +18,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 namespace terminjector {
@@ -27,8 +28,9 @@ public:
     static VtReplayBuffer& Instance();
 
     // 追加会话 VT 字节（线程安全）
-    // 超过上限后忽略并置截断标记（保持连续前缀语义）
-    void Append(const void* data, size_t len);
+    // 返回本次追加的起始偏移（PromptTracker 用作重放截断点）；
+    // 返回 -1 表示未入缓冲（空数据 / 超过上限置截断标记，保持连续前缀语义）
+    std::int64_t Append(const void* data, size_t len);
 
     // 缓冲是否达到上限被截断（重放结果缺失尾部内容）
     bool IsTruncated() const;

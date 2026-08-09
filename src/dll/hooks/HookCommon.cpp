@@ -24,14 +24,15 @@ namespace {
 SRWLOCK g_sendLock = SRWLOCK_INIT;
 }
 
-bool SendToMediator(const void* data, size_t len, protocol::MessageType type) {
+bool SendToMediator(const void* data, size_t len, protocol::MessageType type,
+                    bool recordReplay) {
     if (data == nullptr || len == 0) return true;
 
     // Phase 10 任务5：VtOutput 走 BatchSender 攒批合并路径
     // EnqueueVtOutput 内部检查 transport 连接状态，未连接返回 false
     // BatchSender 未初始化时（LazyInit 前）走 fallback 直接 Send
     if (type == protocol::MessageType::VtOutput) {
-        return BatchSender::Instance().EnqueueVtOutput(data, len);
+        return BatchSender::Instance().EnqueueVtOutput(data, len, recordReplay);
     }
 
     // 控制消息走原路径（即时发送，不攒批）

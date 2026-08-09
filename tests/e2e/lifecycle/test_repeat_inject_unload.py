@@ -71,16 +71,100 @@ def _close_wt_and_wait_unload(pid: int) -> bool:
     return False
 
 
+class _COORD(ctypes.Structure):
+    _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+
+class _SMALL_RECT(ctypes.Structure):
+    _fields_ = [("Left", wintypes.SHORT), ("Top", wintypes.SHORT),
+                ("Right", wintypes.SHORT), ("Bottom", wintypes.SHORT)]
+
+
+class _CSI(ctypes.Structure):
+    _fields_ = [("dwSize", _COORD), ("dwCursorPosition", _COORD),
+                ("wAttributes", wintypes.WORD), ("srWindow", _SMALL_RECT),
+                ("dwMaximumWindowSize", _COORD)]
+
+
+_k = ctypes.windll.kernel32
+_k.GetConsoleScreenBufferInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_CSI)]
+_k.GetConsoleScreenBufferInfo.restype = wintypes.BOOL
+_k.ReadConsoleOutputCharacterW.argtypes = [wintypes.HANDLE, ctypes.c_wchar_p,
+                                           wintypes.DWORD, _COORD,
+                                           ctypes.POINTER(wintypes.DWORD)]
+_k.ReadConsoleOutputCharacterW.restype = wintypes.BOOL
+
+
+def read_screen_rows(pid: int):
+    """AttachConsole(pid) 逐行读整个屏幕缓冲（CONOUT$ 路径）。
+
+    空单元格为 NUL，必须每行独立读 + .value 才能拿到真实内容。
+    失败返回 None（附件失败/读失败），不抛异常。
+    """
+    _k.FreeConsole()
+    if not _k.AttachConsole(pid):
+        return None
+    h = _k.CreateFileW("CONOUT$", 0x40000000 | 0x80000000, 2, None, 3, 0, None)
+    if h in (None, -1):
+        _k.FreeConsole()
+        return None
+    try:
+        info = _CSI()
+        if not _k.GetConsoleScreenBufferInfo(h, ctypes.byref(info)):
+            return None
+        cols, rows = info.dwSize.X, info.dwSize.Y
+        result = []
+        read = wintypes.DWORD(0)
+        for r in range(rows):
+            line = ctypes.create_unicode_buffer(cols)
+            at = _COORD(0, r)
+            if not _k.ReadConsoleOutputCharacterW(h, line, cols, at, ctypes.byref(read)):
+                return None
+            result.append(line.value)
+        return result
+    finally:
+        _k.CloseHandle(h)
+        _k.FreeConsole()
+
+
+def count_prompts(rows) -> int:
+    n = 0
+    for r in rows:
+        s = r.rstrip(" \t")
+        if s and s[-1] == ">":
+            n += 1
+    return n
+
+
 def run() -> int:
     failures = 0
     existing_wts = set(injector.find_wt_windows())
+    max_prompts = 0
     for i in range(1, ROUNDS + 1):
         try:
             with TestSession() as s:
                 pid = s.target_pid
                 ok = _close_wt_and_wait_unload(pid)
                 if ok:
-                    print("  轮 {}/{}: 握手+卸载 OK (pid={})".format(i, ROUNDS, pid))
+                    # 卸载后 ConHost 屏幕必须只剩单个 prompt（旧 bug：每轮
+                    # 快照旧 prompt 残留累积成双 prompt）
+                    prompts = 1
+                    deadline = time.time() + 10.0
+                    rows = None
+                    while time.time() < deadline:
+                        rows = read_screen_rows(pid)
+                        if rows is not None:
+                            prompts = count_prompts(rows)
+                            if prompts == 1:
+                                break
+                        time.sleep(0.5)
+                    max_prompts = max(max_prompts, prompts)
+                    if prompts == 1:
+                        print("  轮 {}/{}: 握手+卸载 OK, 单 prompt (pid={})".format(i, ROUNDS, pid))
+                    else:
+                        print("  轮 {}/{}: [FAIL] 卸载后 prompt 行数={} (pid={})".format(
+                            i, ROUNDS, prompts, pid))
+                        failures += 1
                 else:
                     print("  轮 {}/{}: [FAIL] 卸载超时 (pid={})".format(i, ROUNDS, pid))
                     failures += 1
@@ -112,8 +196,8 @@ def run() -> int:
         print("  [FAIL] 残留新增 WT 窗口 {} 个: {}".format(len(new_wts), new_wts))
         failures += 1
 
-    print("\nSUMMARY: {} ({} failures)".format(
-        "PASS" if failures == 0 else "FAIL", failures))
+    print("\nSUMMARY: {} ({} failures), max prompt rows per round = {}".format(
+        "PASS" if failures == 0 else "FAIL", failures, max_prompts))
     return failures
 
 

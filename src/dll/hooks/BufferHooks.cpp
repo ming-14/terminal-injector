@@ -245,4 +245,18 @@ void RegisterBufferHooks() {
     LOG_INFO("BufferHooks registered (%zu hooks)", entries.size());
 }
 
+// ============================================================
+// 真实 API trampoline（绕过 Detour）
+// ============================================================
+// 前提：Hook 已安装（InstallAll 后 orig 非 null）。LazyInit 在 InstallAll
+// 完成后执行，此处不判空（若为 null 属 bug 应暴露，与 CursorHooks 同策略）。
+BOOL CallRealSetConsoleScreenBufferSize(HANDLE hConsoleOutput, COORD dwSize) {
+    return SetConsoleScreenBufferSize_orig(hConsoleOutput, dwSize);
+}
+
+BOOL CallRealSetConsoleWindowInfo(HANDLE hConsoleOutput, BOOL bAbsolute,
+                                  const SMALL_RECT* lpConsoleWindow) {
+    return SetConsoleWindowInfo_orig(hConsoleOutput, bAbsolute, lpConsoleWindow);
+}
+
 } // namespace terminjector::hooks

@@ -5,6 +5,7 @@
 
 #include <tlhelp32.h>
 #include <psapi.h>   // EnumProcessModulesEx / GetModuleFileNameExW
+#include <winternl.h>  // UNICODE_STRING / PROCESSINFOCLASS / NtQueryInformationProcess 类型
 #include <cwctype>
 #include <algorithm>
 #include <cstring>  // memcpy（PE 头读取，避免未对齐 reinterpret_cast）
@@ -65,6 +66,55 @@ bool ProcessImagePath(HANDLE hProcess, std::wstring& outPath) {
     }
     outPath.assign(path, len);
     return true;
+}
+
+// 取进程启动时间，格式化为本地时间字符串（如 2026-08-08 12:30:45）
+// 需 PROCESS_QUERY_LIMITED_INFORMATION
+void ProcessStartTime(HANDLE hProcess, std::wstring& outStart) {
+    outStart.clear();
+    FILETIME ct = {}, et = {}, kt = {}, ut = {};
+    if (!GetProcessTimes(hProcess, &ct, &et, &kt, &ut)) return;
+    FILETIME local = {};
+    if (!FileTimeToLocalFileTime(&ct, &local)) return;
+    SYSTEMTIME st{};
+    if (!FileTimeToSystemTime(&local, &st)) return;
+    wchar_t buf[32] = {0};
+    int n = swprintf_s(buf, L"%04u-%02u-%02u %02u:%02u:%02u",
+                       st.wYear, st.wMonth, st.wDay,
+                       st.wHour, st.wMinute, st.wSecond);
+    if (n > 0) outStart.assign(buf, static_cast<size_t>(n));
+}
+
+// 取进程启动命令行（需 PROCESS_QUERY_LIMITED_INFORMATION）
+// 用 NtQueryInformationProcess(ProcessCommandLineInformation=60) 取，兼容性最好
+// （GetProcessCommandLine 需要较新 SDK，此处避免）。返回缓冲内含 UNICODE_STRING，
+// Buffer 指向缓冲区内偏移（同块内存），可直接读取。
+void ProcessCommandLine(HANDLE hProcess, std::wstring& outCmd) {
+    outCmd.clear();
+    using NtQueryFn = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    static const NtQueryFn NtQuery = []() -> NtQueryFn {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll ? reinterpret_cast<NtQueryFn>(
+            GetProcAddress(ntdll, "NtQueryInformationProcess")) : nullptr;
+    }();
+    if (!NtQuery) return;
+
+    constexpr ULONG kCmdLineInfo = 60;  // ProcessCommandLineInformation
+    ULONG retLen = 0;
+    // 第一次取所需长度
+    NTSTATUS st = NtQuery(hProcess, static_cast<PROCESSINFOCLASS>(kCmdLineInfo),
+                          nullptr, 0, &retLen);
+    if (retLen == 0) return;
+    std::vector<BYTE> buf(retLen);
+    st = NtQuery(hProcess, static_cast<PROCESSINFOCLASS>(kCmdLineInfo),
+                 buf.data(), retLen, &retLen);
+    if (st != 0) return;
+    // 返回结构头部为 UNICODE_STRING（Length/MaximumLength/Buffer）
+    if (retLen < sizeof(UNICODE_STRING)) return;
+    auto* us = reinterpret_cast<UNICODE_STRING*>(buf.data());
+    size_t chars = us->Length / sizeof(wchar_t);
+    if (chars == 0) return;
+    outCmd.assign(us->Buffer, chars);
 }
 
 } // namespace
@@ -245,6 +295,18 @@ std::vector<InjectTargetInfo> EnumerateInjectTargets() {
             InjectTargetInfo info;
             info.pid = pid;
             info.name = pe.szExeFile;
+
+            // 启动时间 / 命令行：仅需 QUERY_LIMITED_INFORMATION，与注入权限无关，
+            // 故独立打开，确保 access_denied 进程也能显示（失败留空）
+            {
+                HANDLE hInfo = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                           FALSE, pid);
+                if (hInfo) {
+                    LocalHandleGuard infoGuard(hInfo);
+                    ProcessStartTime(hInfo, info.startTime);
+                    ProcessCommandLine(hInfo, info.cmdLine);
+                }
+            }
 
             // 1. 权限：以注入所需全套权限打开进程
             HANDLE hProc = OpenProcess(kInjectAccess, FALSE, pid);

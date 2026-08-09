@@ -17,6 +17,7 @@
 #include "BatchSender.h"
 #include "LazyInit.h"
 #include "state/VtReplayBuffer.h"
+#include "state/PromptTracker.h"
 #include "logging/Logger.h"
 #include "transport/ITransport.h"
 #include "protocol/MessageSerializer.h"
@@ -78,13 +79,23 @@ void BatchSender::Shutdown() {
     LOG_INFO("BatchSender shutdown");
 }
 
-bool BatchSender::EnqueueVtOutput(const void* data, size_t len) {
+bool BatchSender::EnqueueVtOutput(const void* data, size_t len, bool recordReplay) {
     if (data == nullptr || len == 0) return true;
 
     // Phase 22：会话 VT 重放缓冲 —— 记录所有发往 WT 的 VT 字节
     // 卸载时重放到 ConHost 恢复画面（详见 VtReplayBuffer.h）
     // 放在最前，保证正常攒批与 fallback 直发两条路径都被记录
-    VtReplayBuffer::Instance().Append(data, len);
+    // 协议查询（recordReplay=false，如 LazyInit 的 DSR/DA 校准探针）只发不收，
+    // 避免卸载重放时 ConHost 把查询当请求自答出字面 VT 文本（Phase 22 修复）
+    if (recordReplay) {
+        std::int64_t start = VtReplayBuffer::Instance().Append(data, len);
+        // 记录"本次内容写入起点"（线程局部）：行编辑读入口处作为该读的
+        // prompt 候选（写-读序列语义，见 PromptTracker.h）。
+        // 卸载重放据此截断终点，让 shell 自己重绘 prompt。
+        if (start >= 0) {
+            PromptTracker::Instance().OnOutputWrite(start);
+        }
+    }
 
     // 未初始化时（LazyInit 前 / Shutdown 后）走 fallback：直接 Send
     // 保证功能正确性，只是失去合并优化

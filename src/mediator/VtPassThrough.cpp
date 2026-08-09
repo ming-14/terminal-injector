@@ -152,9 +152,27 @@ void VtPassThrough::ForwardPipeToStdout(ITransport& transport,
                 pos += std::snprintf(hexBuf + pos, sizeof(hexBuf) - pos,
                                      "%02X ", payload[i]);
             }
-            LOG_INFO("pipe→stdout: VtOutput len=%zu written=%lu ok=%d err=%lu hex[%zu]=%s%s",
+            // 每次 VT 写入后自读 ConPTY 光标+窗口（合并进本日志行，不另起一行）。
+            // 背景（2026-08-08 TUI-CURSOR-BUG）：外部 AttachConsole 读 ConPTY
+            // 必然失败(ERROR_ACCESS_DENIED)，ConPTY 状态只能由 mediator 进程内部
+            // 自读；e2e 回归解析本行的 cursor=(X,Y) 与 ConHost 光标比对，
+            // 验证 TUI 劫持后 WT 光标落点。
+            CONSOLE_SCREEN_BUFFER_INFO csbi{};
+            char cursorInfo[96] = "cursor=NA";
+            if (GetConsoleScreenBufferInfo(hStdout, &csbi)) {
+                std::snprintf(cursorInfo, sizeof(cursorInfo),
+                              "cursor=(%d,%d) buf=%dx%d win=(%d,%d)-(%d,%d)",
+                              csbi.dwCursorPosition.X, csbi.dwCursorPosition.Y,
+                              csbi.dwSize.X, csbi.dwSize.Y,
+                              csbi.srWindow.Left, csbi.srWindow.Top,
+                              csbi.srWindow.Right, csbi.srWindow.Bottom);
+            }
+            // 注意：cursorInfo 放在 hex 之后（行尾），保证既有测试正则
+            // err=\d+ hex[\d+]= 仍可匹配（tests/e2e/line_editor 与 modes 依赖）
+            LOG_INFO("pipe→stdout: VtOutput len=%zu written=%lu ok=%d err=%lu "
+                     "hex[%zu]=%s%s %s",
                      payload.size(), written, ok, err, hexLen, hexBuf,
-                     payload.size() > kHexDumpMax ? "..." : "");
+                     payload.size() > kHexDumpMax ? "..." : "", cursorInfo);
         } else {
             // 非 VtOutput 消息：交给 handler 处理（如 ChildProcessNotify）
             if (handler) {

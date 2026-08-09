@@ -71,9 +71,13 @@ inline bool IsInputHandle(HANDLE h) {
 // 发送消息到 mediator（线程安全）
 // data/len: payload 字节
 // type: 消息类型，默认 VtOutput（VT 字节流）
+// recordReplay: 该字节是否计入卸载时 ConHost 重放缓冲
+//   VtOutput 类型下才会记录；控制类协议查询（如 DSR/DA 校准探针）传入 false，
+//   避免卸载重放时 ConHost 把查询当请求自答出字面 VT 文本（Phase 22 修复）
 // 内部封装为指定类型消息 + Serialize + ITransport::Send
 // 返回 true 成功；mediator 未连接或发送失败返回 false
 bool SendToMediator(const void* data, size_t len,
-                    protocol::MessageType type = protocol::MessageType::VtOutput);
+                    protocol::MessageType type = protocol::MessageType::VtOutput,
+                    bool recordReplay = true);
 
 } // namespace terminjector::hooks

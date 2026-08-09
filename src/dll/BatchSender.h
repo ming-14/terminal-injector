@@ -50,8 +50,11 @@ public:
 
     // 入队 VtOutput 字节，立即返回（线程安全）
     // data/len: VT 字节流（不含协议头，由 flush 时统一封装）
+    // recordReplay: 是否计入卸载时 ConHost 重放缓冲。
+    //   协议查询（如 LazyInit 的 DSR/DA 校准探针）传 false，只发不收，
+    //   避免卸载重放时 ConHost 对查询自答出字面 VT 文本（Phase 22 修复）
     // 返回 true 入队成功；transport 未连接返回 false（调用方走 pass-through）
-    bool EnqueueVtOutput(const void* data, size_t len);
+    bool EnqueueVtOutput(const void* data, size_t len, bool recordReplay = true);
 
 private:
     BatchSender() = default;
