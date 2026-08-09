@@ -9,12 +9,12 @@ verify_cursor_init.py — 验证注入后光标初始位置是否正确
   4. DLL 把 ConHost 屏幕内容补发到 mediator，mediator 写到 PTY-Agent 的 PTY
   5. PTY-Agent 屏幕快照返回实际渲染内容，验证：
      - 屏幕上能看到 cmd 版本横幅（"Microsoft Windows"）
-     - 屏幕上能看到 prompt（"C:\\Users\\rikka>"）
+      - 屏幕上能看到 prompt（形如 "<盘符>:\\Users\\<用户名>>"）
      - prompt 出现在最后一行（不是顶部第一行）
      - 光标位置应该在 prompt 末尾
 
-验证项（与 Rikka 描述的 bug 对齐）：
-  - 旧 bug：注入后 WT 显示在顶部第一行（C:\\Users\\rikka>），实际应在底部最后一行
+验证项（与描述的 bug 对齐）：
+  - 旧 bug：注入后 WT 显示在顶部第一行（prompt 在顶部），实际应在底部最后一行
   - 修复后：补发屏幕内容，让 WT 渲染出完整的 cmd 版本横幅 + prompt
 
 用法:
@@ -185,10 +185,11 @@ def verify_snapshot(snapshot, debug):
                     f"最后非空行: {last_non_empty!r}"))
 
     # 2. 检查屏幕上能看到 prompt
-    # prompt 形如 C:\Users\rikka> 或 C:\Users\rikka\Desktop\terminal-injector>
-    prompt_pattern = r"[A-Za-z]:\\Users\\rikka[^>]*>"
+    # prompt 形如 <盘符>:\Users\<用户名>> 或 <盘符>:\Users\<用户名>\Desktop\terminal-injector>
+    # 不硬编码用户名：匹配 \Users\<用户名> 开头的 prompt
+    prompt_pattern = r"[A-Za-z]:\\Users\\[^\\/>]+[^>]*>"
     has_prompt = any(re.search(prompt_pattern, ln) for ln in stripped_lines)
-    results.append(("屏幕包含 prompt(盘符:\\Users\\rikka...>)", has_prompt,
+    results.append(("屏幕包含 prompt(盘符:\\Users\\<用户名>...>)", has_prompt,
                     f"non_empty_lines={len(non_empty)}"))
 
     # 3. 检查 prompt 在最后一行（不是顶部第一行）

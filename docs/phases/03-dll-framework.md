@@ -89,7 +89,8 @@ void EnsureLazyInitialized() {
         return;
     }
 
-    Logger::Initialize(L"C:\\temp\\injected.log", LogLevel::Debug);
+    // 日志目录：TI_INJECTED_LOG_DIR 优先，否则 GetTempPathW()（不硬编码固定路径）
+    Logger::Initialize(GetInjectedLogDir() + L"\\injected.log", LogLevel::Debug);
     LOG_INFO("LazyInit starting, pid=%u", GetCurrentProcessId());
 
     // 1. 读取注入瞬间状态快照（此时真实 Console 还未被 Hook 拦截）

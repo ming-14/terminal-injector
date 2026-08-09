@@ -58,7 +58,7 @@ bool g_isTargetProcess = false;
 thread_local bool t_inLazyInit = false;
 
 // 注入日志目录：优先 TI_INJECTED_LOG_DIR（测试/诊断覆盖），否则 GetTempPathW()
-// （系统标准临时目录，无 C:\temp 硬编码，部署到任意机器可用）
+// （系统标准临时目录，不硬编码任何固定路径，部署到任意机器可用）
 std::wstring GetInjectedLogDir() {
     wchar_t envBuf[MAX_PATH] = {0};
     const DWORD n = GetEnvironmentVariableW(L"TI_INJECTED_LOG_DIR", envBuf, MAX_PATH);
@@ -534,7 +534,7 @@ void EnsureLazyInitialized() {
         //
         // 背景: cmd 被 KickStart 唤醒后从 GetConsoleScreenBufferInfo 读到的在行首位置
         //       开始输出新 prompt。若光标保持在 prompt 末尾 (cursor.X, cursor.Y)，新 prompt
-        //       会接在旧 prompt 之后，造成视觉上 prompt 重复:C:\Users\rikka>C:\>...
+        //       会接在旧 prompt 之后，造成视觉上 prompt 重复: <旧prompt><新prompt>...
         //       把 ConsoleState 光标设为行首 (0, cursor.Y) 后:
         //   - WriteConsoleW_Detour 输出前会发 CursorPosition(0, cursor.Y) 同步 WT 光标
         //   - cmd 写新 prompt 字符时从行首开始，正好覆盖补发的旧 prompt
@@ -576,7 +576,7 @@ void EnsureLazyInitialized() {
             // 不发送前置 CursorPosition（避免污染 TUI 程序的 VT）。
             // ConPTY 光标仍停在上面同步的旧 prompt 末尾 (cursor.X, cursor.Y)，
             // cmd 被 KillStart 唤醒后输出的新 prompt 会被追加其后，形成
-            //   C:\...>C:\...>
+            //   <prompt><prompt>
             // 连排。此处主动把 ConPTY 光标拉到行首，使翻译/VT 直通两种模式下
             // 新 prompt 都从行首写入，正好覆盖补发的旧 prompt，视觉无缝。
             {

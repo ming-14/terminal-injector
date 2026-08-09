@@ -4,7 +4,7 @@
   1. 启动 cmd（CREATE_NEW_CONSOLE），拿 PID
   2. 直接跑 terminal_injector.exe --inject <pid> --dll <path>
   3. 捕获 injector 输出
-  4. 检查 cmd 是否加载 injected.dll（看 C:\\temp\\injected_<pid>.log）
+  4. 检查 cmd 是否加载 injected.dll（看 injected_<pid>.log，目录由 paths.injected_log_dir() 决定）
   5. 退出前不清理，保留现场供进一步调试
 """
 import os

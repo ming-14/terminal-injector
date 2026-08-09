@@ -49,7 +49,7 @@ void TabCompleter::FindWord(const std::wstring& line, size_t cursor,
 // ============================================================
 // 枚举匹配的文件/目录
 // ============================================================
-// prefix 可能含路径分隔符（如 "sub\file" 或 "C:\dir\file"）
+// prefix 可能含路径分隔符（如 "sub\file" 或 "<盘符>:\<目录>\<文件>" 形式的绝对路径）
 // 分离路径前缀和文件名前缀，在对应目录枚举
 std::vector<std::wstring> TabCompleter::EnumerateMatches(
     const std::wstring& prefix) const {

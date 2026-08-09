@@ -346,7 +346,7 @@ class SharedMemoryTransport : public ITransport {
 | opencode 满屏重绘 | 60fps 无撕裂 |
 | python 鼠标拖拽画图 | 跟手无延迟（< 50ms） |
 | vim 持续按键 1 分钟 | 无卡顿、无内存增长 |
-| `tree C:\ /f` 大量输出 | CPU < 30%，无丢失 |
+| `tree <盘符>:\ /f` 大量输出 | CPU < 30%，无丢失 |
 | 注入后 3 秒内拖动原 cmd 窗口 | WT 同步反映变化 |
 | 长时间运行（1 小时）| 无内存泄漏（用 `windows-debugging` 的 umdh 检查） |
 

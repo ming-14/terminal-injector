@@ -663,7 +663,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         // 注意：AGENTS.md 与 Phase 1 风险表强调 DllMain 不能干重活（Loader Lock）
         // Phase 2 阶段为验证注入链路，暂在 DllMain 中尝试连接
         // Phase 3 将改为懒加载（首个 Hook 触发 ConnectToMediator）
-        Logger::Initialize(L"C:\\temp\\injected.log", LogLevel::Debug);
+        // 日志目录：TI_INJECTED_LOG_DIR 优先，否则 GetTempPathW()（不硬编码固定路径）
+        Logger::Initialize(GetInjectedLogDir() + L"\\injected.log", LogLevel::Debug);
         LOG_INFO("injected.dll loaded in pid=%u", GetCurrentProcessId());
 
         // 尝试连接 mediator（Phase 2 验证用，Phase 3 移走）

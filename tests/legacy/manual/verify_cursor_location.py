@@ -166,7 +166,7 @@ def verify(cursor_data, snapshot_text):
     # PTY-Agent cursor.line 是光标所在行的文本内容
     cursor_line = cursor.get("line", "")
     cursor_on_prompt = bool(cursor_line) and re.search(
-        r"[A-Za-z]:\\Users\\rikka[^>]*>", cursor_line)
+        r"[A-Za-z]:\\Users\\[^\\/>]+[^>]*>", cursor_line)
     results.append((
         f"光标所在行是 prompt 行(row={cur_row})",
         bool(cursor_on_prompt),
@@ -193,7 +193,8 @@ def verify(cursor_data, snapshot_text):
                         f"non_empty_lines={len(non_empty)}"))
 
         # 4b. 屏幕包含 prompt
-        prompt_pattern = r"[A-Za-z]:\\Users\\rikka[^>]*>"
+        # 不硬编码用户名：匹配 \Users\<用户名> 开头的 prompt
+        prompt_pattern = r"[A-Za-z]:\\Users\\[^\\/>]+[^>]*>"
         has_prompt = any(re.search(prompt_pattern, ln) for ln in stripped_lines)
         results.append(("屏幕包含 prompt", has_prompt, ""))
 
@@ -212,7 +213,7 @@ def verify(cursor_data, snapshot_text):
             ))
 
             # 4d. 光标列号与 prompt 末尾对齐
-            # prompt 形如 "C:\Users\rikka\Desktop\terminal-injector>"
+            # prompt 形如 "<盘符>:\Users\<用户名>\Desktop\terminal-injector>"
             # 光标应在 prompt 末尾的 > 之后
             last_prompt_line = non_empty[prompt_in_nonempty] if prompt_in_nonempty >= 0 else ""
             # 计算显示宽度（ASCII 字符按 1 计）

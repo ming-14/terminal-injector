@@ -108,7 +108,7 @@ add_subdirectory(src/app)
 ```cmake
 # 配置 MSVC 14.51 工具链路径
 # cl.exe 位于 VS18 Community 下
-set(MSVC_BASE "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231")
+set(MSVC_BASE "$ENV{VCToolsInstallDir}")  # 或手动指定 MSVC 工具目录
 
 # 若 CMake 未自动检测，可手动指定：
 # set(CMAKE_C_COMPILER "${MSVC_BASE}/bin/Hostx64/x64/cl.exe")
@@ -745,7 +745,8 @@ int main(int argc, char* argv[]) {
 // Phase 3 在此实现：DisableThreadLibraryCalls + MH_Initialize + 懒加载
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        terminjector::Logger::Initialize(L"C:\\temp\\injected.log",
+        // 日志目录：TI_INJECTED_LOG_DIR 优先，否则 GetTempPathW()（不硬编码固定路径）
+        terminjector::Logger::Initialize(terminjector::GetInjectedLogDir() + L"\\injected.log",
                                          terminjector::LogLevel::Debug);
         LOG_INFO("injected.dll loaded");
     } else if (reason == DLL_PROCESS_DETACH) {

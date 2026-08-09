@@ -623,7 +623,7 @@ bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
     }
 
     // ---- Esc：清空当前输入（保留 prompt）----
-    // conhost 行为：Esc 只清除用户输入的命令，prompt（如 C:\>）保留不动
+    // conhost 行为：Esc 只清除用户输入的命令，prompt（形如 <盘符>:\>）保留不动
     // 光标移回输入起点（prompt 之后），擦除从光标到行末
     // 后退距离按显示宽度计算（CJK 字符占 2 列）
     if (vk == VK_ESCAPE) {

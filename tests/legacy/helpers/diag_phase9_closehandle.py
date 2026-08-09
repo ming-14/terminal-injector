@@ -117,8 +117,8 @@ def run_cdb(pid: int, script: str, output_path: str) -> None:
         f.write(script)
 
     # cdb -p <pid> -cf <script> -y <sympath>
-    # 符号路径：含 injected.pdb 所在目录 + 微软符号服务器
-    sympath = "srv*C:\\symbols*http://msdl.blackint3.com:88/download/symbols;{}".format(BUILD_BIN)
+    # 符号路径：paths.symbol_path()（环境变量优先）+ injected.pdb 所在目录
+    sympath = "{};{}".format(paths.symbol_path(), BUILD_BIN)
     cmd = [CDB_EXE, "-p", str(pid), "-cf", script_path, "-y", sympath]
     print("  [cdb] 命令: {}".format(" ".join(cmd)))
     with open(output_path, "w", encoding="utf-8") as out:
