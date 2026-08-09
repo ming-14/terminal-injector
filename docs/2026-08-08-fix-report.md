@@ -72,7 +72,7 @@
 |---|---|
 | cmd 卸载 10 次压测（一次性脚本，已清理） | 10/10:`prompt_cnt=1、concat=False、dir 完整(82 日期行)`,零方差 |
 | 同一 cmd 反复注入/解除 3 轮（一次性脚本，已清理） | 3/3 全 PASS,每轮 ConHost 保持干净,不累积 |
-| 深目录 `C:\Windows\System32\drivers`（一次性脚本，已清理） | 单 prompt、无拼接 |
+| 深目录 `%SystemRoot%\System32\drivers`（一次性脚本，已清理） | 单 prompt、无拼接 |
 | cmd 批处理含子进程 WT 场景 3 次（一次性脚本，已清理） | 3/3:batch 输出经 VT passthrough 拦截到 WT,会话期不进 ConHost,卸载后完整回放 |
 | python WT 场景（一次性脚本，已清理） | python 输出经翻译路径拦截(PROBE=60),卸载后回放完整 |
 | WT 截图 45 行超视口（一次性脚本，已清理） | 渲染干净,行顺序正确,历史进 WT scrollback |

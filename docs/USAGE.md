@@ -80,7 +80,7 @@ terminal_injector.exe --help
 terminal_injector.exe --inject 1234
 
 # 指定 DLL 路径 / 指定管道名
-terminal_injector.exe --inject 1234 --dll "C:\tools\injected.dll" --pipe mypipe
+terminal_injector.exe --inject 1234 --dll "<path>\injected.dll" --pipe mypipe
 ```
 
 - 注入成功后 DLL 在目标进程内等待连接管道服务端（mediator）。

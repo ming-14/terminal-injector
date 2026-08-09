@@ -327,7 +327,7 @@ Phase 3 (DLL框架) ──► 首次端到端验证：WriteConsoleW 劫持 cmd �
 
 ### 6.1 编译工具链
 
-- **编译器**：MSVC 14.51（cl.exe 路径：`C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin`）
+- **编译器**：MSVC 14.51（cl.exe 路径由 CMake 自动检测，或取自 `%VCToolsInstallDir%`）
 - **构建系统**：CMake ≥ 3.20
 - **目标架构**：x64（Phase 1 仅编 x64，后续如需 x86 再扩展）
 - **C++ 标准**：C++17

@@ -25,7 +25,7 @@
   ```
 - 项目根目录解析：默认取 `tests/e2e` 的上上级；可用环境变量覆盖
   ```powershell
-  $env:TI_PROJECT_ROOT = "C:\path\to\terminal-injector"
+  $env:TI_PROJECT_ROOT = "<项目根绝对路径>"
   ```
 - 测试期间**不要手动操作 WT 窗口/鼠标**（SendInput 驱动会被干扰）
 

@@ -329,7 +329,7 @@ void RegisterOutputHooks() {
 
 ### 5.2 性能验证
 
-- `tree C:\Windows /f` 满屏输出：WT 无明显延迟（< 1s 完成）
+- `tree %SystemRoot% /f` 满屏输出：WT 无明显延迟（< 1s 完成）
 - `for /L %i in (1,1,1000) do echo %i`：1000 行输出流畅
 - CPU 占用：< 20%（DLL 翻译开销）
 

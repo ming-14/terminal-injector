@@ -64,8 +64,8 @@ def run() -> int:
                 else:
                     print("  [FAIL] set65001: ok={} get={}（期望 1/65001）".format(ok2, cp2))
                     failures += 1
-                # 注: CpChange 的 ModeHooks 日志写入 C:\\temp\\injected_<pid>.log
-                # （DLL 进程私有日志），mediator 日志不可见，不在此断言
+                # 注: CpChange 的 ModeHooks 日志写入 injected_<pid>.log
+                # （目录由 TI_INJECTED_LOG_DIR / GetTempPath 决定，DLL 进程私有日志），mediator 日志不可见，不在此断言
     except RuntimeError as e:
         print("  [FAIL] setup 失败: {}".format(e))
         failures += 1

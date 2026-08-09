@@ -1,16 +1,17 @@
-$TOOLS = "c:\Users\rikka\Desktop\terminal-injector\.agents\skills\windows-debugging\10.0.19041.5609"
-$SYMSRV = "srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols"
-$IMGPATH = "c:\Users\rikka\Desktop\terminal-injector\build\bin\Release"
-$OUT = "c:\Users\rikka\Desktop\terminal-injector\tests\helpers\cdb_dlls_out.txt"
-$cdb = Join-Path $TOOLS "cdb.exe"
+﻿# 统计 injected.dll 在目标进程中的引用计数（cdb !dlls）。
+# 路径解析见 paths.ps1（环境变量优先，不硬编码）。
+. "$PSScriptRoot\paths.ps1"
+
+$pid_target = 7360
+$logo = Join-Path $LegacyOutDir "cdb_dlls_out.txt"
 $cmdArgs = @(
-    "-p", "7360",
-    "-y", "$SYMSRV;$IMGPATH",
-    "-i", $IMGPATH,
-    "-logo", $OUT,
-    "-c", ".symfix srv*e:\Symbol*http://msdl.blackint3.com:88/download/symbols; .reload /f ntdll.dll; !dlls -c:injected.dll; qd"
+    "-p", "$pid_target",
+    "-y", "$SymbolPath;$BuildBin",
+    "-i", $BuildBin,
+    "-logo", $logo,
+    "-c", ".symfix $SymbolPath; .reload /f ntdll.dll; !dlls -c:injected.dll; qd"
 )
-Write-Host "Running: $cdb $cmdArgs"
-$ret = & $cdb @cmdArgs
+Write-Host "Running: $CdbExe $cmdArgs"
+$ret = & $CdbExe @cmdArgs
 Write-Host "exit: $LASTEXITCODE"
 $ret | Select-Object -Last 30
