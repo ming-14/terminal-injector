@@ -19,13 +19,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from helpers import injector
 from helpers import input_sim
+import paths
 
 
 # Python 测试脚本路径（相对于 PROJECT_ROOT）
 WIDTH_TEST_SCRIPT = os.path.join("tests", "phase17_width_test.py")
 
-# 结果文件路径（与测试脚本约定）
-RESULT_FILE = os.path.join(os.path.expanduser("~"), "Desktop", "terminal-injector", "logs", "width_test_result.txt")
+# 结果文件路径（与 phase17_width_test.py 约定：paths.out_dir()，环境变量优先）
+RESULT_FILE = os.path.join(paths.out_dir(), "width_test_result.txt")
 
 
 def wait_for_result(key: str, timeout: float = 20.0) -> str:

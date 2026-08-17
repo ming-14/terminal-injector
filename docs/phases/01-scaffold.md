@@ -103,18 +103,16 @@ add_subdirectory(src/app)
 
 #### 4.1.2 `cmake/MSVCSetup.cmake`
 
-配置 cl.exe 路径（AGENTS.md 指定）：
+配置 cl.exe 路径（不硬编码本机路径，vswhere 探测 + CACHE 覆盖）：
 
 ```cmake
-# 配置 MSVC 14.51 工具链路径
-# cl.exe 位于 VS18 Community 下
-set(MSVC_BASE "$ENV{VCToolsInstallDir}")  # 或手动指定 MSVC 工具目录
-
-# 若 CMake 未自动检测，可手动指定：
-# set(CMAKE_C_COMPILER "${MSVC_BASE}/bin/Hostx64/x64/cl.exe")
-# set(CMAKE_CXX_COMPILER "${MSVC_BASE}/bin/Hostx64/x64/cl.exe")
-
-message(STATUS "MSVC base: ${MSVC_BASE}")
+# 优先用 -DTERMINJECTOR_MSVC_BASE=... 显式指定；
+# 未指定时 vswhere 探测 VS 安装目录，取 VC/Tools/MSVC 下最新版本
+set(TERMINJECTOR_MSVC_BASE "" CACHE PATH "MSVC 工具链根目录（留空时自动 vswhere 探测）")
+# 探测: vswhere -latest -products "*" -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+#       -property installationPath → <vsroot>/VC/Tools/MSVC/<最新版本>
+# 校验: 存在 <base>/bin/Hostx64/x64/cl.exe，否则 WARNING 提示手动指定
+message(STATUS "MSVC base: ${TERMINJECTOR_MSVC_BASE}")
 ```
 
 #### 4.1.3 `cmake/CompilerFlags.cmake`
