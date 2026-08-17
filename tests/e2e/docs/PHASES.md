@@ -25,11 +25,11 @@
 | 10 | 代码页 | ConsoleCP/OutputCP/UTF-8 | 3 |
 | 11 | 字符宽度 | ASCII/CJK/Emoji/混合 | 4 |
 | 12 | 滚动缓冲区 | 回滚行数/用户高度/模式切换重置 | 3 |
-| 13 | 注入生命周期 | 握手/子进程注入/卸载/反复注入/自保护 | 5 |
+| 13 | 注入生命周期 | 握手/子进程注入/卸载/反复注入/自保护/管道安全/枚举 | 9 |
 | 14 | 性能与稳定性 | 满屏重绘/高频输出/鼠标延迟/Logger | 4 |
 | 15 | 全量回归与收尾 | 全量跑通、README 完善、结果报告 | 汇总 |
 
-共 **108 个特性测试文件**。
+共 **109 个特性测试文件**。
 
 ---
 
@@ -426,7 +426,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 13：注入生命周期（5 文件，`lifecycle/`）
+# Phase 13：注入生命周期（9 文件，`lifecycle/`）
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
@@ -436,6 +436,9 @@ if __name__ == "__main__":
 | 98 | `test_repeat_inject_unload.py` | 反复注入/卸载 10 次 | 每次注入成功、卸载后模块消失；无泄漏（句柄/进程数） |
 | 99 | `test_self_protection.py` | Attach/Free/Alloc 静默拦截（Phase 9） | 目标程序调 Alloc/Free/Attach 返回 0（被拦截）；注入状态不受影响 |
 | 100 | `test_blankline_accumulation.py` | 同进程反复注入/卸载不累积空行（2026-08-10 新增） | dir 制造滚动历史后循环注入/卸载，卸载后 prompt 上方空行数恒等于 baseline（不得逐轮 +1） |
+| 101 | `test_child_cursor_aligned.py` | 子进程注入光标对齐 HelloAck（BUG-001 回归，2026-08-02 新增） | 子进程 DLL 日志含 `child cursor aligned to WT (X,Y) from HelloAck`，且无 LazyInit 重放分支记录 |
+| 102 | `test_pipe_security.py` | 管道安全（HIGH #2） | 随机管道名 `\\.\pipe\terminjector_<pid>_<hex>` 每会话不同；server DACL 收紧；DLL 日志 `server identity verified`；预创建旧固定管道名不影响注入 |
+| 103 | `test_list_targets.py` | `--list-targets` 进程枚举（2026-08-17 新增） | 默认仅可注入（STATUS 全为 injectable）；`--all` 附带原因标记（access_denied 等）；`--json` 合法且仅含 injectable=true；当前测试进程在可注入列表 |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -446,6 +449,9 @@ if __name__ == "__main__":
   - 97 `unload_clean`：WM_CLOSE 关 WT → 10s 内 injected.dll 从 cmd 模块消失（Toolhelp）+ cmd 存活
   - 98 `repeat_inject_unload`：10 轮握手+卸载全 OK，无 terminal_injector 残留、无新增 WT 窗口（快照式比较）
   - 99 `self_protection`：AllocConsole=FALSE/err8、AttachConsole=FALSE/err5、FreeConsole=TRUE，调用后 DLL 缓存仍命中
+  - 101 `child_cursor_aligned`：子进程 DLL 日志含 `child cursor aligned to WT (X,Y) from HelloAck`，且无 LazyInit 重放分支记录
+  - 102 `pipe_security`：随机管道名每会话不同；DLL 日志 `server identity verified`；旧固定管道名伪服务器不抢占
+  - 103 `list_targets`：默认输出全部为 injectable；`--all` 含非 injectable 行且带原因；`--json` 合法且全部 injectable=true；当前测试进程在列表
 - 备注（测试经验）：
   - cmd（主进程）输出走 VtPassThrough `pipe→stdout: VtOutput`；子进程（python）输出走 `ChildVtOutput`——断言方向要区分
   - 字节断言必须限定日志来源行（输入转发日志 stdin→router 与输出 VtOutput hex 都含文本字节，只搜字节会误匹配）
@@ -459,28 +465,28 @@ if __name__ == "__main__":
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
-| 100 | `test_full_screen_redraw.py` | 满屏重绘 60fps | 20 帧满屏 WriteConsoleOutputW 全部成功，总耗时 < 20×50ms（单帧 50ms 容差），无撕裂（日志输出字节 >= 单帧格数） |
-| 101 | `test_high_freq_output.py` | 高频输出（cat 大文件） | 5MB 输出完成且内容完整（目标侧 sha256 + 驱动侧字节数精确比对）；无卡死 |
-| 102 | `test_mouse_latency.py` | 鼠标端到端延迟 <50ms | 50 次采样点击到目标读到的时间差 P95 < 50ms（GetTickCount64 双端时间戳） |
-| 103 | `test_logger_stability.py` | Logger 双路无死锁 | 高频写日志 200 次线程不卡死；子进程 DLL 日志持续增长、行数 >= 调用次数 |
+| 104 | `test_full_screen_redraw.py` | 满屏重绘 60fps | 20 帧满屏 WriteConsoleOutputW 全部成功，总耗时 < 20×50ms（单帧 50ms 容差），无撕裂（日志输出字节 >= 单帧格数） |
+| 105 | `test_high_freq_output.py` | 高频输出（cat 大文件） | 5MB 输出完成且内容完整（目标侧 sha256 + 驱动侧字节数精确比对）；无卡死 |
+| 106 | `test_mouse_latency.py` | 鼠标端到端延迟 <50ms | 50 次采样点击到目标读到的时间差 P95 < 50ms（GetTickCount64 双端时间戳） |
+| 107 | `test_logger_stability.py` | Logger 双路无死锁 | 高频写日志 200 次线程不卡死；子进程 DLL 日志持续增长、行数 >= 调用次数 |
 
 ## 验证标准
-- [x] 102：50 次采样 P95 < 50ms（实测 P95=47ms 稳定 ×4，平均 ~36ms；50ms 为
+- [x] 106：50 次采样 P95 < 50ms（实测 P95=47ms 稳定 ×4，平均 ~36ms；50ms 为
   WT 输入节流下留余量的阈值）
-- [x] 101：输出哈希与源文件一致（经 DLL 链路无截断）
-- [x] 100：20 帧满屏（120x30=3600 格）实测 31ms，单帧平均 1.6ms（远超 60fps）
-- [x] 103：200 次调用全部成功，DLL 日志增长 ~16KB / 1200+ 行，worker 持续写入
+- [x] 105：输出哈希与源文件一致（经 DLL 链路无截断）
+- [x] 104：20 帧满屏（120x30=3600 格）实测 31ms，单帧平均 1.6ms（远超 60fps）
+- [x] 107：200 次调用全部成功，DLL 日志增长 ~16KB / 1200+ 行，worker 持续写入
 - 备注（2026-08-05，测试经验/工程行为）：
-  - 101：mediator 日志 hex 字段只记前 256 字节/包（Mediator.cpp WriteChildVtOutput），
+  - 105：mediator 日志 hex 字段只记前 256 字节/包（Mediator.cpp WriteChildVtOutput），
     5MB 内容无法从日志全量重建 → 完整性 = ChildVtOutput len 总和精确比对
     （实测 5MB 474ms、62 包、补发字节仅 637B）+ 内容头标记在 hex 流中；
     目标 DONE 后 BatchSender 仍可能未 flush 最后一批（进程退出时 Shutdown 最终
     flush），驱动须轮询等待 len 总和达标再断言，否则偶发少 ~130KB
-  - 102：测量点必须紧贴 SendInput down 发送——`input_sim.mouse_click` 内部
+  - 106：测量点必须紧贴 SendInput down 发送——`input_sim.mouse_click` 内部
     move sleep 50ms 会在测量中引入固定偏差（实测 110ms 假延迟）；预热点击的
     down 会被目标计入样本导致配对错位，目标须先 rec FIRST 对齐再开始计数；
     P95=47ms 每轮完全一致，为 WT 鼠标输入固定节流
-  - 103：子进程 DLL 日志定位 = 会话开始前 glob 快照，新增文件即子进程日志
+  - 107：子进程 DLL 日志定位 = 会话开始前 glob 快照，新增文件即子进程日志
     （injected_<pid>_<ts>.log）；200 次调用实测增长 ~16KB（紧凑日志格式）
 
 ---

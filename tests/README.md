@@ -34,7 +34,7 @@
 在 `tests/e2e/` 目录下执行：
 
 ```powershell
-python run_all.py                        # 全量回归（108 个测试）
+python run_all.py                        # 全量回归（109 个测试）
 python run_all.py --list                 # 列出全部测试文件
 python run_all.py --cat mouse            # 运行指定类别（vt_output / keyboard / mouse / lifecycle ...）
 python run_all.py --phase 8              # 按 PHASES.md 阶段运行（0-15）

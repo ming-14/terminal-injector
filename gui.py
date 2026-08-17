@@ -1,6 +1,7 @@
 # gui.py — terminal-injector 图形化管理界面
 # 功能:
-#   - 列出可注入/拒绝进程(调用 --list-targets --json),支持过滤与自动刷新
+#   - 列出进程(调用 --list-targets --json --all 取全量,再按'仅显示可注入'过滤),
+#     支持过滤与自动刷新
 #   - 一键注入选中进程(--inject,可选管道名),远程卸载(--unload-remote)
 #   - 卸载所需的 injected.dll 基址用 ctypes 查询目标进程模块,无需手工输入
 #   - 实时日志面板(时间戳+着色)、状态栏(版本/路径/选中进程)
@@ -390,8 +391,9 @@ class InjectorGui(tk.Tk):
         self._run_refresh(self._fetch_targets, self._on_targets)
 
     def _fetch_targets(self):
+        # --all 取全量（含不可注入及原因），'仅显示可注入'过滤在 _render_table 做
         res = subprocess.run(
-            [str(self.exe_path), "--list-targets", "--json"],
+            [str(self.exe_path), "--list-targets", "--json", "--all"],
             capture_output=True, timeout=30,
             creationflags=subprocess.CREATE_NO_WINDOW)
         if res.returncode != 0:
