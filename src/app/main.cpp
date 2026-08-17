@@ -9,6 +9,8 @@
 //   terminal-injector.exe --unload-remote <pid> <dllBase>
 //       远程卸载助手（Phase 11）：在目标进程创建远程线程调 FreeLibrary(dllBase)
 //       由 injected.dll 的 Unloader 在 DoUnload 末尾启动，独立于 WT 生命周期
+//   terminal-injector.exe --list-targets [--json] [--all]
+//       列出进程：默认仅可注入的，--all 附带不可注入进程及原因
 //   terminal-injector.exe --version
 //   terminal-injector.exe --help
 //
@@ -40,6 +42,7 @@ struct CliArgs {
     std::wstring pipeName;   // 空则按模式生成随机名（防可预测抢占）
     uint32_t     mediatorPid = 0;  // --mediator-pid：DLL 服务端身份校验目标
     bool         json = false;     // --list-targets 输出 JSON 格式
+    bool         all = false;      // --list-targets 列出全部进程（含不可注入及原因）
 
     bool valid = false;
 };
@@ -80,8 +83,8 @@ static void PrintHelp() {
         "      中介模式（由 WT 启动），自动 fork 注入器并桥接 DLL 与 WT\n"
         "  terminal-injector.exe --unload-remote <pid> <dllBase>\n"
         "      远程卸载助手（Phase 11）：在目标进程创建远程线程调 FreeLibrary\n"
-        "  terminal-injector.exe --list-targets [--json]\n"
-        "      列出可注入的进程（权限 + x64 + 控制台程序），附原因标记\n"
+        "  terminal-injector.exe --list-targets [--json] [--all]\n"
+        "      列出进程（默认仅可注入的；--all 附带不可注入进程及原因）\n"
         "  terminal-injector.exe --version\n"
         "  terminal-injector.exe --help\n\n"
         "参数:\n"
@@ -93,6 +96,7 @@ static void PrintHelp() {
         "  --mediator-pid <pid>  管道服务端进程 PID（DLL 连接后校验身份，0=跳过）\n"
         "  --list-targets        列出可注入进程：PID + 进程名 + 状态\n"
         "  --json                与 --list-targets 搭配，输出 JSON 数组\n"
+        "  --all                 与 --list-targets 搭配，同时列出不可注入进程及原因\n"
         "  --unload-remote <pid> <dllBase>\n"
         "                        远程卸载模式：远程 FreeLibrary(dllBase)\n"
         "  --version             显示版本号\n"
@@ -120,6 +124,8 @@ static CliArgs ParseArgs(int argc, char* argv[]) {
             args.mode = CliArgs::Mode::ListTargets;
         } else if (a == "--json") {
             args.json = true;
+        } else if (a == "--all") {
+            args.all = true;
         } else if (a == "--unload-remote" && i + 2 < argc) {
             // --unload-remote <pid> <dllBase>
             // 由 injected.dll 的 Unloader 启动，独立于 WT 生命周期
@@ -455,17 +461,22 @@ const wchar_t* StatusText(const ProcessHelper::InjectTargetInfo& info) {
     return info.reason.c_str();
 }
 
-int RunListTargets(bool json) {
+int RunListTargets(bool json, bool all) {
     // 提升 SeDebugPrivilege：管理员运行时能判定更多进程（失败不阻塞，
     // 同权限进程不受影响；权限不足的系统进程显示 access_denied）
     ProcessHelper::EnableDebugPrivilege();
 
     auto targets = ProcessHelper::EnumerateInjectTargets();
+    // 默认只保留可注入项；--all 输出全部（含不可注入及原因）
+    std::vector<ProcessHelper::InjectTargetInfo> filtered;
+    for (const auto& t : targets) {
+        if (all || t.injectable) filtered.push_back(t);
+    }
 
     if (json) {
         std::string out = "[";
         bool first = true;
-        for (const auto& t : targets) {
+        for (const auto& t : filtered) {
             if (!first) out += ",";
             first = false;
             out += "{\"pid\":" + std::to_string(t.pid) +
@@ -490,7 +501,7 @@ int RunListTargets(bool json) {
     // 文本输出：可注入在前，其后按 PID 升序
     std::vector<ProcessHelper::InjectTargetInfo> injectable;
     std::vector<ProcessHelper::InjectTargetInfo> others;
-    for (const auto& t : targets) {
+    for (const auto& t : filtered) {
         if (t.injectable) injectable.push_back(t);
         else others.push_back(t);
     }
@@ -603,8 +614,9 @@ static int Run(int argc, char* argv[]) {
             break;
         }
         case CliArgs::Mode::ListTargets: {
-            LOG_INFO("Mode=ListTargets json=%d", args.json ? 1 : 0);
-            ret = RunListTargets(args.json);
+            LOG_INFO("Mode=ListTargets json=%d all=%d", args.json ? 1 : 0,
+                     args.all ? 1 : 0);
+            ret = RunListTargets(args.json, args.all);
             break;
         }
         case CliArgs::Mode::Help:

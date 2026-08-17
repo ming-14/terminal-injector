@@ -52,7 +52,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe 双模式入口
 ├── tests/
-│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 108 个测试文件）
+│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 109 个测试文件）
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
@@ -94,6 +94,9 @@ terminal_injector.exe --mediator --target-pid <pid>
 
 # 4. 远程卸载（管道断开后由 DLL 自动调用，也可手动）
 terminal_injector.exe --unload-remote <pid> <dllBase>
+
+# 5. 列出可注入进程（默认仅可注入项；加 --all 附原因）
+terminal_injector.exe --list-targets [--json] [--all]
 ```
 
 | 参数 | 说明 |
@@ -103,12 +106,13 @@ terminal_injector.exe --unload-remote <pid> <dllBase>
 | `--dll <path>` | injected.dll 路径（默认 exe 同目录） |
 | `--pipe <name>` | 自定义管道名 |
 | `--unload-remote <pid> <dllBase>` | 远程卸载助手：远程线程 FreeLibrary |
+| `--list-targets` | 列出可注入进程（权限 + x64 + 控制台判定），`--json` 输出 JSON，`--all` 附带不可注入原因 |
 
 关闭 WT Tab 后：管道断开 → DLL 自动解除全部 Hook → 目标进程恢复原生控制台行为（干净卸载，不污染进程）。
 
 ## 测试
 
-e2e 套件（108 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（109 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e
@@ -134,4 +138,3 @@ python run_all.py --phase 6          # 按 PHASES.md 阶段运行
 ## 已知限制
 
 - 用户态劫持存在天然天花板（约 5% 行为与内核 ConPTY 有差异），典型差异已由测试标注（如 `ENABLE_WRAP_AT_EOL` 在 ConPTY 下不被尊重，测试按 ConPTY 实际语义断言）
-- 中文输入法激活时 SendInput 注入的组合键可能被输入法吞掉（测试已自动禁用目标窗口 IME）

@@ -47,6 +47,7 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 ```
 terminal_injector.exe --inject <pid> [--dll <path>] [--pipe <name>] [--mediator-pid <pid>]
 terminal_injector.exe --mediator --target-pid <pid> [--pipe <name>] [--dll <path>]
+terminal_injector.exe --list-targets [--json] [--all]
 terminal_injector.exe --unload-remote <pid> <dllBase>
 terminal_injector.exe --version
 terminal_injector.exe --help
@@ -60,6 +61,9 @@ terminal_injector.exe --help
 | `--dll <path>` | injected.dll 路径，默认取 exe 同目录的 `injected.dll` |
 | `--pipe <name>` | 命名管道名；缺省自动生成随机名 `\\.\pipe\terminjector_<pid>_<hex>`（防同会话进程可预测抢占） |
 | `--mediator-pid <pid>` | 期望的管道服务端进程 PID；DLL 连接后校验身份，不匹配则拒绝（0=跳过校验） |
+| `--list-targets` | 列出可注入进程（权限 + x64 + 控制台程序判定） |
+| `--json` | 与 `--list-targets` 搭配，输出 JSON 数组（pid/name/injectable/x64/console/already_injected/reason/start_time/cmd_line） |
+| `--all` | 与 `--list-targets` 搭配，同时列出不可注入进程（附原因：access_denied / not_x64 / not_console） |
 | `--unload-remote <pid> <dllBase>` | 远程卸载助手：在目标进程创建远程线程调 `FreeLibrary(dllBase)`（dllBase 支持 10/16 进制） |
 | `--version` | 显示版本号 |
 | `--help`, `-h` | 显示帮助 |
@@ -124,6 +128,21 @@ terminal_injector.exe --unload-remote 1234 0x7ffa00000000
 - 由 DLL 的 Unloader 在管道断开时自动启动，一般**无需手动调用**。
 - 原理：远程线程调 `FreeLibrary` 使 LoadCount 归 0，触发 `DLL_PROCESS_DETACH` 清理全部 Hook；配合 LDR flush（远程 `LoadLibraryW("kernel32.dll")`）强制卸载待清理模块。
 - 日志写独立文件 `terminal-injector-unload.log`（避免与下一轮 mediator 并发互抢句柄）。
+
+### 4.4 列出可注入进程（`--list-targets`）
+
+```powershell
+# 默认只列出可注入进程（PID + 进程名 + 状态）
+terminal_injector.exe --list-targets
+# 附带不可注入进程及原因（access_denied / not_x64 / not_console）
+terminal_injector.exe --list-targets --all
+# JSON 输出（供脚本化使用，默认同样只含可注入项）
+terminal_injector.exe --list-targets --json
+```
+
+- 判定顺序：权限（OpenProcess 注入权限）→ x64 → PE Subsystem=CUI（控制台程序），任一不满足即标原因。
+- 可注入项额外标记 `injectable (already injected)`（已注入过 injected.dll）与启动时间/命令行（`--json` 全字段）。
+- 运行时会尝试提升 `SeDebugPrivilege`：管理员下能判定更多进程，否则系统进程显示 `access_denied`。
 
 ---
 
@@ -191,7 +210,7 @@ terminal_injector.exe --unload-remote 1234 0x7ffa00000000
 
 ## 8. 自动化测试
 
-e2e 套件（108 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
+e2e 套件（109 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
 
 ```powershell
 cd tests/e2e
