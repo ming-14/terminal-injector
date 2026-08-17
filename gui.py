@@ -7,12 +7,15 @@
 #   - 实时日志面板(时间戳+着色)、状态栏(版本/路径/选中进程)
 # 布局:terminal_injector.exe 与 injected.dll 须与本文件同目录
 # 依赖:仅 Python 标准库(tkinter / ctypes / subprocess / json)
+# i18n:界面文本按系统 UI 语言自动切换(中文/英文),不提供手动切换
 
 import ctypes
 import json
+import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import tkinter as tk
 import uuid
@@ -28,17 +31,229 @@ PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 LIST_MODULES_ALL = 0x03
 
-# 拒绝原因 -> 界面显示文本
+# ============================================================
+# i18n:按系统 UI 主语言自动选择词典(中文/英文)
+# ============================================================
+
+def _detect_lang() -> str:
+    """检测系统 UI 语言主语言:中文(简/繁) -> 'zh',其余 -> 'en'"""
+    try:
+        lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+        # LANGID 低 10 位为主语言;LANG_CHINESE = 0x04
+        if (lang_id & 0x3FF) == 0x04:
+            return "zh"
+    except Exception:  # noqa: BLE001 - 检测失败退回英文
+        pass
+    return "en"
+
+
+_LANG = _detect_lang()
+
+_STR = {
+    "zh": {
+        # 窗口/通用
+        "title": "terminal-injector 管理工具",
+        "status_ready": "就绪",
+        "status_busy": "任务进行中...",
+        "task_running": "已有任务进行中,忽略新请求",
+        "fail": "失败: {}",
+        "op_failed": "操作失败",
+        # 启动校验
+        "missing_files": "缺少文件",
+        "missing_files_msg": "未找到: {}\n请确保 {} 与 {} 与 gui.py 同目录。",
+        # 菜单
+        "m_file": "文件", "m_exit": "退出",
+        "m_op": "操作", "m_refresh": "刷新列表",
+        "m_inject_sel": "注入选中进程", "m_in_wt": "在 WT 中使用",
+        "m_unload_sel": "卸载选中进程",
+        "m_auto_refresh": "自动刷新(3 秒)",
+        "m_help": "帮助", "m_about": "关于",
+        "m_settings": "设置",
+        "m_cols_all": "全选", "m_cols_none": "全不选",
+        # 工具栏
+        "btn_refresh": "刷新", "btn_inject": "注入选中",
+        "btn_in_wt": "在 WT 中使用", "btn_unload": "卸载选中",
+        "btn_unload_all": "卸载全部已注入",
+        "chk_only_injectable": "仅显示可注入", "chk_auto_refresh": "自动刷新",
+        # 列标题
+        "col_pid": "PID", "col_name": "进程名", "col_status": "状态",
+        "col_arch": "架构", "col_console": "类型", "col_injected": "已注入",
+        "col_start_time": "启动时间", "col_cmd_line": "启动命令行",
+        "col_reason": "说明",
+        # 状态文本
+        "st_injectable": "可注入", "st_injected": "已注入",
+        "st_rejected": "不可注入",
+        "reason_access_denied": "拒绝:无权限",
+        "reason_not_x64": "拒绝:非 x64",
+        "reason_not_console": "拒绝:非控制台程序",
+        "yes": "是", "no": "否",
+        # 日志区
+        "log_label": "日志",
+        # 列表
+        "fetch_err": "--list-targets 退出码 {}: {}",
+        "targets_refreshed": "进程列表已刷新: 共 {} 项",
+        # 注入
+        "injecting": "注入: pid={pid}",
+        "inject_failed": "注入失败(退出码 {}): {}",
+        "inject_ok": "注入成功: pid={pid}\n{out}",
+        # 卸载
+        "cannot_unload": "无法卸载",
+        "not_marked_injected": "进程 {} 未标记为已注入",
+        "unload_all_title": "卸载全部",
+        "no_injected_procs": "当前没有已注入的进程",
+        "unloading": "卸载: pid={pid} dllBase=0x{base:X}",
+        "unload_failed": "卸载失败(退出码 {}): {}",
+        "unload_ok": "卸载成功: pid={pid}\n{out}",
+        "unload_one_failed": "pid={} 卸载失败: {}",
+        # WT
+        "cannot_in_wt": "无法在 WT 中使用",
+        "not_injectable_msg": "进程 {} ({}) 不可注入:\n{}",
+        "already_injected_title": "已注入",
+        "already_injected_msg": "进程 {} ({}) 已被注入。\n请先「卸载选中」再在 WT 中使用。",
+        "wt_not_found": "未找到 wt.exe(Windows Terminal)。请先安装 Windows Terminal 后重试。",
+        "wt_retry_portable": "wt 启动失败,回退自带便携版: {}",
+        "taking_over": "在 WT 中接管: {} (pid={})",
+        "wt_launched": "已启动: {} (pid={})\nWT 新 tab 将打开中介器并自动注入接管该进程。\n关闭该 tab 即结束会话。",
+        # 选择
+        "no_selection": "未选择",
+        "select_first": "请先在列表中选择一个进程",
+        "sel_info": "选中: {} (PID {})",
+        "no_sel_info": "未选中进程",
+        # 详情
+        "detail_title": "进程 {} 详情",
+        "detail_name": "进程名: {}",
+        "detail_arch": "架构: {}",
+        "detail_type_cui": "控制台(CUI)",
+        "detail_type_gui": "图形(GUI)",
+        "detail_injectable": "可注入: {}",
+        "detail_injected": "已注入: {}",
+        "detail_start": "启动时间: {}",
+        "detail_cmd": "启动命令行: {}",
+        "detail_reason": "原因: {}",
+        # 右键菜单
+        "ctx_unload": "卸载", "ctx_inject": "注入",
+        "ctx_in_wt": "在 WT 中使用", "ctx_detail": "查看详情",
+        # 关于
+        "about_title": "关于",
+        "about_version": "版本: {}", "about_unknown": "未知",
+        "about_text": "terminal-injector 管理工具\n\n"
+                      "版本: {version}\n"
+                      "exe: {exe}\n"
+                      "dll: {dll}\n\n"
+                      "功能:\n"
+                      "  - 列出可注入进程(权限 + x64 + 控制台判定)\n"
+                      "  - 一键注入,接管到 Windows Terminal\n"
+                      "  - 远程卸载(自动查询 DLL 基址)\n\n"
+                      "注入后目标进程的原控制台窗口会被隐藏,\n"
+                      "输出经由 DLL 转发给中介/终端。",
+        # find_dll_base 错误
+        "openprocess_fail": "OpenProcess({}) 失败: err={}",
+        "enummodules_fail": "EnumProcessModulesEx({}) 失败",
+        "dll_not_loaded": "进程 {} 未加载 {}(可能已卸载)",
+    },
+    "en": {
+        "title": "terminal-injector Manager",
+        "status_ready": "Ready",
+        "status_busy": "Working...",
+        "task_running": "A task is already running; request ignored",
+        "fail": "Failed: {}",
+        "op_failed": "Operation Failed",
+        "missing_files": "Missing Files",
+        "missing_files_msg": "Not found: {}\nMake sure {} and {} are in the same directory as gui.py.",
+        "m_file": "File", "m_exit": "Exit",
+        "m_op": "Actions", "m_refresh": "Refresh List",
+        "m_inject_sel": "Inject Selected", "m_in_wt": "Use in WT",
+        "m_unload_sel": "Unload Selected",
+        "m_auto_refresh": "Auto-refresh (3s)",
+        "m_help": "Help", "m_about": "About",
+        "m_settings": "Settings",
+        "m_cols_all": "Select All", "m_cols_none": "Select None",
+        "btn_refresh": "Refresh", "btn_inject": "Inject",
+        "btn_in_wt": "Use in WT", "btn_unload": "Unload",
+        "btn_unload_all": "Unload All Injected",
+        "chk_only_injectable": "Injectables only", "chk_auto_refresh": "Auto-refresh",
+        "col_pid": "PID", "col_name": "Name", "col_status": "Status",
+        "col_arch": "Arch", "col_console": "Type", "col_injected": "Injected",
+        "col_start_time": "Start Time", "col_cmd_line": "Command Line",
+        "col_reason": "Reason",
+        "st_injectable": "Injectable", "st_injected": "Injected",
+        "st_rejected": "Rejected",
+        "reason_access_denied": "Denied: no permission",
+        "reason_not_x64": "Denied: not x64",
+        "reason_not_console": "Denied: not a console app",
+        "yes": "Yes", "no": "No",
+        "log_label": "Log",
+        "fetch_err": "--list-targets exit code {}: {}",
+        "targets_refreshed": "Process list refreshed: {} entries",
+        "injecting": "Injecting: pid={pid}",
+        "inject_failed": "Injection failed (exit code {}): {}",
+        "inject_ok": "Injection succeeded: pid={pid}\n{out}",
+        "cannot_unload": "Cannot Unload",
+        "not_marked_injected": "Process {} is not marked as injected",
+        "unload_all_title": "Unload All",
+        "no_injected_procs": "No injected processes found",
+        "unloading": "Unloading: pid={pid} dllBase=0x{base:X}",
+        "unload_failed": "Unload failed (exit code {}): {}",
+        "unload_ok": "Unload succeeded: pid={pid}\n{out}",
+        "unload_one_failed": "pid={} unload failed: {}",
+        "cannot_in_wt": "Cannot Use in WT",
+        "not_injectable_msg": "Process {} ({}) is not injectable:\n{}",
+        "already_injected_title": "Already Injected",
+        "already_injected_msg": "Process {} ({}) is already injected.\nUnload it first, then use in WT.",
+        "wt_not_found": "wt.exe (Windows Terminal) not found. Install Windows Terminal and retry.",
+        "wt_retry_portable": "wt failed to start, falling back to bundled portable: {}",
+        "taking_over": "Taking over in WT: {} (pid={})",
+        "wt_launched": "Launched: {} (pid={})\nA new WT tab will open the mediator and auto-inject the process.\nClosing the tab ends the session.",
+        "no_selection": "No Selection",
+        "select_first": "Select a process from the list first",
+        "sel_info": "Selected: {} (PID {})",
+        "no_sel_info": "No process selected",
+        "detail_title": "Process {} Details",
+        "detail_name": "Name: {}",
+        "detail_arch": "Arch: {}",
+        "detail_type_cui": "Console (CUI)",
+        "detail_type_gui": "Graphical (GUI)",
+        "detail_injectable": "Injectable: {}",
+        "detail_injected": "Injected: {}",
+        "detail_start": "Start time: {}",
+        "detail_cmd": "Command line: {}",
+        "detail_reason": "Reason: {}",
+        "ctx_unload": "Unload", "ctx_inject": "Inject",
+        "ctx_in_wt": "Use in WT", "ctx_detail": "Details",
+        "about_title": "About",
+        "about_version": "Version: {}", "about_unknown": "unknown",
+        "about_text": "terminal-injector Manager\n\n"
+                      "Version: {version}\n"
+                      "exe: {exe}\n"
+                      "dll: {dll}\n\n"
+                      "Features:\n"
+                      "  - List injectable processes (permission + x64 + console check)\n"
+                      "  - One-click inject, take over into Windows Terminal\n"
+                      "  - Remote unload (DLL base auto-located)\n\n"
+                      "After injection the target's original console window is hidden;\n"
+                      "output is forwarded to the mediator/terminal via the DLL.",
+        "openprocess_fail": "OpenProcess({}) failed: err={}",
+        "enummodules_fail": "EnumProcessModulesEx({}) failed",
+        "dll_not_loaded": "Process {} has not loaded {} (possibly unloaded)",
+    },
+}
+
+
+def _t(key: str) -> str:
+    """取当前语言下界面文本(缺键返回键名本身)"""
+    return _STR.get(_LANG, _STR["en"]).get(key, key)
+
+
 REASON_TEXT = {
-    "access_denied": "拒绝:无权限",
-    "not_x64": "拒绝:非 x64",
-    "not_console": "拒绝:非控制台程序",
+    "access_denied": _t("reason_access_denied"),
+    "not_x64": _t("reason_not_x64"),
+    "not_console": _t("reason_not_console"),
 }
 
 STATUS_TEXT = {
-    "injectable": "可注入",
-    "injected": "已注入",
-    "rejected": "不可注入",
+    "injectable": _t("st_injectable"),
+    "injected": _t("st_injected"),
+    "rejected": _t("st_rejected"),
 }
 
 
@@ -75,7 +290,8 @@ def find_dll_base(pid: int) -> int:
     handle = kernel32.OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid)
     if not handle:
-        raise RuntimeError(f"OpenProcess({pid}) 失败: err={ctypes.get_last_error()}")
+        raise RuntimeError(
+            _t("openprocess_fail").format(pid, ctypes.get_last_error()))
     try:
         cb = ctypes.c_uint32(0)
         psapi.EnumProcessModulesEx(handle, None, 0, ctypes.byref(cb),
@@ -84,7 +300,7 @@ def find_dll_base(pid: int) -> int:
         buf = (ctypes.c_void_p * count)()
         if not psapi.EnumProcessModulesEx(handle, buf, cb.value,
                                           ctypes.byref(cb), LIST_MODULES_ALL):
-            raise RuntimeError(f"EnumProcessModulesEx({pid}) 失败")
+            raise RuntimeError(_t("enummodules_fail").format(pid))
         for mod in buf:
             name = ctypes.create_unicode_buffer(260)
             if psapi.GetModuleFileNameExW(handle, mod, name, 260):
@@ -92,7 +308,7 @@ def find_dll_base(pid: int) -> int:
                     # 兼容 c_void_p 对象与 int:部分 Python 版本 ctypes
                     # 数组迭代直接解包为 int,此时 mod.value 会 AttributeError
                     return int(mod)
-        raise RuntimeError(f"进程 {pid} 未加载 {DLL_NAME}(可能已卸载)")
+        raise RuntimeError(_t("dll_not_loaded").format(pid, DLL_NAME))
     finally:
         kernel32.CloseHandle(handle)
 
@@ -106,11 +322,14 @@ class InjectorGui(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("terminal-injector 管理工具")
+        self.title(_t("title"))
         self.geometry("960x640")
         self.minsize(800, 500)
 
-        self.exe_dir = Path(__file__).resolve().parent
+        # exe/dll 定位:PyInstaller onefile 打包时随包解压到 _MEIPASS,
+        # 源码运行时取脚本所在目录
+        self.exe_dir = Path(getattr(sys, "_MEIPASS",
+                                    Path(__file__).resolve().parent))
         self.exe_path = self.exe_dir / EXE_NAME
         self.dll_path = self.exe_dir / DLL_NAME
 
@@ -141,9 +360,9 @@ class InjectorGui(tk.Tk):
                    if not p.exists()]
         if missing:
             messagebox.showwarning(
-                "缺少文件",
-                f"未找到: {', '.join(missing)}\n"
-                f"请确保 {EXE_NAME} 与 {DLL_NAME} 与 gui.py 同目录。")
+                _t("missing_files"),
+                _t("missing_files_msg").format(
+                    ", ".join(missing), EXE_NAME, DLL_NAME))
 
     def _build_ui(self):
         style = ttk.Style(self)
@@ -170,51 +389,51 @@ class InjectorGui(tk.Tk):
     def _build_menu(self):
         menubar = tk.Menu(self)
         m_file = tk.Menu(menubar, tearoff=0)
-        m_file.add_command(label="退出", accelerator="Alt+F4",
+        m_file.add_command(label=_t("m_exit"), accelerator="Alt+F4",
                            command=self.destroy)
-        menubar.add_cascade(label="文件", menu=m_file)
+        menubar.add_cascade(label=_t("m_file"), menu=m_file)
 
         m_op = tk.Menu(menubar, tearoff=0)
-        m_op.add_command(label="刷新列表", accelerator="F5",
+        m_op.add_command(label=_t("m_refresh"), accelerator="F5",
                          command=self.refresh)
-        m_op.add_command(label="注入选中进程", accelerator="Ctrl+I",
+        m_op.add_command(label=_t("m_inject_sel"), accelerator="Ctrl+I",
                          command=self.inject_selected)
-        m_op.add_command(label="在 WT 中使用", command=self.launch_in_wt)
-        m_op.add_command(label="卸载选中进程", accelerator="Ctrl+U",
+        m_op.add_command(label=_t("m_in_wt"), command=self.launch_in_wt)
+        m_op.add_command(label=_t("m_unload_sel"), accelerator="Ctrl+U",
                          command=self.unload_selected)
         m_op.add_separator()
-        m_op.add_checkbutton(label="自动刷新(3 秒)",
+        m_op.add_checkbutton(label=_t("m_auto_refresh"),
                              variable=self.auto_refresh_var)
-        menubar.add_cascade(label="操作", menu=m_op)
+        menubar.add_cascade(label=_t("m_op"), menu=m_op)
 
         m_help = tk.Menu(menubar, tearoff=0)
-        m_help.add_command(label="关于", command=self._show_about)
-        menubar.add_cascade(label="帮助", menu=m_help)
+        m_help.add_command(label=_t("m_about"), command=self._show_about)
+        menubar.add_cascade(label=_t("m_help"), menu=m_help)
 
         # 设置 -> 显示列：勾选表格显示哪些列(菜单在 _build_table 内已构建)
-        menubar.add_cascade(label="设置", menu=self.m_columns)
+        menubar.add_cascade(label=_t("m_settings"), menu=self.m_columns)
         self.config(menu=menubar)
 
     def _build_toolbar(self):
         bar = ttk.Frame(self, padding=(6, 4))
         bar.pack(fill="x")
         self._toolbar_buttons = []  # busy 时统一禁用
-        for text, cmd, width in (
-                ("刷新", self.refresh, None),
-                ("注入选中", self.inject_selected, 10),
-                ("在 WT 中使用", self.launch_in_wt, 10),
-                ("卸载选中", self.unload_selected, 10),
-                ("卸载全部已注入", self.unload_all, 14)):
-            btn = ttk.Button(bar, text=text, command=cmd, width=width)
+        for text_key, cmd, width in (
+                ("btn_refresh", self.refresh, None),
+                ("btn_inject", self.inject_selected, 10),
+                ("btn_in_wt", self.launch_in_wt, 10),
+                ("btn_unload", self.unload_selected, 10),
+                ("btn_unload_all", self.unload_all, 14)):
+            btn = ttk.Button(bar, text=_t(text_key), command=cmd, width=width)
             btn.pack(side="left", padx=(6, 0) if self._toolbar_buttons else 0)
             self._toolbar_buttons.append(btn)
 
         self.auto_refresh_var = tk.BooleanVar(value=True)
         self.only_injectable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="仅显示可注入",
+        ttk.Checkbutton(bar, text=_t("chk_only_injectable"),
                         variable=self.only_injectable_var,
                         command=self._render_table).pack(side="left", padx=(14, 0))
-        ttk.Checkbutton(bar, text="自动刷新",
+        ttk.Checkbutton(bar, text=_t("chk_auto_refresh"),
                         variable=self.auto_refresh_var).pack(side="left", padx=(6, 0))
 
         self.clock_var = tk.StringVar()
@@ -228,17 +447,17 @@ class InjectorGui(tk.Tk):
         wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                  selectmode="browse")
-        # 列定义：cid -> (中文标题, 宽度, 对齐)；同时作为「显示列」菜单的数据源
+        # 列定义：cid -> (标题, 宽度, 对齐)；同时作为「显示列」菜单的数据源
         self.col_labels = {
-            "pid": ("PID", 70, "center"),
-            "name": ("进程名", 170, "w"),
-            "status": ("状态", 90, "center"),
-            "arch": ("架构", 60, "center"),
-            "console": ("类型", 70, "center"),
-            "injected": ("已注入", 70, "center"),
-            "start_time": ("启动时间", 160, "w"),
-            "cmd_line": ("启动命令行", 420, "w"),
-            "reason": ("说明", 320, "w")}
+            "pid": (_t("col_pid"), 70, "center"),
+            "name": (_t("col_name"), 170, "w"),
+            "status": (_t("col_status"), 90, "center"),
+            "arch": (_t("col_arch"), 60, "center"),
+            "console": (_t("col_console"), 70, "center"),
+            "injected": (_t("col_injected"), 70, "center"),
+            "start_time": (_t("col_start_time"), 160, "w"),
+            "cmd_line": (_t("col_cmd_line"), 420, "w"),
+            "reason": (_t("col_reason"), 320, "w")}
         for cid, (text, width, anchor) in self.col_labels.items():
             self.tree.heading(cid, text=text,
                               command=lambda c=cid: self._on_heading_click(c))
@@ -263,7 +482,7 @@ class InjectorGui(tk.Tk):
         self.tree.bind("<Button-3>", self._show_context_menu)
 
     def _build_log(self):
-        wrap = ttk.LabelFrame(self, text="日志", padding=(6, 4))
+        wrap = ttk.LabelFrame(self, text=_t("log_label"), padding=(6, 4))
         self.log_text = tk.Text(wrap, height=7, state="disabled",
                                 font=("Consolas", 9), wrap="word",
                                 background="#f7f7f7")
@@ -282,7 +501,7 @@ class InjectorGui(tk.Tk):
     def _build_statusbar(self):
         bar = ttk.Frame(self, padding=(6, 2))
         bar.pack(fill="x", side="bottom")
-        self.status_var = tk.StringVar(value="就绪")
+        self.status_var = tk.StringVar(value=_t("status_ready"))
         ttk.Label(bar, textvariable=self.status_var,
                   width=60, anchor="w").pack(side="left")
         self.sel_var = tk.StringVar()
@@ -297,7 +516,7 @@ class InjectorGui(tk.Tk):
     def _run_task(self, fn, on_ok):
         """提交后台写任务:busy 期间拒绝新任务并禁用按钮;结果经队列回主线程"""
         if self.busy:
-            self.log("已有任务进行中,忽略新请求", "err")
+            self.log(_t("task_running"), "err")
             return
         self.busy = True
         self._set_busy_ui(True)
@@ -334,8 +553,8 @@ class InjectorGui(tk.Tk):
                 if kind in ("ok", "refresh_ok"):
                     cb(payload)
                 elif kind in ("err", "refresh_err"):
-                    self.log(f"失败: {payload}", "err")
-                    messagebox.showerror("操作失败", payload)
+                    self.log(_t("fail").format(payload), "err")
+                    messagebox.showerror(_t("op_failed"), payload)
                 else:
                     self.busy = False
                     self._set_busy_ui(False)
@@ -348,7 +567,7 @@ class InjectorGui(tk.Tk):
         state = "disabled" if busy else "normal"
         for child in self._toolbar_buttons:
             child.configure(state=state)
-        self.status_var.set("任务进行中..." if busy else "就绪")
+        self.status_var.set(_t("status_busy") if busy else _t("status_ready"))
 
     # ---------- 列表 ----------
 
@@ -366,9 +585,9 @@ class InjectorGui(tk.Tk):
                 label=label, variable=self.col_visible[cid],
                 command=self._apply_columns)
         self.m_columns.add_separator()
-        self.m_columns.add_command(label="全选",
+        self.m_columns.add_command(label=_t("m_cols_all"),
                                     command=lambda: self._set_all_columns(True))
-        self.m_columns.add_command(label="全不选",
+        self.m_columns.add_command(label=_t("m_cols_none"),
                                     command=lambda: self._set_all_columns(False))
         self._apply_columns()  # 初次应用默认勾选(隐藏启动时间/命令行)
 
@@ -397,14 +616,15 @@ class InjectorGui(tk.Tk):
             capture_output=True, timeout=30,
             creationflags=subprocess.CREATE_NO_WINDOW)
         if res.returncode != 0:
-            raise RuntimeError(f"--list-targets 退出码 {res.returncode}: "
-                               f"{decode_output(res.stderr).strip()}")
+            raise RuntimeError(
+                _t("fetch_err").format(
+                    res.returncode, decode_output(res.stderr).strip()))
         return json.loads(decode_output(res.stdout))
 
     def _on_targets(self, targets):
         self.targets = targets
         self._render_table()
-        self.log(f"进程列表已刷新: 共 {len(targets)} 项", "ok")
+        self.log(_t("targets_refreshed").format(len(targets)), "ok")
 
     def _render_table(self):
         """按过滤条件把 targets 渲染进表格;无过滤时按 PID 升序。
@@ -439,7 +659,7 @@ class InjectorGui(tk.Tk):
                 values=(t["pid"], t["name"], status,
                         "x64" if t["x64"] else "x86",
                         "CUI" if t["console"] else "GUI",
-                        "是" if injected else "否",
+                        _t("yes") if injected else _t("no"),
                         t.get("start_time", ""),
                         t.get("cmd_line", ""), reason),
                 tags=(tag,))
@@ -496,7 +716,7 @@ class InjectorGui(tk.Tk):
         self._run_task(lambda: self._do_inject(pid), self._on_inject_done)
 
     def _do_inject(self, pid):
-        self.log(f"注入: pid={pid}", "cmd")
+        self.log(_t("injecting").format(pid=pid), "cmd")
         cmd = [str(self.exe_path), "--inject", str(pid)]
         if self.dll_path.exists():
             cmd += ["--dll", str(self.dll_path)]
@@ -504,8 +724,9 @@ class InjectorGui(tk.Tk):
                              creationflags=subprocess.CREATE_NO_WINDOW)
         out = (decode_output(res.stdout) + decode_output(res.stderr)).strip()
         if res.returncode != 0:
-            raise RuntimeError(f"注入失败(退出码 {res.returncode}): {out}")
-        return f"注入成功: pid={pid}\n{out}"
+            raise RuntimeError(
+                _t("inject_failed").format(res.returncode, out))
+        return _t("inject_ok").format(pid=pid, out=out)
 
     def _on_inject_done(self, text):
         self.log(text, "ok")
@@ -518,7 +739,8 @@ class InjectorGui(tk.Tk):
         # 只允许卸载已注入进程;基址由 ctypes 查询,失败给原因
         target = next((t for t in self.targets if t["pid"] == pid), None)
         if not (target and target["injectable"] and target["already_injected"]):
-            messagebox.showwarning("无法卸载", f"进程 {pid} 未标记为已注入")
+            messagebox.showwarning(
+                _t("cannot_unload"), _t("not_marked_injected").format(pid))
             return
         self._run_task(lambda: self._do_unload(pid), self._on_unload_done)
 
@@ -527,21 +749,23 @@ class InjectorGui(tk.Tk):
         pids = [t["pid"] for t in self.targets
                 if t["injectable"] and t["already_injected"]]
         if not pids:
-            messagebox.showinfo("卸载全部", "当前没有已注入的进程")
+            messagebox.showinfo(
+                _t("unload_all_title"), _t("no_injected_procs"))
             return
         self._run_task(lambda: self._do_unload_all(pids), self._on_unload_done)
 
     def _do_unload(self, pid):
         base = find_dll_base(pid)   # 目标进程可能已退出 -> 抛异常
-        self.log(f"卸载: pid={pid} dllBase=0x{base:X}", "cmd")
+        self.log(_t("unloading").format(pid=pid, base=base), "cmd")
         cmd = [str(self.exe_path), "--unload-remote", str(pid),
                f"0x{base:X}"]
         res = subprocess.run(cmd, capture_output=True, timeout=30,
                              creationflags=subprocess.CREATE_NO_WINDOW)
         out = (decode_output(res.stdout) + decode_output(res.stderr)).strip()
         if res.returncode != 0:
-            raise RuntimeError(f"卸载失败(退出码 {res.returncode}): {out}")
-        return f"卸载成功: pid={pid}\n{out}"
+            raise RuntimeError(
+                _t("unload_failed").format(res.returncode, out))
+        return _t("unload_ok").format(pid=pid, out=out)
 
     def _do_unload_all(self, pids):
         results = []
@@ -549,7 +773,7 @@ class InjectorGui(tk.Tk):
             try:
                 results.append(self._do_unload(pid))
             except Exception as exc:  # noqa: BLE001 - 单进程失败不中断
-                results.append(f"pid={pid} 卸载失败: {exc}")
+                results.append(_t("unload_one_failed").format(pid, exc))
         return "\n".join(results)
 
     def _on_unload_done(self, text):
@@ -569,29 +793,34 @@ class InjectorGui(tk.Tk):
         if not target["injectable"]:
             reason = REASON_TEXT.get(target["reason"], target["reason"] or "-")
             messagebox.showwarning(
-                "无法在 WT 中使用",
-                f"进程 {pid} ({target['name']}) 不可注入:\n{reason}")
+                _t("cannot_in_wt"),
+                _t("not_injectable_msg").format(pid, target["name"], reason))
             return
         if target["already_injected"]:
             messagebox.showwarning(
-                "已注入",
-                f"进程 {pid} ({target['name']}) 已被注入。\n"
-                f"请先「卸载选中」再在 WT 中使用。")
+                _t("already_injected_title"),
+                _t("already_injected_msg").format(pid, target["name"]))
             return
         self._run_task(
             lambda: self._do_launch_in_wt(pid, target["name"]),
             self._on_wt_launch_done)
 
     def _find_wt(self):
-        """定位 wt.exe(Windows Terminal);缺失时报错"""
-        wt = shutil.which("wt.exe")
-        if not wt:
-            raise RuntimeError("未找到 wt.exe(Windows Terminal)。"
-                               "请先安装 Windows Terminal 后重试。")
-        return wt
+        """定位 wt.exe(Windows Terminal);顺序:
+        1. PATH 查找  2. App Execution Alias(%LOCALAPPDATA%\\Microsoft\\WindowsApps)
+        3. 自带便携版(t\\wt.exe,源码运行时=仓库 t\\,打包时随 _MEIPASS 解压)
+        全部缺失才报错。"""
+        alias = (Path(os.environ.get("LOCALAPPDATA", ""))
+                 / "Microsoft" / "WindowsApps" / "wt.exe")
+        for cand in (shutil.which("wt.exe"),
+                     str(alias) if alias.exists() else None,
+                     str(self.exe_dir / "t" / "wt.exe")):
+            if cand and Path(cand).exists():
+                return cand
+        raise RuntimeError(_t("wt_not_found"))
 
     def _do_launch_in_wt(self, pid, name):
-        self.log(f"在 WT 中接管: {name} (pid={pid})", "cmd")
+        self.log(_t("taking_over").format(name, pid), "cmd")
         # 管道名必须为 \\\\.\\pipe\\ 完整形式(CLI 端 CreateNamedPipeW 依赖),
         # 随机后缀防多会话冲突;Python raw string 保证双反斜杠不被吞
         pipe = r"\\.\pipe\ti_wt_" + uuid.uuid4().hex[:8]
@@ -601,12 +830,28 @@ class InjectorGui(tk.Tk):
                     str(pid), "--pipe", pipe]
         if self.dll_path.exists():
             mediator += ["--dll", str(self.dll_path)]
-        wt_cmd = [self._find_wt(), "new-tab",
-                  "--title", f"ti:{name} ({pid})"] + mediator
-        subprocess.Popen(wt_cmd, creationflags=subprocess.CREATE_NO_WINDOW)
-        return (f"已启动: {name} (pid={pid})\n"
-                f"WT 新 tab 将打开中介器并自动注入接管该进程。\n"
-                f"关闭该 tab 即结束会话。")
+        self._spawn_wt(self._find_wt(), mediator, name, pid)
+        return _t("wt_launched").format(name, pid)
+
+    def _spawn_wt(self, wt_path, mediator, name, pid):
+        """启动 wt 新 tab;若所选 wt 启动失败(如商店别名未注册)且存在
+        自带便携版 t\\wt.exe,则回退自带版本重试。"""
+        try:
+            subprocess.Popen(
+                [wt_path, "new-tab", "--title", f"ti:{name} ({pid})"]
+                + mediator,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except OSError:
+            portable = self.exe_dir / "t" / "wt.exe"
+            if portable.exists() and str(portable.resolve()) != str(
+                    Path(wt_path).resolve()):
+                self.log(_t("wt_retry_portable").format(portable), "err")
+                subprocess.Popen(
+                    [str(portable), "new-tab", "--title",
+                     f"ti:{name} ({pid})"] + mediator,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                raise
 
     def _on_wt_launch_done(self, text):
         self.log(text, "ok")
@@ -617,7 +862,7 @@ class InjectorGui(tk.Tk):
     def _selected_pid(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("未选择", "请先在列表中选择一个进程")
+            messagebox.showinfo(_t("no_selection"), _t("select_first"))
             return None
         return int(sel[0])
 
@@ -633,15 +878,19 @@ class InjectorGui(tk.Tk):
         if target is None:
             return
         lines = [f"PID: {target['pid']}",
-                 f"进程名: {target['name']}",
-                 f"架构: {'x64' if target['x64'] else 'x86'}",
-                 f"类型: {'控制台(CUI)' if target['console'] else '图形(GUI)'}",
-                 f"可注入: {'是' if target['injectable'] else '否'}",
-                 f"已注入: {'是' if target['already_injected'] else '否'}",
-                 f"启动时间: {target.get('start_time') or '-'}",
-                 f"启动命令行: {target.get('cmd_line') or '-'}",
-                 f"原因: {target['reason'] or '-'}"]
-        messagebox.showinfo(f"进程 {pid} 详情", "\n".join(lines))
+                 _t("detail_name").format(target['name']),
+                 _t("detail_arch").format(
+                     'x64' if target['x64'] else 'x86'),
+                 _t("detail_type_" + ("cui" if target['console'] else "gui")),
+                 _t("detail_injectable").format(
+                     _t("yes") if target['injectable'] else _t("no")),
+                 _t("detail_injected").format(
+                     _t("yes") if target['already_injected'] else _t("no")),
+                 _t("detail_start").format(target.get('start_time') or '-'),
+                 _t("detail_cmd").format(target.get('cmd_line') or '-'),
+                 _t("detail_reason").format(target['reason'] or '-')]
+        messagebox.showinfo(
+            _t("detail_title").format(pid), "\n".join(lines))
 
     def _show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
@@ -654,21 +903,21 @@ class InjectorGui(tk.Tk):
         menu = tk.Menu(self, tearoff=0)
         # 动态项:已注入显示『卸载』,可注入显示『注入』,二者互斥
         if target and target.get("already_injected"):
-            menu.add_command(label="卸载", command=self.unload_selected)
+            menu.add_command(label=_t("ctx_unload"), command=self.unload_selected)
         elif target and target.get("injectable"):
-            menu.add_command(label="注入", command=self.inject_selected)
-            menu.add_command(label="在 WT 中使用", command=self.launch_in_wt)
+            menu.add_command(label=_t("ctx_inject"), command=self.inject_selected)
+            menu.add_command(label=_t("ctx_in_wt"), command=self.launch_in_wt)
         menu.add_separator()
-        menu.add_command(label="查看详情", command=self._show_detail)
+        menu.add_command(label=_t("ctx_detail"), command=self._show_detail)
         menu.tk_popup(event.x_root, event.y_root)
 
     def _update_selection_info(self):
         sel = self.tree.selection()
         if sel:
             vals = self.tree.item(sel[0], "values")
-            self.sel_var.set(f"选中: {vals[1]} (PID {vals[0]})")
+            self.sel_var.set(_t("sel_info").format(vals[1], vals[0]))
         else:
-            self.sel_var.set("未选中进程")
+            self.sel_var.set(_t("no_sel_info"))
 
     def _load_version(self):
         """启动时后台获取 --version,填充状态栏"""
@@ -689,17 +938,10 @@ class InjectorGui(tk.Tk):
 
     def _show_about(self):
         messagebox.showinfo(
-            "关于",
-            f"terminal-injector 管理工具\n\n"
-            f"版本: {self._version or '未知'}\n"
-            f"exe: {self.exe_path}\n"
-            f"dll: {self.dll_path}\n\n"
-            f"功能:\n"
-            f"  - 列出可注入进程(权限 + x64 + 控制台判定)\n"
-            f"  - 一键注入,接管到 Windows Terminal\n"
-            f"  - 远程卸载(自动查询 DLL 基址)\n\n"
-            f"注入后目标进程的原控制台窗口会被隐藏,\n"
-            f"输出经由 DLL 转发给中介/终端。")
+            _t("about_title"),
+            _t("about_text").format(
+                version=self._version or _t("about_unknown"),
+                exe=self.exe_path, dll=self.dll_path))
 
     # ---------- 日志 ----------
 
