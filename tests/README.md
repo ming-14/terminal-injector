@@ -109,9 +109,9 @@ e2e/
 
 - 结果文件协议：`PASS` / `FAIL:<原因>` / `UNSUPPORTED=<原因>` / `<KEY>=<值>` / `DONE=1`
 - `results/summary.json`：全量汇总（PASS/FAIL/UNSUPPORTED 计数）
-- DLL 日志：`<GetTempPathW()>\injected_<pid>_<时间戳>.log`（每进程每会话独立文件，
-  路径经 `common/childlog.py` 定位；`TI_INJECTED_LOG_DIR` 环境变量可覆盖目录，
-  `TI_LOG_LEVEL` 可调级别，默认 Debug）——目标进程私有，调试用
+- DLL 日志：`<build/bin/Release>\injected_<pid>_<时间戳>.log`（默认与 exe 同目录，
+  每进程每会话独立文件，路径经 `common/childlog.py` 定位；`TI_INJECTED_LOG_DIR`
+  环境变量可覆盖目录，`TI_LOG_LEVEL` 可调级别，默认 Debug）——目标进程私有，调试用
 - 已知问题（架构限制 vs 工程 bug）记录在 `docs/PHASES.md` 末节：
   - `BUG-xxx`：工程缺陷（修复后测试恢复断言）
   - `LIM-xxx`：上游/架构限制（ConPTY、WT 行为），测试按实际语义断言或 SKIP

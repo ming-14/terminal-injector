@@ -439,6 +439,7 @@ if __name__ == "__main__":
 | 101 | `test_child_cursor_aligned.py` | 子进程注入光标对齐 HelloAck（BUG-001 回归，2026-08-02 新增） | 子进程 DLL 日志含 `child cursor aligned to WT (X,Y) from HelloAck`，且无 LazyInit 重放分支记录 |
 | 102 | `test_pipe_security.py` | 管道安全（HIGH #2） | 随机管道名 `\\.\pipe\terminjector_<pid>_<hex>` 每会话不同；server DACL 收紧；DLL 日志 `server identity verified`；预创建旧固定管道名不影响注入 |
 | 103 | `test_list_targets.py` | `--list-targets` 进程枚举（2026-08-17 新增） | 默认仅可注入（STATUS 全为 injectable）；`--all` 附带原因标记（access_denied 等）；`--json` 合法且仅含 injectable=true；当前测试进程在可注入列表 |
+| 104 | `test_tui_resize_scrollback.py` | 注入后 resize WT 无 scrollback（Bug B 回归，2026-08-18 新增） | vim 注入后 UIA 读 TermControl 基线非空白行数；SetWindowPos 缩窄 0.75 后非空白行增长 ≤ 2（修复前 +28：主 buffer ED 2J 推 scrollback；修复后 0~1：LazyInit 补发 ?1049h 后 ED 2J 在 alt buffer 不推） |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -452,6 +453,7 @@ if __name__ == "__main__":
   - 101 `child_cursor_aligned`：子进程 DLL 日志含 `child cursor aligned to WT (X,Y) from HelloAck`，且无 LazyInit 重放分支记录
   - 102 `pipe_security`：随机管道名每会话不同；DLL 日志 `server identity verified`；旧固定管道名伪服务器不抢占
   - 103 `list_targets`：默认输出全部为 injectable；`--all` 含非 injectable 行且带原因；`--json` 合法且全部 injectable=true；当前测试进程在列表
+  - 104 `tui_resize_scrollback`：vim（TI_VIM_EXE 或常见路径）注入握手成功；resize 后 UIA 非空白行数增长 ≤2（修复前 28→56）；无 vim 环境 UNSUPPORTED
 - 备注（测试经验）：
   - cmd（主进程）输出走 VtPassThrough `pipe→stdout: VtOutput`；子进程（python）输出走 `ChildVtOutput`——断言方向要区分
   - 字节断言必须限定日志来源行（输入转发日志 stdin→router 与输出 VtOutput hex 都含文本字节，只搜字节会误匹配）
@@ -553,6 +555,7 @@ if __name__ == "__main__":
 | LBUG-001 | 长命令回车后 WT 光标被拉回折行行首（用户报告）：cmd 中输入长命令（软折行）回车后，光标先正确移动到折行下一行，随后被拉回旧行——python 子进程 LazyInit 的屏幕重放分支用 ConHost 陈旧快照光标（注入时刻 cmd 旧位置）同步 WT，覆盖 HelloAck 回传的 WT 真实光标，后续 CursorPosition 把光标拉回旧位置 | 子进程注入后 DLL 日志 `cursor synced to terminal (0,4)` 覆盖 `HelloAck ... cursor=(65,4)` | `test_child_cursor_aligned`（新增） | **已修复**（2026-08-02）：`LazyInit.cpp` 按 `isTarget` 分流——主进程（cmd）保留重放+行首覆盖；子进程跳过重放，仅用 HelloAck 的 `wtCursorX/wtCursorY` 对齐 `ConsoleState`+`VirtualConsoleState`（日志 `child cursor aligned to WT (X,Y) from HelloAck`）；`test_child_cursor_aligned` 断言 aligned 记录存在且无重放分支记录，PASS ×2 |
 | BUG-007 | 同进程反复注入/卸载后 ConHost 空行逐轮累积（用户报告）：dir 统计行与 prompt 间空行每轮 +1、prompt 逐轮下移一行。根因：`Unloader.cpp` 步骤 3.1 在光标归位**前**记录 `preReplayCur`（= KickStart 回车回显后的 `(0,N+1)`，窗口外）；空会话重放仅 `ESC[0m`（SGR 不移动光标），重放后光标 `(0,N)` ≠ `(0,N+1)` → 惰性重放分支（5.5）永不触发 → cmd 回显 `\r\n` 后新 prompt 写 N+1 行、快照 prompt 行留空 | 修复前 6 轮注入/卸载，blanks 1→2→…→7（每轮 +1，DLL 日志快照光标 97→101） | `test_blankline_accumulation`（新增） | **已修复**（2026-08-10）：`Unloader.cpp` 步骤 3.1 光标归位成功后记录归位后位置为 `preReplayCur`；修复后 6 轮 blanks 恒 = baseline（1），对照实验（旧 DLL）blanks 1→7 复现 |
 | BUG-006 | 补发（resync）序列与内容字节合并：输入/输出补发序列拼接进同一条 VtOutput 消息（len=补发+内容），且 BatchSender 会合并相邻发送，字节边界不可区分 → e2e 精确断言（`ChildVtOutput: len=3 hex[3]=61 0A 62`）被破坏 | 写前置补发/回显补发后目标输出 → 日志 len=10 而非 3 | `test_processed_output` / `test_vt_output_mode` | **已修复**（2026-08-05）：新增协议类型 `CursorSync=0x0090`（DLL→mediator，不经 BatchSender 即时发送先于内容），`ChildSession` 收到即写 stdout；内容消息字节保持原样，断言恢复，PASS（详见 `docs/phases/19-vt-cursor-tracker.md` 第 7 节） |
+| BUG-008 | 注入后 resize WT 出现滚动条 + 60 行双帧（用户报告）：全屏 TUI（vim）启动时发的 `\x1b[?1049h`（切 alt buffer）发生在注入之前、只写入原 ConHost，未到达 WT → WT 侧 vim 画面停留在**主 buffer**；WT resize 触发 vim CLEAR 重绘（ED 2J + 全屏，经 DLL 直通 3683 字节）→ WT 主 buffer 收到 ED 2J 把视口整屏推入 scrollback（真实 WT 实测：主 buffer 30 行+2J → UIA 70 行；alt buffer 同操作仅 6 行不推）→ 滚动条 + 双帧。原生 vim 直连 ConPTY 时 1049h 早已到达 WT（alt buffer），ED 2J 不推 scrollback，无此现象 | 注入后 SetWindowPos 缩窄 WT → UIA 非空白行 28→56（+28 scrollback） | `test_tui_resize_scrollback`（新增） | **已修复**（2026-08-18，方案 A 非降级）：`LazyInit.cpp` 注入初始化重放前对全屏 TUI（`isLineShell=false` 且 wt 尺寸已知）向 WT 补发 `\x1b[?1049h`（`vt::kEnterAltBuffer`，`recordReplay=false`，仅服务 WT 侧画面语义；退出时 vim 自身 `?1049l` 被 DLL 捕获直通自动切回）；`test_tui_resize_scrollback` resize 后非空白行 28→28 PASS（修复前 +28） |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
 

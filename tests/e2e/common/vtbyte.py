@@ -14,6 +14,7 @@ VT 直通模式下虚拟状态不跟踪输出（程序自维护状态，Phase 13
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,42 +38,68 @@ def build_body(seqs) -> str:
         "ok = set_mode(h_out, ENABLE_VIRTUAL_TERMINAL_PROCESSING)",
         'check("SET_VT_MODE", bool(ok), "err={}".format(ctypes.get_last_error()))',
     ]
-    for data, _ in seqs:
+    for item in seqs:
+        data = item[0]
         lines.append("write_bytes(h_out, {!r})".format(bytes(data)))
     lines.append("done()")
     return "\n".join(lines)
 
 
 def check_log_bytes(log, patterns, timeout: float = 10.0) -> int:
-    """验证 mediator 日志出现所有 hex 模式。
+    """验证 mediator 日志中 hex 模式的出现/缺席。
 
-    多个序列可能合并在同一条 VtOutput 日志行：先 wait_for 第一个模式，
-    再用 read_all() 全文匹配其余模式（避免 read_new offset 越过旧内容）。
-    patterns: [(hex_str, key)]。返回失败数。
+    多个序列可能合并在同一条 VtOutput 日志行：先 wait_for 第一个必须
+    出现的模式，再用 read_all() 全文匹配其余模式（避免 read_new offset
+    越过旧内容）。
+    patterns: [(hex_str, key)] 或 [(hex_str, key, "absent")]。
+    缺省为"必须出现"；标记 "absent" 的断言该 hex 不得出现在日志中
+    （用于验证 DLL 入口剥离 ConHost 无法表达的属性，如删除线 SGR 9/29）。
+    返回失败数。
     """
-    first_hex, first_key = patterns[0]
+    present = [(h, k) for h, k, *rest in patterns if not rest or rest[0] != "absent"]
+    absent = [(h, k) for h, k, *rest in patterns if rest and rest[0] == "absent"]
+
+    failures = 0
+    if not present:
+        # 全部是缺席断言：等待写入到达后读取全文检查
+        time.sleep(1.0)
+        content = log.read_all()
+        for hex_str, key in absent:
+            if hex_str in content:
+                print("  [FAIL] {}: 日志不应出现 {}".format(key, hex_str))
+                failures += 1
+            else:
+                print("  [PASS] {} (VtOutput 字节缺席)".format(key))
+        return failures
+
+    first_hex, first_key = present[0]
     if not log.wait_for(first_hex, timeout=timeout):
         print("  [FAIL] {}: 日志未出现 {}".format(first_key, first_hex))
         return 1
     print("  [PASS] {} (VtOutput 字节命中)".format(first_key))
-    failures = 0
     content = log.read_all()
-    for hex_str, key in patterns[1:]:
+    for hex_str, key in present[1:]:
         if hex_str in content:
             print("  [PASS] {} (VtOutput 字节命中)".format(key))
         else:
             print("  [FAIL] {}: 日志未出现 {}".format(key, hex_str))
             failures += 1
+    for hex_str, key in absent:
+        if hex_str in content:
+            print("  [FAIL] {}: 日志不应出现 {}".format(key, hex_str))
+            failures += 1
+        else:
+            print("  [PASS] {} (VtOutput 字节缺席)".format(key))
     return failures
 
 
 def run_vt_byte_test(name: str, seqs, handshake_timeout: float = 20.0,
                      ready_timeout: float = 30.0) -> int:
-    """完整运行一个 VT 字节测试。seqs: [(bytes, key)]。返回失败数。
+    """完整运行一个 VT 字节测试。seqs: [(bytes, key)] 或 [(bytes, key, "absent")]。
 
     断言：
       1. SET_VT_MODE: 目标脚本成功启用 VT 输出模式
-      2. 每个序列的 hex 出现在 mediator 日志（VtOutput/ChildVtOutput）
+      2. 每个序列的 hex 出现（或缺席）于 mediator 日志（VtOutput/ChildVtOutput）
     """
     result_mod.clear_result(name)
     failures = 0
@@ -86,7 +113,13 @@ def run_vt_byte_test(name: str, seqs, handshake_timeout: float = 20.0,
             else:
                 print("  [FAIL] SET_VT_MODE: {}".format(v or "no result"))
                 failures += 1
-            patterns = [(to_hex(data), key) for data, key in seqs]
+            patterns = []
+            for item in seqs:
+                data, key = item[0], item[1]
+                if len(item) >= 3:
+                    patterns.append((to_hex(data), key, item[2]))
+                else:
+                    patterns.append((to_hex(data), key))
             failures += check_log_bytes(s.log(), patterns)
     except RuntimeError as e:
         print("  [FAIL] setup 失败: {}".format(e))

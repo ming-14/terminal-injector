@@ -57,17 +57,30 @@ bool g_isTargetProcess = false;
 // 避免懒加载内 Logger 写日志触发 WriteFile Hook → ENSURE_INITIALIZED 死锁
 thread_local bool t_inLazyInit = false;
 
-// 注入日志目录：优先 TI_INJECTED_LOG_DIR（测试/诊断覆盖），否则 GetTempPathW()
-// （系统标准临时目录，不硬编码任何固定路径，部署到任意机器可用）
+// 注入日志目录：优先 TI_INJECTED_LOG_DIR（测试/诊断覆盖），
+// 否则取 DLL 自身所在目录（默认部署下 injected.dll 与 terminal_injector.exe
+// 同目录，日志即写到 exe 所在目录，与 mediator/注入器/卸载日志集中在一处，
+// 便于排查）；最后回退系统临时目录。
 std::wstring GetInjectedLogDir() {
     wchar_t envBuf[MAX_PATH] = {0};
     const DWORD n = GetEnvironmentVariableW(L"TI_INJECTED_LOG_DIR", envBuf, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
         return std::wstring(envBuf);
     }
+    // DLL 自身模块路径：GetModuleFileNameW 对当前进程已加载的模块可靠，
+    // 取目录即 exe 所在目录（默认部署 DLL 与 exe 同目录）
+    HMODULE hSelf = GetModuleHandleW(L"injected.dll");
+    wchar_t dllPath[MAX_PATH] = {0};
+    if (hSelf != nullptr && GetModuleFileNameW(hSelf, dllPath, MAX_PATH) > 0) {
+        std::wstring p(dllPath);
+        const size_t pos = p.find_last_of(L"\\/");
+        if (pos != std::wstring::npos) {
+            return p.substr(0, pos);
+        }
+    }
     wchar_t tmpBuf[MAX_PATH] = {0};
     if (GetTempPathW(MAX_PATH, tmpBuf) == 0) {
-        // 极端环境（无 %TEMP%）回退当前目录，避免日志完全丢失
+        // 极端环境（无 %TEMP% 且模块路径不可得）回退当前目录，避免日志完全丢失
         return std::wstring(L".");
     }
     return std::wstring(tmpBuf);
@@ -295,15 +308,6 @@ void EnsureLazyInitialized() {
     // Phase 14：初始化虚拟 Console 状态（从 ConHost 加载初始状态）
     VirtualConsoleState::Instance().InitializeFromConHost();
 
-    // Phase 15：发送 DSR CPR 查询校准 WT 真实光标位置
-    // 通过 SendToMediator 发 \x1b[6n 到 mediator，mediator 转发给 WT，
-    // WT 响应 \x1b[row;colR 后由 mediator VtParser 检测并发送 WtStateReport(type=1)
-    // 给 DLL 更新 VirtualConsoleState，使程序查询到的光标与 WT 一致
-    hooks::SendToMediator(vt::kDsrCprQuery, strlen(vt::kDsrCprQuery),
-                          protocol::MessageType::VtOutput,
-                          /*recordReplay=*/false);
-    LOG_INFO("QueryWtCursorPos: DSR CPR query sent to WT");
-
     // Phase 15：发送 Primary DA 查询获取终端能力标识
     // 通过 SendToMediator 发 \x1b[c 到 mediator，mediator 转发给 WT，
     // WT 响应 \x1b[?1;Psc 后由 mediator VtParser 检测并发送 WtStateReport(type=2)
@@ -386,16 +390,74 @@ void EnsureLazyInitialized() {
         bufSize.Y = static_cast<SHORT>(snap.screenRegion.Bottom - snap.screenRegion.Top + 1);
         COORD bufCoord{0, 0};
         std::string vt;
+        // 重放路径分流（2026-08-17 二次注入滚动条根因修复）：
+        // 全屏 TUI（vim/ncurses）在注入环境走 Windows 控制台 API 输出路径
+        // （WriteConsoleOutput 矩阵 + t_cl 清屏字节，与原生 ConPTY 的 VT 增量
+        // 重绘不同）。二次注入尺寸不匹配时 align 注入 resize 事件 → vim 触发
+        // CLEAR 重绘：先发 t_cl（ED 2J）清屏再全屏重绘；ConPTY/WT 执行 ED 2J
+        // 会把当前视口内容推入 scrollback（UIA 实测），任何重放帧都会被推进
+        // scrollback → 滚动条 + 残留帧。故 TUI 且尺寸不匹配时跳过重放：
+        // vim 的 ED 2J 推空 scrollback，重绘直接产出正确画面（观感 = 原生启动）。
+        // 行编辑 shell（echoInput 且 buffer 高于窗口，有滚动历史）保持流式
+        // 重放（scrollback 是其设计特性）。
+        const SHORT winW = static_cast<SHORT>(
+            snap.screenBufferInfo.srWindow.Right - snap.screenBufferInfo.srWindow.Left + 1);
+        const SHORT winH = static_cast<SHORT>(
+            snap.screenBufferInfo.srWindow.Bottom - snap.screenBufferInfo.srWindow.Top + 1);
+        const bool echoInput = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
+        const bool bufMatchesWin = snap.screenBufferInfo.dwSize.X == winW &&
+                                   snap.screenBufferInfo.dwSize.Y == winH;
+        const bool isLineShell = echoInput && !bufMatchesWin;
+
+        // BUG-002/Bug B 根因修复（2026-08-18 实测锁定）：全屏 TUI 补切 Alt Buffer。
+        // 背景：vim/ncurses 全屏 TUI 启动时发的 \x1b[?1049h（切 Alt Buffer）发生在
+        //       注入之前，字节只写入原 ConHost，未到达 WT → WT 侧 TUI 画面停留在
+        //       【主 buffer】。WT resize 触发 TUI 的 CLEAR 重绘（ED 2J + 全屏重绘，
+        //       注入环境实测 3683 字节）经 DLL 直通到 WT 时，主 buffer 语义下
+        //       ED 2J 会把当前视口整屏推入 scrollback（真实 WT 实测：主 buffer
+        //       画 30 行 + ED 2J → UIA 70 行），产生滚动条 + 双帧残留；
+        //       原生 ConPTY 直连下 1049h 早已到达 WT（WT 在 alt buffer），
+        //       ED 2J 只清空不推 scrollback（UIA 29 行，无滚动条）。
+        // 修复：注入初始化重放前向 WT 补发 \x1b[?1049h，对齐原生 alt buffer 状态，
+        //       使 TUI 的重绘 ED 2J 在 alt buffer 语义下执行（清空不推 scrollback），
+        //       与原生行为一致。TUI 退出时 vim 自身发的 \x1b[?1049l 会被 DLL 捕获
+        //       直通并记入重放缓冲（注入后 vim 的 1049h/l 对天然成对），WT 自动
+        //       切回主 buffer。
+        // 仅对全屏 TUI（isLineShell=false）补发：行编辑 shell（cmd/pwsh）的主
+        //       buffer 滚动历史是设计特性，切 alt 会丢失滚动语义。
+        // recordReplay=false：本序列只服务 WT 侧画面语义；ConHost 侧 vim 注入前
+        //       已自行切过 alt buffer，重放缓冲写入该序列会造成二次切换。
+        if (!isLineShell && wtCols > 0 && wtRows > 0) {
+            hooks::SendToMediator(vt::kEnterAltBuffer, sizeof(vt::kEnterAltBuffer) - 1,
+                                  protocol::MessageType::VtOutput,
+                                  /*recordReplay=*/false);
+            LOG_INFO("LazyInit: fullscreen TUI, WT switched to alt buffer "
+                     "(%zu bytes): ED 2J clears will no longer push scrollback",
+                     sizeof(vt::kEnterAltBuffer) - 1);
+        }
+
+        // 行或列任一与 WT 不匹配都算尺寸不匹配（TUI 会收到 resize 事件触发 CLEAR 重绘）
+        const bool tuiSizeMismatch = !isLineShell && (winW != static_cast<SHORT>(wtCols) ||
+                                                      winH != static_cast<SHORT>(wtRows));
         if (kCaptureFullScrollback) {
-            // Phase 10 方案 A：全量缓冲（含滚动历史）用流式重放。
-            // WriteConsoleOutput 逐行 CursorPosition 绝对定位，行号可达 9000+，
-            // 远超 ConPTY 缓冲高度（=视口行数，约 30），越界行被 clamp/覆盖，
-            // 内容错位重叠（用户反馈：dir 输出尾部 "32个目录..." 插进 prompt 行）。
-            // ReplayScreenStreamed 逐行 \r\n 推进，ConPTY 自然滚动把历史推入
-            // WT scrollback，视口恰好停在缓冲底部（= ConHost 可见窗口），
-            // 与下方光标换算 cursor.Y - srWindow.Top 的不变量保持一致。
-            vt = ConsoleToVt::ReplayScreenStreamed(
-                snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
+            if (tuiSizeMismatch && wtCols > 0 && wtRows > 0) {
+                // 见上方注释：CLEAR 重绘的 ED 2J 会推走任何重放帧，跳过重放等 vim 自己画。
+                // 显式 ED 2J 清屏（新 tab 本就空白，防极端残留被推入 scrollback）。
+                vt = vt::EraseDisplay(2);
+                LOG_INFO("LazyInit: TUI size mismatch (win %dx%d vs WT %ux%u): "
+                         "skip screen replay, waiting for CLEAR relayout",
+                         winW, winH, wtCols, wtRows);
+            } else {
+                // Phase 10 方案 A：全量缓冲（含滚动历史）用流式重放。
+                // WriteConsoleOutput 逐行 CursorPosition 绝对定位，行号可达 9000+，
+                // 远超 ConPTY 缓冲高度（=视口行数，约 30），越界行被 clamp/覆盖，
+                // 内容错位重叠（用户反馈：dir 输出尾部 "32个目录..." 插进 prompt 行）。
+                // ReplayScreenStreamed 逐行 \r\n 推进，ConPTY 自然滚动把历史推入
+                // WT scrollback，视口恰好停在缓冲底部（= ConHost 可见窗口），
+                // 与下方光标换算 cursor.Y - srWindow.Top 的不变量保持一致。
+                vt = ConsoleToVt::ReplayScreenStreamed(
+                    snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
+            }
         } else {
             vt = ConsoleToVt::WriteConsoleOutput(
                 snap.screenCells.data(), bufSize, bufCoord, snap.screenRegion);
@@ -555,14 +617,7 @@ void EnsureLazyInitialized() {
         //   - 随后行首覆盖 CUP(24;1) 把 ConPTY/WT 光标拉进左 gutter → 用户反馈的错位
         // 补充信号：alt buffer 无滚动历史 ⇒ 缓冲区尺寸 == 窗口尺寸；
         // 行编辑 shell (cmd/pwsh) 的缓冲区远高于窗口（9001 行滚动），不受影响。
-        const bool echoInput = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
-        const SHORT winW = static_cast<SHORT>(
-            snap.screenBufferInfo.srWindow.Right - snap.screenBufferInfo.srWindow.Left + 1);
-        const SHORT winH = static_cast<SHORT>(
-            snap.screenBufferInfo.srWindow.Bottom - snap.screenBufferInfo.srWindow.Top + 1);
-        const bool bufMatchesWin = snap.screenBufferInfo.dwSize.X == winW &&
-                                   snap.screenBufferInfo.dwSize.Y == winH;
-        const bool isLineShell = echoInput && !bufMatchesWin;
+        // （echoInput / bufMatchesWin / isLineShell 已在重放分流处提前计算，复用）
         if (isLineShell) {
             // 行编辑 shell：ConsoleState 光标设行首，覆盖补发的旧 prompt
             COORD lineStart{0, cursor.Y};

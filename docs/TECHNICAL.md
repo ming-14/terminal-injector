@@ -189,7 +189,7 @@ injected_dll（运行时独立编译注入）
 
 - **双路**：进程内异步环形缓冲（`RingBufferLogger`）+ 文件落盘。日志线程独立于 Hook 调用链，Hook 内绝不调用被 Hook 的 Console API，避免重入死锁。
 - 文件按模式分派（`main.cpp`）：mediator = `terminal-injector-<pid>.log`、注入器 = `terminal-injector-inject-<pid>.log`、卸载助手 = `terminal-injector-unload.log`（分文件原因：并发进程日志句柄不共享 write，共用会互斥失败）。
-- DLL 日志：`%TEMP%\injected_<pid>_<时间戳>.log`（`TI_INJECTED_LOG_DIR` 可覆盖目录，`TI_LOG_LEVEL` 可调级别）。
+- DLL 日志：`<exe目录>\injected_<pid>_<时间戳>.log`（默认与 exe 同目录，即 injected.dll 所在目录；`TI_INJECTED_LOG_DIR` 可覆盖目录，`TI_LOG_LEVEL` 可调级别）。
 - `t=` 时间戳为自会话开始的**微秒数**（`RingBufferLogger` elapsedUs）。
 
 ## 13. 性能设计

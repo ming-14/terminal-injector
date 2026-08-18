@@ -3,8 +3,12 @@
 链路: 目标程序 SetConsoleMode(VT输出) → WriteFile 直通 → DLL → mediator → WT
 
 预期:
-  - 粗体 1、斜体 3、下划线 4、闪烁 5、反显 7、隐藏 8、删除线 9、重置 0
-    共 8 个序列全部原样到达日志（重置 0 附带验证 0 序列本身）
+  - 粗体 1、斜体 3、下划线 4、闪烁 5、反显 7、隐藏 8、重置 0
+    共 7 个序列原样到达日志（重置 0 附带验证 0 序列本身）
+  - 删除线 9：断言缺席（2026-08-17 修复）。ConHost 的 16 位属性字没有
+    删除线位，实测忽略 ESC[9m；DLL 直通入口按 ConHost 实际渲染模型剥离
+    SGR 9/29（VtSgrFilter），否则 WT 渲染删除线空格为横线（vim 欢迎页
+    标题变 -------- bug）。镜像必须忠实于目标控制台。
   - VT 直通模式不维护虚拟光标状态，故仅字节验证
   - 结果文件 SET_VT_MODE=PASS
 
@@ -24,7 +28,7 @@ SEQS = [
     (b"\x1b[5m", "LOG_STYLE_BLINK"),     # 闪烁
     (b"\x1b[7m", "LOG_STYLE_REVERSE"),   # 反显
     (b"\x1b[8m", "LOG_STYLE_HIDDEN"),    # 隐藏
-    (b"\x1b[9m", "LOG_STYLE_STRIKE"),    # 删除线
+    (b"\x1b[9m", "LOG_STYLE_STRIKE", "absent"),  # 删除线：ConHost 无此属性位，DLL 入口剥离
     (b"\x1b[0m", "LOG_STYLE_RESET"),     # 重置
 ]
 

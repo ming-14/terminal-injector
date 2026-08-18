@@ -113,13 +113,19 @@ def run_command(pid: int, text: str) -> bool:
 
     CONIN$ CreateFile 在部分宿主环境返回 PATH_NOT_FOUND，回退
     GetStdHandle(STD_INPUT_HANDLE)（AttachConsole 后有效）。
+    注意：优先 CONIN$——ConPTY 宿主环境下 AttachConsole 后
+    GetStdHandle 可能仍返回 ConPTY 管道句柄（字符设备但非 console
+    句柄），WriteConsoleInputW 对其失败（ERROR_INVALID_HANDLE，实测）。
     """
     _k.FreeConsole()
     if not _k.AttachConsole(pid):
         print("  [DIAG] AttachConsole failed pid={} gle={}".format(pid, _k.GetLastError()))
         return False
     try:
-        hIn = _k.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        hIn = _k.CreateFileW("CONIN$", 0x40000000 | 0x80000000, 3, None, 3, 0, None)
+        hClose = hIn not in (None, -1)
+        if not hClose:
+            hIn = _k.GetStdHandle(-10)  # STD_INPUT_HANDLE
         if hIn in (None, -1):
             print("  [DIAG] GetStdHandle failed gle={}".format(_k.GetLastError()))
             return False
@@ -134,6 +140,8 @@ def run_command(pid: int, text: str) -> bool:
                 n.value, _k.GetLastError()))
         return bool(wr)
     finally:
+        if hClose:
+            _k.CloseHandle(hIn)
         _k.FreeConsole()
 
 
