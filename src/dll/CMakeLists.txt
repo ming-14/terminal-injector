@@ -26,6 +26,7 @@ add_library(injected_dll SHARED
     translator/VtEscape.cpp
     translator/VtToInputRecord.cpp
     translator/VtCursorTracker.cpp
+    translator/VtSgrFilter.cpp
     hooks/HookCommon.cpp
     hooks/OutputHooks.cpp
     hooks/CursorHooks.cpp

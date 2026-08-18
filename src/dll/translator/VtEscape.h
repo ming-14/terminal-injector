@@ -101,9 +101,6 @@ constexpr char kEnableMouse[] = "\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
 constexpr char kDisableMouse[] = "\x1b[?1000l\x1b[?1003l\x1b[?1015l\x1b[?1006l";
 
 // ===== 终端查询（Phase 15） =====
-// DSR CPR 查询：CSI 6 n（请求光标位置报告）
-// WT 响应：CSI row ; col R
-constexpr const char *kDsrCprQuery = "\x1b[6n";
 // Primary DA 查询：CSI c（请求终端属性）
 // WT 响应：CSI ? 1 ; Ps c（Ps 标识特性集）
 constexpr const char* kDaPrimaryQuery = "\x1b[c";

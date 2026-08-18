@@ -184,7 +184,7 @@ terminal_injector.exe --list-targets --json
 | mediator | `<exe目录>\terminal-injector-<pid>.log` | 握手、VT 桥接、ChildVtOutput、OnModeChange、尺寸同步、VtOutput hex |
 | 注入器 | `<exe目录>\terminal-injector-inject-<pid>.log` | 注入参数、RemotePipeSetup 返回码、注入结果 |
 | 卸载助手 | `<exe目录>\terminal-injector-unload.log` | 远程 FreeLibrary / LDR flush / 模块卸载状态 |
-| DLL | `%TEMP%\injected_<pid>_<时间戳>.log` | 目标进程内 Hook、状态缓存、翻译、批发送（每进程每会话独立文件） |
+| DLL | `<exe目录>\injected_<pid>_<时间戳>.log` | 目标进程内 Hook、状态缓存、翻译、批发送（每进程每会话独立文件） |
 
 > DLL 日志中 `t=` 时间戳单位为**微秒**（RingBufferLogger `elapsedUs`）。
 
@@ -192,7 +192,7 @@ terminal_injector.exe --list-targets --json
 
 | 变量 | 作用 |
 |------|------|
-| `TI_INJECTED_LOG_DIR` | 覆盖 DLL 日志目录（默认 `GetTempPathW()`） |
+| `TI_INJECTED_LOG_DIR` | 覆盖 DLL 日志目录（默认 exe 所在目录，即 injected.dll 所在目录） |
 | `TI_LOG_LEVEL` | DLL 日志级别：`TRACE/DEBUG/INFO/WARN/ERROR/FATAL`（默认 `DEBUG`） |
 | `TI_PROJECT_ROOT` | e2e 测试用：覆盖项目根目录（默认由 tests/e2e 路径推导） |
 | `TI_CDB_TOOLS` | legacy 调试脚本用：cdb 工具目录 |

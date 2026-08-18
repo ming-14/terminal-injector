@@ -28,6 +28,7 @@
 #include "../translator/ConsoleToVt.h"
 #include "../translator/VtEscape.h"
 #include "../translator/VtCursorTracker.h"
+#include "../translator/VtSgrFilter.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -39,6 +40,7 @@ namespace terminjector::hooks {
 // 引入 VT 序列生成函数（SgrFromAttribute 等）
 using terminjector::vt::SgrFromAttribute;
 using terminjector::vt::CursorPosition;
+using terminjector::vt::VtSgrFilter;
 
 // ============================================================
 // 原函数指针定义
@@ -162,8 +164,13 @@ BOOL WINAPI WriteConsoleW_Detour(
             // Phase 21:写前补发 CursorPosition,强制 ConPTY 光标=追踪器基准
             //   (子进程;父 cmd 启动回显会回卷共享 ConPTY 光标)
             SyncChildVtCursorBeforeWrite();
-            VtCursorTracker::Instance().Feed(vt.data(), vt.size());
-            SendToMediator(vt.data(), vt.size());
+            // 2026-08-17 vim 标题变横线：剥离 ConHost 无法表达的 SGR 9/29
+            // （删除线）。ConHost 忽略删除线但 WT 会渲染，直通必须按 ConHost
+            // 实际渲染模型过滤，否则镜像与控制台显示分叉。
+            std::string filtered;
+            VtSgrFilter::Instance().Process(vt.data(), vt.size(), filtered);
+            VtCursorTracker::Instance().Feed(filtered.data(), filtered.size());
+            SendToMediator(filtered.data(), filtered.size());
         }
         if (lpNumberOfCharsWritten != nullptr) {
             *lpNumberOfCharsWritten = nNumberOfCharsToWrite;
@@ -320,9 +327,13 @@ BOOL WINAPI WriteFile_Detour(
                 // VT 模式:直通(与 Phase13 同步分支一致)
                 // Phase 21:写前补发 CursorPosition(子进程 ConPTY 光标回卷修复)
                 SyncChildVtCursorBeforeWrite();
-                VtCursorTracker::Instance().Feed(
-                    reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite);
-                SendToMediator(lpBuffer, nNumberOfBytesToWrite);
+                // 同 WriteConsoleW 直通：按 ConHost 渲染模型剥离 SGR 9/29
+                std::string filtered;
+                VtSgrFilter::Instance().Process(
+                    reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite,
+                    filtered);
+                VtCursorTracker::Instance().Feed(filtered.data(), filtered.size());
+                SendToMediator(filtered.data(), filtered.size());
                 LOG_DEBUG("WriteFile_Detour: OVERLAPPED console VT passthrough, len=%lu",
                           nNumberOfBytesToWrite);
             } else {
@@ -361,9 +372,13 @@ BOOL WINAPI WriteFile_Detour(
         // Phase 19:直通流同步喂入追踪器,维护 ConPTY 语义光标(写后查询)
         // Phase 21:写前补发 CursorPosition(子进程 ConPTY 光标回卷修复)
         SyncChildVtCursorBeforeWrite();
-        VtCursorTracker::Instance().Feed(
-            reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite);
-        SendToMediator(lpBuffer, nNumberOfBytesToWrite);
+        // 同 WriteConsoleW 直通：按 ConHost 渲染模型剥离 SGR 9/29
+        std::string filtered;
+        VtSgrFilter::Instance().Process(
+            reinterpret_cast<const char*>(lpBuffer), nNumberOfBytesToWrite,
+            filtered);
+        VtCursorTracker::Instance().Feed(filtered.data(), filtered.size());
+        SendToMediator(filtered.data(), filtered.size());
         if (lpNumberOfBytesWritten != nullptr) {
             *lpNumberOfBytesWritten = nNumberOfBytesToWrite;
         }

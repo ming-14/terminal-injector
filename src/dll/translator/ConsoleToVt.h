@@ -80,6 +80,8 @@ public:
         SMALL_RECT writeRegion);
 
     // Phase 10 任务6：失效 WriteConsoleOutput 的 diff 缓存
+
+    // Phase 10 任务6：失效 WriteConsoleOutput 的 diff 缓存
     // 在屏幕内容被非 WriteConsoleOutput 路径改变时调用：
     //   - FillConsoleOutputCharacter/Attribute（cls/改颜色）
     //   - WriteConsoleOutputCharacter（局部文本覆盖）

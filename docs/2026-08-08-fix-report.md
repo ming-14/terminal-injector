@@ -132,3 +132,19 @@
 
 1. **(可选)查清 mediator-direct 拦截不一致根因**:需 API Monitor 级工具跟踪目标写 API。
 2. **(可选)多版本兼容性验证**:在不同 Windows 版本 / ConHost 上回归卸载重放。
+
+---
+
+## 六、2026-08-18 追加修复：注入后 resize WT 窗口出现滚动条（Bug B）
+
+- 状态:已实现、构建、验证（`lifecycle/test_tui_resize_scrollback.py` 现存可复跑）；详细调查过程见桌面 `WT-resize-bug调查报告.md`
+- 现象:注入 vim 后把 WT 窗口改尺寸（如 120 列→88 列）→ 滚动条再现、导出文本 60 行双帧
+
+| 问题 | 根因 | 修复 | 文件 |
+|---|---|---|---|
+| 注入后 resize WT 出现滚动条+双帧 | 全屏 TUI（vim）启动时发的 `\x1b[?1049h`（切 alt buffer）发生在注入之前、只写入原 ConHost → WT 侧 vim 画面停留在**主 buffer**；resize 触发 vim CLEAR 重绘（ED 2J+全屏 3683 字节，DLL 直通）→ WT 主 buffer 收到 ED 2J 把视口整屏推入 scrollback（真实 WT 实测：主 buffer 30 行+2J → UIA 70 行；alt buffer 同操作 6 行不推）；原生 vim 直连时 1049h 早已到 WT（alt buffer）故无此现象 | **方案 A（非降级）**：`LazyInit` 注入初始化重放前对全屏 TUI（`isLineShell=false` 且 wt 尺寸已知）向 WT 补发 `\x1b[?1049h`（`vt::kEnterAltBuffer`，`recordReplay=false`），对齐原生 alt buffer 状态；ED 2J 改在 alt buffer 语义下执行（清空不推 scrollback）；vim 退出时自身 `?1049l` 被 DLL 捕获直通自动切回 | `src/dll/LazyInit.cpp` |
+| e2e `blankline_accumulation` 在 ConPTY 宿主环境失败（gle=6） | 测试 `run_command` 用 `GetStdHandle(STD_INPUT_HANDLE)`——ConPTY 宿主环境下 AttachConsole 后仍返回 ConPTY 管道句柄，`WriteConsoleInputW` 对其失败（ERROR_INVALID_HANDLE）；docstring 写的 CONIN$ 优先实现却未如此 | `run_command` 改为 CONIN$ 优先、GetStdHandle 回退（与 docstring 及 read_screen 一致） | `tests/e2e/lifecycle/test_blankline_accumulation.py` |
+
+验证:
+- `lifecycle/test_tui_resize_scrollback.py`（现存，新增）:注入 vim → SetWindowPos 缩窄 0.75 → UIA 非空白行 28→28 PASS（修复前 28→56）
+- 全量 e2e 3 轮均 108/1，失败测试各不相同且单跑全 PASS（长跑环境偶发干扰，非本修复回归）
