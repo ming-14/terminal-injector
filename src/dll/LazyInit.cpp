@@ -347,14 +347,7 @@ void EnsureLazyInitialized() {
     //       StateSnapshot::Capture 拿到的 dwSize/srWindow 可能是 0x0/1x1，
     //       导致 GetConsoleScreenBufferInfo Hook 返回错误值，cmd 渲染卡死
     //       mediator 的 WT 尺寸是真理来源，应优先采用
-    //
-    // BUG-013（2026-08-19）：ConPTY 场景（目标跑在 WT 内）不采用 wtCols/wtRows。
-    // wtCols 是注入时新开 WT 窗口（mediator 所在窗口）的尺寸，与目标 ConPTY
-    // （目标所在的 WT 窗口）尺寸相互独立；用它对齐会把虚拟状态设成错误尺寸，
-    // 真实 ConPTY 由 WT 掌控（缓冲=窗口），虚拟状态必须跟随真实 ConPTY 尺寸。
-    // 真实 ConPTY 尺寸在 LazyInit 早期已由 StateSnapshot 捕获（screenBufferInfo），
-    // 此处优先用快照值（非 ConPTY 场景仍用 wtCols——独立 ConHost 的原本语义）。
-    if (wtCols > 0 && wtRows > 0 && !hooks::IsConPtyConsole()) {
+    if (wtCols > 0 && wtRows > 0) {
         COORD bufSize;
         bufSize.X = static_cast<SHORT>(wtCols);
         bufSize.Y = static_cast<SHORT>(wtRows);
@@ -371,33 +364,6 @@ void EnsureLazyInitialized() {
         VirtualConsoleState::Instance().SetWindowRect(win);
 
         LOG_INFO("ConsoleState corrected by WT size: %ux%u", wtCols, wtRows);
-    } else if (hooks::IsConPtyConsole()) {
-        // ConPTY 场景：虚拟状态保持快照捕获的真实 ConPTY 尺寸
-        // （StateSnapshot::Capture 已存真实值；若快照为 0 兜底用当前真实读取）
-        COORD buf = ConsoleState::Instance().GetBufferSize();
-        if (buf.X <= 0 || buf.Y <= 0) {
-            HANDLE hTmp = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                      nullptr, OPEN_EXISTING, 0, nullptr);
-            if (hTmp != INVALID_HANDLE_VALUE) {
-                CONSOLE_SCREEN_BUFFER_INFO ci{};
-                // LazyInit 期间 GetConsoleScreenBufferInfo_Detour 走 orig，拿到真实值
-                if (GetConsoleScreenBufferInfo(hTmp, &ci)) {
-                    buf = ci.dwSize;
-                }
-                CloseHandle(hTmp);
-            }
-        }
-        if (buf.X > 0 && buf.Y > 0) {
-            ConsoleState::Instance().SetBufferSize(buf);
-            SMALL_RECT win{0, 0, static_cast<SHORT>(buf.X - 1),
-                           static_cast<SHORT>(buf.Y - 1)};
-            ConsoleState::Instance().SetWindow(win);
-            VirtualConsoleState::Instance().SetBufferSize(buf);
-            VirtualConsoleState::Instance().SetWindowRect(win);
-            LOG_INFO("ConsoleState kept at real ConPTY size: %ux%u (ConPTY target)",
-                     buf.X, buf.Y);
-        }
     }
 
     // Phase 10：补发注入前 ConHost 已有屏幕内容到 WT
@@ -545,19 +511,7 @@ void EnsureLazyInitialized() {
         // 注意：必须放在屏幕重放+光标同步之后——resize 触发的重绘输出
         // （走 WriteFile_Detour 直通 WT）会覆盖重放的临时画面，最终正确。
         // 仅 isTarget：子进程尺寸由 WT 位置决定，不参与对齐。
-        // BUG-013（2026-08-19）：ConPTY 场景整块跳过。
-        //   目标的 ConPTY（目标所在 WT 窗口）尺寸由 WT 掌控（缓冲=窗口），
-        //   wtCols/wtRows 是注入时新开 mediator 窗口的尺寸，与目标 ConPTY 无关。
-        //   实测（2026-08-19）：目标 ConPTY 156x43 注入后 1 秒内被 align 压缩成
-        //   120x30 → 画面被裁 + WT 渲染错位 + 滚动条（用户报告 BUG-013）。
-        //   ConPTY 场景的尺寸感知统一由 StatePoller 按真实 ConPTY 轮询完成。
-        if (hooks::IsConPtyConsole()) {
-            if (wtCols > 0 && wtRows > 0) {
-                LOG_INFO("LazyInit: target is ConPTY, skip console alignment "
-                         "(ConPTY geometry owned by WT), wt=%ux%u ignored",
-                         wtCols, wtRows);
-            }
-        } else if (wtCols > 0 && wtRows > 0 && isTarget) {
+        if (wtCols > 0 && wtRows > 0 && isTarget) {
             // 取真实控制台句柄：注入目标在 ConPTY 客户端（opencode/vim）里
             // GetStdHandle(STD_OUTPUT_HANDLE) 拿的是 ConPTY 管道句柄，
             // 对其调 GetConsoleScreenBufferInfo / SetConsole* 全部失败——
@@ -746,16 +700,12 @@ void EnsureLazyInitialized() {
     //       停在注入前状态会让人误以为卡死，隐藏避免干扰
     // 注意：必须走 CallRealGetConsoleWindow（GetConsoleWindow 已 Hook 返回 NULL）
     // 若调试时需查看原 cmd 窗口，注释掉此行
-    // BUG-013：ConPTY 场景（目标跑在 WT 内）跳过隐藏——PseudoConsoleWindow
-    // 是 WT 标签页的宿主窗口，隐藏会干扰 WT 对标签页的管理
-    if (!hooks::IsConPtyConsole()) {
+    {
         HWND hCon = hooks::CallRealGetConsoleWindow();
         if (hCon != nullptr && IsWindowVisible(hCon)) {
             ShowWindow(hCon, SW_HIDE);
             LOG_INFO("LazyInit: original console window hidden (hwnd=%p)", hCon);
         }
-    } else {
-        LOG_INFO("LazyInit: skip hiding console window (ConPTY target)");
     }
 
     g_initialized = true;

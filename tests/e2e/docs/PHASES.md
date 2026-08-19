@@ -427,7 +427,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 13：注入生命周期（12 文件，`lifecycle/`）
+# Phase 13：注入生命周期（11 文件，`lifecycle/`）
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
@@ -443,7 +443,6 @@ if __name__ == "__main__":
 | 104 | `test_tui_resize_scrollback.py` | 注入后 resize WT 无 scrollback（Bug B 回归，2026-08-18 新增） | vim 注入后 UIA 读 TermControl 基线非空白行数；SetWindowPos 缩窄 0.75 后非空白行增长 ≤ 2（修复前 +28：主 buffer ED 2J 推 scrollback；修复后 0~1：LazyInit 补发 ?1049h 后 ED 2J 在 alt buffer 不推） |
 | 105 | `test_tui_unload_restore.py` | 卸载恢复注入几何与画面（BUG-009 回归，2026-08-18 新增） | 100x36 全屏 TUI 注入 → WT 0.6x → 关闭卸载 → ConHost buffer==(100,36)、window==(0,0,99,35)、画面逐行==注入前（旧 DLL FAIL：window 缩到 68x29） |
 | 106 | `test_resize_overlay_clean.py` | 注入后 resize 无叠画（BUG-012 回归，2026-08-19 新增） | 自包含 TARGET 按 GCSBI 尺寸整屏画确定性矩阵（行中部与行尾 '|'）；0.6x/1.4x/1.4x 后 UIA 断言每行 '|' ≤2（修复前 3~4 叠画）+ LAYOUT 键 ≥3 |
-| 107 | `test_conpty_target_geometry.py` | ConPTY 场景（目标跑在 WT 内）几何不被 DLL 触碰（BUG-013 回归，2026-08-19 新增） | TARGET 在 WT 窗口 A 运行；注入（窗口 B）后 A 的 ConPTY 尺寸==注入前（修复前 156x43→120x30 被压缩）；拖动 A → TARGET 经 StatePoller 自感知重排（LAYOUT 新键）；卸载后 ConPTY 保持会话末几何（无回跳竞态） |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -563,7 +562,6 @@ if __name__ == "__main__":
 | BUG-009 | 卸载后原窗口画面错乱（左右列混合叠画、窗口缩窄）（用户报告）：全屏 TUI（winui demo）注入后调小 WT 尺寸再卸载，原 ConHost 画面重放错位 + 窗口永久缩窄。根因：`Unloader::ReplaySessionToConHost` 无条件把会话 VT 流（WT 视口相对坐标）叠加重放到 ConHost 冻结快照上，并把 ConHost 窗口裁剪/移动到会话尺寸（宽=WT 缩窄后列数）；全屏 TUI 以缓冲绝对原点(0,0)绘制，会话期 WT resize/注入对齐已改动真实 ConHost 缓冲/窗口 → 重放必与冻结帧错位叠画 | repro_bug.py：120x40 注入 → WT 0.75 → 关闭 → 卸载后 buffer=120x30 window=[0,0]-[87,29] | `test_tui_unload_restore`（新增） | **已修复**（2026-08-18）：`Unloader.cpp` 按注入类别分流——`VirtualConsoleState` 新增 `m_injectionLineShell`（LazyInit 按 echoInput/bufMatchesWin 判定记录），非行编辑 shell（全屏 TUI）跳过会话 VT 重放，改由新增 `RestoreInjectionGeometry` 把缓冲/窗口恢复为注入尺寸（行编辑 shell 路径不变）；`test_tui_unload_restore` 断言卸载后 buffer==注入尺寸、window==注入矩形、画面逐行==注入前，PASS 3/3（旧 DLL FAIL） |
 | BUG-010 | 注入运行中的全屏 TUI 后鼠标事件全部丢失：TextBox 点击放置光标失效、拖拽变成 WT 选择行（用户报告，winui demo）。根因：目标在**注入前**已 `SetConsoleMode(ENABLE_MOUSE_INPUT…)`，注入后不再调 SetConsoleMode → `ModeChange` 消息永不发出（`ModeHooks.cpp` 仅模式变化时发送）→ mediator 从未向 WT 发 `\x1b[?1002h\x1b[?1006h`（其 `m_mouseReportEnabled` 初始 false 且握手不回填）→ WT 未启用鼠标报告，把点击/拖拽当默认选择行为，目标进程收不到任何 MOUSE_EVENT。现有 mouse e2e 全为"注入后才 set_mode"，此场景从未被覆盖 | 注入前启用鼠标模式的目标（0x98）注入后点击 → 目标 COUNT=0，mediator 日志无 OnModeChange/无 1002h | `test_presolve_mouse`（新增） | **已修复**（2026-08-19）：握手初始化——`Mediator::ApplyInitialMouseReport`（新增）在 Handshake 后按 Hello 初始 inputMode 补发启用/禁用序列并同步 `m_mouseReportEnabled`（幂等，与 OnModeChange 共享状态）；配套修正 `StateSnapshot::ToHelloPayload` 的 `consoleMode` 字段（原误填 outputMode，改填 inputMode，对齐协议注释）；`test_presolve_mouse` 断言握手发 1002h + 点击 down/up 到达 + 拖拽按下期间坐标移动，PASS（修复前 COUNT=0） |
 | BUG-012 | 注入后 resize WT，TUI 画面新旧布局叠画（用户报告"TUI 不响应窗口尺寸变化"，实为叠画误判）：winui demo 120 列布局注入 → 拖宽 WT 到 154 列 → demo 重排新帧，但旧 120 布局帧残片叠在新帧上（用户 dump：旧 TextArea col62-78 残片 + 新 TextArea col81-153 叠画，旧列表 col3-16 在新帧位置同时可见）。根因：`ConsoleToVt::WriteConsoleOutput` 全量路径（canDiff=false，如 resize 触发整屏重绘时）的"跳过默认空格"优化（IsDefaultBlank=' '&&attr==0x07 时不输出）假设 WT 屏幕初始为空白——但注入时 LazyInit 已把目标 ConHost 旧屏幕补发到 WT（或上一帧仍在 WT 上），全量渲染跳过空格 → 旧帧内容永不覆盖 → 叠画（DLL 日志：全量渲染 4935 cells 仅 outBytes=1~23） | exp_clean154.py：154 列 ConHost demo 注入 → 0.6x/1.4x 连续 resize → 每级重排后画面叠画、全量渲染 outBytes≈1 | `test_resize_overlay_clean`（新增） | **已修复**（2026-08-19）：`ConsoleToVt.cpp` 全量路径不再跳过 IsDefaultBlank，输出包括空格在内的全部 cell（diff 路径 canDiff=true 与 lastBuffer 比较完全不变）；`test_resize_overlay_clean` 断言 0.6x/1.4x/1.4x 后每行 '|' 计数 ≤2（无叠画）+ LAYOUT 键 ≥3（resize 驱动重绘），PASS（修复前叠画：'|' 计数 3-4） |
-| BUG-013 | 目标运行在 WT 内（ConPTY）时，注入/卸载破坏其 ConPTY 几何 → 画面错乱+横向滚动条（用户报告）：winui demo 跑在 WT 窗口 A，注入（terminal-injector 新开窗口 B=mediator）。根因一：LazyInit align 用 B 的尺寸（wtCols/wtRows）压缩 A 的 ConPTY（实测 156x43→120x30，画面被裁、WT 渲染错位+滚动条）；根因二：Unloader 卸载时对 ConPTY 做几何恢复（缓冲放大/窗口恢复）与 WT 实际渲染竞态 → 多帧叠画（用户导出文本：120 帧与 154 帧叠画）。独立 ConHost 场景无此问题（几何归目标窗口所有） | v5 复现：WT A 跑 demo（156x43 ConPTY）→ 注入（B 120x30）→ 1s 内 A 的 ConPTY 被压成 120x30；卸载恢复几何与 demo 重绘竞态 | `test_conpty_target_geometry`（新增） | **已修复**（2026-08-19）：新增 `hooks::IsConPtyConsole`（GetConsoleWindow 类名 `PseudoConsoleWindow` vs `ConsoleWindowClass`，实测确认）。ConPTY 场景：LazyInit 跳过 align/隐藏窗口，虚拟状态保持真实 ConPTY 尺寸（不用 B 的 wtCols）；Unloader 整体跳过 ReplaySessionToConHost；`StatePoller` 改为持续轮询真实 ConPTY 尺寸，变化时 ApplyWtResize+EnqueueResizeEvent 驱动目标重排（DllRecvLoop 忽略 mediator 的 ResizeNotify——那是 B 的尺寸）；`test_conpty_target_geometry` 断言注入不压缩/拖动重排/卸载不回跳，PASS 4/4（修复前注入后 156x43→120x30 复现） |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
 
