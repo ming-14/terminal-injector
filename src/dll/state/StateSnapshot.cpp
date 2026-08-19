@@ -162,7 +162,10 @@ protocol::HelloPayload StateSnapshot::ToHelloPayload() const {
     protocol::HelloPayload p{};
     p.targetPid = GetCurrentProcessId();
     p.targetBitness = 64;
-    p.consoleMode = static_cast<uint16_t>(outputMode);
+    // consoleMode 协议注释为"初始 GetConsoleMode（输入句柄）"：
+    // mediator 用它初始化 WT 鼠标报告（目标可能在注入前已启用鼠标模式，
+    // 握手后 DLL 不再发 ModeChange，mediator 必须按初始模式补发 VT 序列）
+    p.consoleMode = static_cast<uint16_t>(inputMode);
     p.consoleCp = static_cast<uint16_t>(inputCp);
     p.consoleOutputCp = static_cast<uint16_t>(outputCp);
     p.bufferCols = static_cast<uint16_t>(screenBufferInfo.dwSize.X);

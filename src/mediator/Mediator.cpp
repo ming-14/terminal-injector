@@ -252,6 +252,12 @@ bool Mediator::Handshake() {
     // 把目标快照状态应用到 WT（窗口尺寸）
     ApplySnapshotToWt(hello);
 
+    // 按目标的初始输入模式初始化 WT 鼠标报告
+    // 目标可能在注入前已启用 ENABLE_MOUSE_INPUT（如运行中的全屏 TUI），
+    // 注入后不再 SetConsoleMode → 不触发 ModeChange；此处补发启用序列，
+    // 否则 WT 不发送任何鼠标事件（点击/拖拽全被 WT 当选择处理）
+    ApplyInitialMouseReport(hello.consoleMode);
+
     // 回 HelloAck：携带 WT 侧当前窗口尺寸 + 当前光标位置
     // isTarget=1：本会话为注入目标进程（mediator 主会话），DLL 据此启用 KickStart
     // cursorX/Y：ApplySnapshotToWt 之后获取，DLL 用它对齐 ConsoleState 光标缓存，
@@ -476,6 +482,37 @@ void Mediator::BridgeLoop() {
 // ============================================================
 // Phase 6+：鼠标报告模式管理
 // ============================================================
+// 握手初始化：按 Hello 携带的初始 inputMode 设置 WT 鼠标报告
+// 仅父进程主会话调用（子进程用 VT/DECSET 自控鼠标，见 OnModeChange fromChild）
+// 幂等：与当前 m_mouseReportEnabled 一致则不发送（不干扰后续 ModeChange 流）
+void Mediator::ApplyInitialMouseReport(uint32_t inputMode) {
+    const uint32_t ENABLE_MOUSE_INPUT_FLAG = 0x0010;
+    bool wantMouse = (inputMode & ENABLE_MOUSE_INPUT_FLAG) != 0;
+    bool changed = (wantMouse != m_mouseReportEnabled);
+
+    LOG_INFO("ApplyInitialMouseReport: inputMode=0x%lx wantMouse=%d enabled=%d changed=%d",
+             inputMode, wantMouse ? 1 : 0, m_mouseReportEnabled ? 1 : 0, changed ? 1 : 0);
+
+    if (!changed) {
+        m_lastInputMode = inputMode;
+        return;
+    }
+
+    if (wantMouse) {
+        const char seq[] = "\x1b[?1002h\x1b[?1006h";
+        WriteStdoutVt(seq, sizeof(seq) - 1);
+        m_mouseReportEnabled = true;
+        LOG_INFO("ApplyInitialMouseReport: sent \\x1b[?1002h\\x1b[?1006h (enable mouse report)");
+    } else {
+        const char seq[] = "\x1b[?1002l\x1b[?1006l";
+        WriteStdoutVt(seq, sizeof(seq) - 1);
+        m_mouseReportEnabled = false;
+        LOG_INFO("ApplyInitialMouseReport: sent \\x1b[?1002l\\x1b[?1006l (disable mouse report)");
+    }
+
+    m_lastInputMode = inputMode;
+}
+
 // 收到 DLL 的 ModeChange 时，根据 inputMode 的 ENABLE_MOUSE_INPUT 标志
 // 向 WT stdout 发 VT 鼠标报告启用/禁用序列。
 //

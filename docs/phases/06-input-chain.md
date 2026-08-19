@@ -390,6 +390,22 @@ void DllRecvLoop() {
 - 鼠标坐标依赖窗口尺寸正确（Phase 5）
 - VT 输入模式欺骗在 Phase 7（目标可能未开 VT 输入模式，需 Hook GetConsoleMode 强制返回）
 
+### 4.9 握手初始化鼠标报告（2026-08-19，BUG-010/011）
+
+**问题**：目标在**注入前**已启用 `ENABLE_MOUSE_INPUT`（如注入运行中的全屏 TUI：
+winui 启动即 `SetConsoleMode(0x98)`），注入后不再调 SetConsoleMode → `ModeChange`
+消息永不发出（ModeHooks 仅模式变化时发送）→ mediator 从未向 WT 发 `\x1b[?1002h\x1b[?1006h`
+（`m_mouseReportEnabled` 初始 false 且握手不回填）→ WT 未启用鼠标报告，把点击/拖拽
+当默认选择行为，目标收不到任何 MOUSE_EVENT。
+
+**修复**：`Mediator::ApplyInitialMouseReport`（握手 `Handshake()` 中，收到 Hello 后
+调用）按 `HelloPayload.inputMode` 的 ENABLE_MOUSE_INPUT 标志补发启用/禁用序列并
+同步 `m_mouseReportEnabled`（与 `OnModeChange` 幂等共享状态，一致则不重复发）。
+配套：`StateSnapshot::ToHelloPayload` 的 `consoleMode` 字段原误填 `outputMode`，
+改填 `inputMode`（对齐协议注释"初始 GetConsoleMode（输入句柄）"）。
+回归：`tests/e2e/mouse/test_presolve_mouse.py`（注入前 0x98 模式目标：握手日志含
+1002h + 点击 down/up 到达 + 拖拽按下期间坐标移动）。
+
 ---
 
 ## 6. 风险点

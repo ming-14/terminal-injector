@@ -81,6 +81,21 @@ ConHost，cmd 被 KickStart 回车唤醒后又自绘一个新 prompt → 每次�
 | 逐像素一致性（一次性脚本，无输入 3 轮，注入→卸载；已清理） | 3/3：每轮卸载后 nz=[0,1,3]、prompt@3、光标 (41,3)，与注入前逐像素一致 |
 | `tests/e2e/lifecycle/test_repeat_inject_unload.py`（现存，含单 prompt 断言） | 10/10：prompt 行数恒为 1，无进程/WT 残留 |
 | `tests/e2e/lifecycle/test_blankline_accumulation.py`（2026-08-10 新增） | 6/6：dir 制造滚动历史后循环注入/卸载，每轮 blanks 恒 = baseline（1），prompt 行不增长；修复前实测 blanks 1→7 逐轮 +1 |
+| `tests/e2e/lifecycle/test_tui_unload_restore.py`（2026-08-18 新增，BUG-009） | 3/3：100x36 全屏 TUI 注入 → WT 0.6x → 卸载 → ConHost buffer/window 恢复注入几何、画面逐行==注入前（旧 DLL FAIL） |
+
+## 6.5 按注入类别分流（BUG-009，2026-08-18）
+
+**问题**：`ReplaySessionToConHost` 无条件把会话 VT 流（WT 视口相对坐标）叠加重放到
+ConHost 冻结快照上，并把窗口裁剪/移动到会话尺寸（宽=WT 缩窄后列数）。全屏 TUI
+以缓冲绝对原点 (0,0) 绘制，会话期 WT resize/注入对齐已改动真实 ConHost 缓冲/窗口
+→ 重放必与冻结帧错位叠画 + 窗口永久缩窄。
+
+**修复**：卸载按注入类别分流——`VirtualConsoleState` 新增 `m_injectionLineShell`
+（LazyInit 按 `echoInput && !bufMatchesWin` 判定记录）；非行编辑 shell（全屏 TUI）
+**跳过会话 VT 重放**，改由 `RestoreInjectionGeometry` 把缓冲/窗口恢复为注入尺寸
+（缓冲只放大不缩小、窗口恢复完整注入矩形）；行编辑 shell 路径完全不变（重放+视口
+top=注入 top：scrollback 语义保留）。回归：`test_tui_unload_restore` 及
+`test_repeat_inject_unload`/`test_unload_clean` 全 PASS。
 
 ## 6. 残余边界
 

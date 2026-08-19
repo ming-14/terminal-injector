@@ -409,6 +409,17 @@ void EnsureLazyInitialized() {
                                    snap.screenBufferInfo.dwSize.Y == winH;
         const bool isLineShell = echoInput && !bufMatchesWin;
 
+        // 卸载分流基准（BUG-009）：把注入瞬间的进程类别记录到 VirtualConsoleState。
+        // 全屏 TUI（isLineShell=false）卸载时不做会话 VT 重放（其 VT 流是 WT
+        // 视口相对坐标，ConHost 冻结快照的坐标原点不同，重放必错位），只恢复
+        // 注入几何；行编辑 shell 保持重放（scrollback 语义）。
+        VirtualConsoleState::Instance().SetInjectionLineShell(isLineShell);
+        LOG_INFO("LazyInit: injection lineShell=%d (echoInput=%d bufMatchesWin=%d "
+                 "buf=%dx%d win=%dx%d)",
+                 isLineShell ? 1 : 0, echoInput ? 1 : 0, bufMatchesWin ? 1 : 0,
+                 snap.screenBufferInfo.dwSize.X, snap.screenBufferInfo.dwSize.Y,
+                 winW, winH);
+
         // BUG-002/Bug B 根因修复（2026-08-18 实测锁定）：全屏 TUI 补切 Alt Buffer。
         // 背景：vim/ncurses 全屏 TUI 启动时发的 \x1b[?1049h（切 Alt Buffer）发生在
         //       注入之前，字节只写入原 ConHost，未到达 WT → WT 侧 TUI 画面停留在
