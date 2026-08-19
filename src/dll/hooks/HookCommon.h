@@ -80,4 +80,17 @@ bool SendToMediator(const void* data, size_t len,
                     protocol::MessageType type = protocol::MessageType::VtOutput,
                     bool recordReplay = true);
 
+// 判断本进程控制台是否为 ConPTY 场景（目标程序运行在 Windows Terminal /
+// ConPTY 客户端里，如 wt 标签页内直接运行的 TUI）。
+// 判定依据（2026-08-19 实测）：ConPTY 模式的 conhost 窗口类名为
+// "PseudoConsoleWindow"；独立 ConHost 窗口类名为 "ConsoleWindowClass"。
+// 场景差异（BUG-013 根因）：
+//   - 独立 ConHost：目标进程独占控制台窗口，DLL 对齐/resize/卸载恢复几何有意义
+//   - ConPTY：目标进程的控制台几何完全由 WT 掌控（缓冲=窗口），DLL 用外部
+//     wtCols（注入时新开 WT 窗口的尺寸）做对齐会把目标 ConPTY 压缩/拉宽，
+//     卸载时恢复几何又与 WT 实际渲染竞态 → 画面错乱 + 滚动条（用户报告）。
+//   ConPTY 场景下所有几何操作应跳过，虚拟状态跟随真实 ConPTY 尺寸
+//   （VirtualConsoleState 由 StatePoller 按真实 ConPTY 轮询更新）。
+bool IsConPtyConsole();
+
 } // namespace terminjector::hooks

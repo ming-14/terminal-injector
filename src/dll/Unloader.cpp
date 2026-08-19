@@ -68,6 +68,7 @@
 #include "transport/ITransport.h"
 #include "hooks/InputHooks.h"
 #include "hooks/ProtectionHooks.h"
+#include "hooks/HookCommon.h"
 
 #include <windows.h>
 #include <thread>
@@ -438,6 +439,17 @@ void Unloader::ReplaySessionToConHost() {
     // prompt 之后的连续行上，相对映射恰好成立（scrollback 语义，保留）。
     // 全屏 TUI 进程自身存活：恢复注入几何后，其尺寸轮询/事件会感知变化
     // 并按原尺寸重绘，画面自然回到注入前布局（无需也无法"回放"会话帧）。
+    //
+    // BUG-013（2026-08-19）：ConPTY 场景（目标跑在 WT 内）直接整体跳过。
+    // ConPTY 的几何（缓冲=窗口）完全由 WT 掌控，Unloader 的缓冲放大/窗口
+    // 恢复与 WT 实际渲染发生竞态；而且会话帧本来就在目标所在的 WT 标签页
+    // 上显示（输出经 DLL→mediator 写回同屏），无需重放也无需恢复几何。
+    // 卸载后目标进程按真实 ConPTY 尺寸继续渲染，画面自然一致。
+    if (hooks::IsConPtyConsole()) {
+        LOG_INFO("Replay: target is ConPTY, skip ConHost replay & geometry restore "
+                 "(geometry owned by WT)");
+        return;
+    }
     if (!VirtualConsoleState::Instance().IsInjectionLineShell()) {
         RestoreInjectionGeometry(hOut, cur);
         return;
