@@ -158,9 +158,11 @@ std::string ConsoleToVt::WriteConsoleOutput(
 ```
 
 **性能注意**：`WriteConsoleOutput` 可能一次写 80×25=2000 个 cell，逐个输出 VT 序列会很长。优化：
-- 跳过空格 + 默认属性的 cell
-- 同行连续相同属性的字符合并为一次光标定位 + 多字符
+- ~~跳过空格 + 默认属性的 cell~~（**已移除**，见下记 BUG-012）
+- 合并同行同属性（SGR 仅变化时输出）
 - 后期（Phase 10）可考虑 diff 算法只输出与上次不同的 cell
+
+**BUG-012 修正（2026-08-19）**：全量路径（canDiff=false，如 resize 触发整屏重绘）原"跳过空格+默认属性"优化假设 WT 屏幕初始为空白——但注入时 LazyInit 已把目标 ConHost 旧屏幕补发到 WT（或上一帧仍在 WT 上），全量渲染跳过空格 → 旧帧内容永不覆盖 → 窗口 resize 后新旧布局叠画（DLL 日志全量渲染 4935 cells 仅 outBytes=1~23）。修复：全量路径不再跳过 `IsDefaultBlank`，输出包括空格在内的全部 cell；diff 路径（canDiff=true 与 lastBuffer 比较）不受影响。回归：`test_resize_overlay_clean`（0.6x/1.4x 连续 resize 无叠画）。
 
 ### 4.4 `FillConsoleOutput*` 翻译
 

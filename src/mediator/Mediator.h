@@ -91,6 +91,13 @@ private:
 
     // === Phase 6+：鼠标报告模式管理 ===
 
+    // 握手时基于 Hello 携带的初始输入模式初始化 WT 鼠标报告状态
+    // 目标程序可能在注入前已启用 ENABLE_MOUSE_INPUT（如注入运行中的全屏 TUI），
+    // 此后不再调 SetConsoleMode → ModeChange 永不发 → WT 不启用鼠标报告，
+    // 鼠标点击/拖拽会被 WT 当作选择行为，目标进程收不到任何 MOUSE_EVENT。
+    // 本方法与 OnModeChange 共享 m_mouseReportEnabled 状态（幂等：一致则不发）。
+    void ApplyInitialMouseReport(uint32_t inputMode);
+
     // 收到 DLL 的 ModeChange 时，根据 inputMode 的 ENABLE_MOUSE_INPUT 标志
     // 向 WT stdout 发送 VT 鼠标报告启用/禁用序列。
     //   含 ENABLE_MOUSE_INPUT → \x1b[?1002h\x1b[?1006h（按钮事件 + SGR1006）

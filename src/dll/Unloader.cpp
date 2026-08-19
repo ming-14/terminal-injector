@@ -101,6 +101,52 @@ std::pair<HANDLE, bool> GetConsoleOutHandle() {
     return {h, false};
 }
 
+// 恢复 ConHost 到注入时几何（全屏 TUI 卸载路径，BUG-009）。
+// 会话期 WT resize / 注入对齐可能改动真实 ConHost 缓冲与窗口（如 120x40
+// 缩到 88x30、窗口迁移），TUI 自身以绝对原点绘制，卸载后必须回到注入时
+// 窗口它才能按原布局继续。缓冲只放大绝不缩小（保留滚动内容，与行编辑
+// shell 路径同原则）；顺序必须缓冲先行——窗口要落在缓冲内。
+// 不做任何 VT 重放/清屏/光标搬动：冻结快照即 TUI 注入前最后画面，TUI
+// 感知几何变化后会自行重绘覆盖。
+void RestoreInjectionGeometry(HANDLE hOut, const CONSOLE_SCREEN_BUFFER_INFO& cur) {
+    const COORD injBuf = VirtualConsoleState::Instance().GetInjectionBufferSize();
+    const SMALL_RECT injWin = VirtualConsoleState::Instance().GetInjectionWindow();
+    if (injBuf.X <= 0 || injBuf.Y <= 0) {
+        LOG_WARN("TUI restore: injection buffer size invalid (%d,%d), skip",
+                 injBuf.X, injBuf.Y);
+        return;
+    }
+
+    // 1. 缓冲放大到注入尺寸（只放大，绝不缩小）
+    const COORD newBuf{(SHORT)((cur.dwSize.X > injBuf.X) ? cur.dwSize.X : injBuf.X),
+                       (SHORT)((cur.dwSize.Y > injBuf.Y) ? cur.dwSize.Y : injBuf.Y)};
+    if (newBuf.X > cur.dwSize.X || newBuf.Y > cur.dwSize.Y) {
+        if (!SetConsoleScreenBufferSize(hOut, newBuf)) {
+            LOG_WARN("TUI restore: SetConsoleScreenBufferSize(%d,%d) failed err=%lu "
+                     "(keep current buffer)",
+                     newBuf.X, newBuf.Y, GetLastError());
+        }
+    }
+
+    // 2. 窗口恢复为注入时完整矩形
+    if (injWin.Left != cur.srWindow.Left || injWin.Top != cur.srWindow.Top ||
+        injWin.Right != cur.srWindow.Right || injWin.Bottom != cur.srWindow.Bottom) {
+        if (!SetConsoleWindowInfo(hOut, TRUE, &injWin)) {
+            LOG_WARN("TUI restore: SetConsoleWindowInfo(%d,%d)-(%d,%d) failed err=%lu",
+                     injWin.Left, injWin.Top, injWin.Right, injWin.Bottom,
+                     GetLastError());
+        }
+    } else {
+        LOG_INFO("TUI restore: window already at injection geometry "
+                 "(%d,%d)-(%d,%d)", injWin.Left, injWin.Top, injWin.Right, injWin.Bottom);
+    }
+    LOG_INFO("TUI restore: ConHost restored to injection geometry "
+             "buf=(%d,%d)->(%d,%d) win=(%d,%d)-(%d,%d), skip session VT replay "
+             "(fullscreen TUI, app will repaint)",
+             cur.dwSize.X, cur.dwSize.Y, newBuf.X, newBuf.Y,
+             injWin.Left, injWin.Top, injWin.Right, injWin.Bottom);
+}
+
 } // namespace
 
 std::atomic<bool> Unloader::s_unloading{false};
@@ -375,15 +421,32 @@ void Unloader::ReplaySessionToConHost() {
         return;
     }
 
-    // 会话最终尺寸（虚拟状态，由 Set* Hook 与 WT resize 维护）
-    const COORD targetBuf = VirtualConsoleState::Instance().GetBufferSize();
-    const SMALL_RECT targetWin = VirtualConsoleState::Instance().GetWindowRect();
-
     CONSOLE_SCREEN_BUFFER_INFO cur{};
     if (!GetConsoleScreenBufferInfo(hOut, &cur)) {
         LOG_WARN("Replay: GetConsoleScreenBufferInfo failed err=%lu", GetLastError());
         return;
     }
+
+    // 全屏 TUI 会话分流（BUG-009）：不做会话 VT 重放。
+    // 根因：会话期 TUI 的全部渲染被拦截进 WT，VtReplayBuffer 记录的是【WT
+    // 视口相对】坐标的 VT 流（CUP 行 0..rows-1），而 ConHost 冻结的是注入
+    // 时快照——TUI 自身以缓冲绝对原点（0,0）绘制，与视口相对坐标系不同。
+    // 会话期 WT resize/注入对齐还会改动 ConHost 窗口/缓冲（视口缩小、窗口
+    // 迁移），重放视口相对流必然把内容写到与冻结帧错位的行/列上 → 两帧
+    // 叠画、列错位、换行回绕（用户反馈：劫持-缩窗-卸载后原窗口画面混合
+    // 错乱）；行编辑 shell 因窗口顶部=注入时 srWindow.Top 且会话内容写在
+    // prompt 之后的连续行上，相对映射恰好成立（scrollback 语义，保留）。
+    // 全屏 TUI 进程自身存活：恢复注入几何后，其尺寸轮询/事件会感知变化
+    // 并按原尺寸重绘，画面自然回到注入前布局（无需也无法"回放"会话帧）。
+    if (!VirtualConsoleState::Instance().IsInjectionLineShell()) {
+        RestoreInjectionGeometry(hOut, cur);
+        return;
+    }
+
+    // 会话最终尺寸（虚拟状态，由 Set* Hook 与 WT resize 维护）
+    const COORD targetBuf = VirtualConsoleState::Instance().GetBufferSize();
+    const SMALL_RECT targetWin = VirtualConsoleState::Instance().GetWindowRect();
+
     LOG_INFO("Replay: session buf=(%d,%d) win=(%d,%d,%d,%d), cur buf=(%d,%d), vt=%zu bytes%s",
              targetBuf.X, targetBuf.Y, targetWin.Left, targetWin.Top,
              targetWin.Right, targetWin.Bottom, cur.dwSize.X, cur.dwSize.Y,

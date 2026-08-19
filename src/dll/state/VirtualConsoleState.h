@@ -47,6 +47,19 @@ public:
     // 目录中间/重复 → 解除后双 prompt）。
     SMALL_RECT GetInjectionWindow() const;
 
+    // === 注入时 ConHost 缓冲尺寸 ===
+    // 卸载恢复全屏 TUI 几何用：会话期 WT resize / 注入对齐可能改动真实
+    // ConHost 缓冲，卸载恢复注入时尺寸（只放大）让 TUI 按原几何继续。
+    COORD GetInjectionBufferSize() const;
+
+    // === 注入时进程类别（行编辑 shell vs 全屏 TUI） ===
+    // 由 LazyInit 按注入快照判定（echoInput && !bufMatchesWin）后写入。
+    // 卸载时据此分流：行编辑 shell 做会话 VT 重放（scrollback 语义）；
+    // 全屏 TUI 不做重放（其会话 VT 是 WT 视口相对坐标，ConHost 原点不同，
+    // 重放必错位叠画），只恢复注入几何，交给应用自行重绘。
+    void SetInjectionLineShell(bool lineShell);
+    bool IsInjectionLineShell() const;
+
     // === 注入时 ConHost 光标 ===
     // 卸载重放前光标归位用（会话期 cmd 交互可能移动 ConHost 光标到窗口外）。
     COORD GetInjectionCursor() const;
@@ -91,8 +104,10 @@ private:
     COORD m_cursorPos{0, 0};
     COORD m_injectionCursor{0, 0};     // 注入时 ConHost 光标（卸载重放光标归位基准）
     COORD m_bufferSize{80, 25};
+    COORD m_injectionBufferSize{0, 0}; // 注入时 ConHost 缓冲尺寸（卸载恢复几何基准）
     SMALL_RECT m_windowRect{0, 0, 79, 24};
     SMALL_RECT m_injectionWindow{0, 0, 0, 0};  // 注入时 ConHost 可见窗口（卸载重放基准）
+    bool m_injectionLineShell = true;  // 注入时进程类别：默认按行编辑 shell 处理（重放语义安全）
     std::atomic<WORD> m_attributes{FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED};
     std::atomic<int32_t> m_terminalCaps{0};  // Phase 15：终端能力标识（DA 响应）
     std::atomic<bool> m_initialized{false};

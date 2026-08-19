@@ -33,6 +33,7 @@ void VirtualConsoleState::InitializeFromConHost() {
 
     std::lock_guard<std::mutex> lock(m_lock);
     m_bufferSize = info.dwSize;
+    m_injectionBufferSize = info.dwSize;  // 记录注入时缓冲尺寸（卸载恢复几何基准）
     m_cursorPos = info.dwCursorPosition;
     m_injectionCursor = info.dwCursorPosition;  // 记录注入时光标，卸载重放光标归位基准
     m_attributes.store(info.wAttributes);
@@ -55,6 +56,21 @@ SMALL_RECT VirtualConsoleState::GetInjectionWindow() const {
 COORD VirtualConsoleState::GetInjectionCursor() const {
     std::lock_guard<std::mutex> lock(m_lock);
     return m_injectionCursor;
+}
+
+COORD VirtualConsoleState::GetInjectionBufferSize() const {
+    std::lock_guard<std::mutex> lock(m_lock);
+    return m_injectionBufferSize;
+}
+
+void VirtualConsoleState::SetInjectionLineShell(bool lineShell) {
+    std::lock_guard<std::mutex> lock(m_lock);
+    m_injectionLineShell = lineShell;
+}
+
+bool VirtualConsoleState::IsInjectionLineShell() const {
+    std::lock_guard<std::mutex> lock(m_lock);
+    return m_injectionLineShell;
 }
 
 COORD VirtualConsoleState::GetCursorPos() const {

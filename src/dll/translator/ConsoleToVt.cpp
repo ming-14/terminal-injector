@@ -233,16 +233,19 @@ std::string ConsoleToVt::WriteConsoleOutput(
             }
 
             // 跳过条件：
-            //   - 全量路径：跳过默认空格（WT 初始状态，无需输出）
             //   - diff 路径：跳过与缓存相同的 cell（无变化）
+            //   - 全量路径：不跳过任何 cell（含默认空格）。
+            //     历史实现跳过"默认空格"（IsDefaultBlank），假设 WT 屏幕
+            //     初始为空白；但注入时 LazyInit 已把目标 ConHost 旧屏幕补发
+            //     到 WT（或上一次渲染的帧仍在 WT 上），全量渲染跳过空格
+            //     会让旧帧内容残留 → 窗口 resize 后新旧布局叠画
+            //     （实测：120->69->99->141 连续 resize，全量渲染 4935 cell
+            //      仅输出 1~23 字节，三帧叠画；BUG-012）
+            //     全量 = 保证屏幕与矩阵一致，必须写出包括空格在内的全部 cell。
             bool skip = false;
             if (canDiff) {
                 const CHAR_INFO& last = s_lastBuffer[static_cast<size_t>(r) * regionCols + c];
                 if (CellEqual(ci, last)) {
-                    skip = true;
-                }
-            } else {
-                if (IsDefaultBlank(ci)) {
                     skip = true;
                 }
             }

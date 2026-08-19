@@ -299,7 +299,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 8：鼠标（7 文件，`mouse/`）
+# Phase 8：鼠标（8 文件，`mouse/`）
 
 目标：SendInput 鼠标 → WT → mediator → DLL 全链路，坐标/按键/标志位精确（Phase 6/16）。
 
@@ -312,9 +312,10 @@ if __name__ == "__main__":
 | 67 | `test_hwheel.py` | 横向滚轮 | MOUSE_HWHEELED 标志 + delta 方向正确 |
 | 68 | `test_coords.py` | 坐标精度（0/1-based 转换） | 点击两处不同位置，坐标差与屏幕像素差一致（±1） |
 | 69 | `test_state_reset.py` | 模式切换鼠标状态重置（Phase 16） | 按下-模式切换-释放：释放不误判为按下；状态清零 |
+| 70 | `test_presolve_mouse.py` | 注入前已启用鼠标模式的 TUI（BUG-010/011 回归，2026-08-19 新增） | 目标注入前 set 0x98 → 握手后 mediator 日志含 1002h 启用序列；点击 down/up 到达；拖拽按下期间坐标移动 |
 
 ## 验证标准
-- [x] 7 个文件全部 PASS
+- [x] 8 个文件全部 PASS
 - [x] 68：目标读到的 0-based 坐标与窗口内点击相对位置换算一致（A=49,11 B=72,16，重复点击精确一致）
 - 备注（实际行为与计划差异）：
   - 64：SGR 1006 无双击概念，MOUSE_DOUBLE_CLICK 标志不设置（VtToInputRecord.cpp ParseMouse 无该逻辑）——SKIP 分支记录
@@ -426,7 +427,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 13：注入生命周期（9 文件，`lifecycle/`）
+# Phase 13：注入生命周期（11 文件，`lifecycle/`）
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
@@ -440,6 +441,8 @@ if __name__ == "__main__":
 | 102 | `test_pipe_security.py` | 管道安全（HIGH #2） | 随机管道名 `\\.\pipe\terminjector_<pid>_<hex>` 每会话不同；server DACL 收紧；DLL 日志 `server identity verified`；预创建旧固定管道名不影响注入 |
 | 103 | `test_list_targets.py` | `--list-targets` 进程枚举（2026-08-17 新增） | 默认仅可注入（STATUS 全为 injectable）；`--all` 附带原因标记（access_denied 等）；`--json` 合法且仅含 injectable=true；当前测试进程在可注入列表 |
 | 104 | `test_tui_resize_scrollback.py` | 注入后 resize WT 无 scrollback（Bug B 回归，2026-08-18 新增） | vim 注入后 UIA 读 TermControl 基线非空白行数；SetWindowPos 缩窄 0.75 后非空白行增长 ≤ 2（修复前 +28：主 buffer ED 2J 推 scrollback；修复后 0~1：LazyInit 补发 ?1049h 后 ED 2J 在 alt buffer 不推） |
+| 105 | `test_tui_unload_restore.py` | 卸载恢复注入几何与画面（BUG-009 回归，2026-08-18 新增） | 100x36 全屏 TUI 注入 → WT 0.6x → 关闭卸载 → ConHost buffer==(100,36)、window==(0,0,99,35)、画面逐行==注入前（旧 DLL FAIL：window 缩到 68x29） |
+| 106 | `test_resize_overlay_clean.py` | 注入后 resize 无叠画（BUG-012 回归，2026-08-19 新增） | 自包含 TARGET 按 GCSBI 尺寸整屏画确定性矩阵（行中部与行尾 '|'）；0.6x/1.4x/1.4x 后 UIA 断言每行 '|' ≤2（修复前 3~4 叠画）+ LAYOUT 键 ≥3 |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -556,6 +559,9 @@ if __name__ == "__main__":
 | BUG-007 | 同进程反复注入/卸载后 ConHost 空行逐轮累积（用户报告）：dir 统计行与 prompt 间空行每轮 +1、prompt 逐轮下移一行。根因：`Unloader.cpp` 步骤 3.1 在光标归位**前**记录 `preReplayCur`（= KickStart 回车回显后的 `(0,N+1)`，窗口外）；空会话重放仅 `ESC[0m`（SGR 不移动光标），重放后光标 `(0,N)` ≠ `(0,N+1)` → 惰性重放分支（5.5）永不触发 → cmd 回显 `\r\n` 后新 prompt 写 N+1 行、快照 prompt 行留空 | 修复前 6 轮注入/卸载，blanks 1→2→…→7（每轮 +1，DLL 日志快照光标 97→101） | `test_blankline_accumulation`（新增） | **已修复**（2026-08-10）：`Unloader.cpp` 步骤 3.1 光标归位成功后记录归位后位置为 `preReplayCur`；修复后 6 轮 blanks 恒 = baseline（1），对照实验（旧 DLL）blanks 1→7 复现 |
 | BUG-006 | 补发（resync）序列与内容字节合并：输入/输出补发序列拼接进同一条 VtOutput 消息（len=补发+内容），且 BatchSender 会合并相邻发送，字节边界不可区分 → e2e 精确断言（`ChildVtOutput: len=3 hex[3]=61 0A 62`）被破坏 | 写前置补发/回显补发后目标输出 → 日志 len=10 而非 3 | `test_processed_output` / `test_vt_output_mode` | **已修复**（2026-08-05）：新增协议类型 `CursorSync=0x0090`（DLL→mediator，不经 BatchSender 即时发送先于内容），`ChildSession` 收到即写 stdout；内容消息字节保持原样，断言恢复，PASS（详见 `docs/phases/19-vt-cursor-tracker.md` 第 7 节） |
 | BUG-008 | 注入后 resize WT 出现滚动条 + 60 行双帧（用户报告）：全屏 TUI（vim）启动时发的 `\x1b[?1049h`（切 alt buffer）发生在注入之前、只写入原 ConHost，未到达 WT → WT 侧 vim 画面停留在**主 buffer**；WT resize 触发 vim CLEAR 重绘（ED 2J + 全屏，经 DLL 直通 3683 字节）→ WT 主 buffer 收到 ED 2J 把视口整屏推入 scrollback（真实 WT 实测：主 buffer 30 行+2J → UIA 70 行；alt buffer 同操作仅 6 行不推）→ 滚动条 + 双帧。原生 vim 直连 ConPTY 时 1049h 早已到达 WT（alt buffer），ED 2J 不推 scrollback，无此现象 | 注入后 SetWindowPos 缩窄 WT → UIA 非空白行 28→56（+28 scrollback） | `test_tui_resize_scrollback`（新增） | **已修复**（2026-08-18，方案 A 非降级）：`LazyInit.cpp` 注入初始化重放前对全屏 TUI（`isLineShell=false` 且 wt 尺寸已知）向 WT 补发 `\x1b[?1049h`（`vt::kEnterAltBuffer`，`recordReplay=false`，仅服务 WT 侧画面语义；退出时 vim 自身 `?1049l` 被 DLL 捕获直通自动切回）；`test_tui_resize_scrollback` resize 后非空白行 28→28 PASS（修复前 +28） |
+| BUG-009 | 卸载后原窗口画面错乱（左右列混合叠画、窗口缩窄）（用户报告）：全屏 TUI（winui demo）注入后调小 WT 尺寸再卸载，原 ConHost 画面重放错位 + 窗口永久缩窄。根因：`Unloader::ReplaySessionToConHost` 无条件把会话 VT 流（WT 视口相对坐标）叠加重放到 ConHost 冻结快照上，并把 ConHost 窗口裁剪/移动到会话尺寸（宽=WT 缩窄后列数）；全屏 TUI 以缓冲绝对原点(0,0)绘制，会话期 WT resize/注入对齐已改动真实 ConHost 缓冲/窗口 → 重放必与冻结帧错位叠画 | repro_bug.py：120x40 注入 → WT 0.75 → 关闭 → 卸载后 buffer=120x30 window=[0,0]-[87,29] | `test_tui_unload_restore`（新增） | **已修复**（2026-08-18）：`Unloader.cpp` 按注入类别分流——`VirtualConsoleState` 新增 `m_injectionLineShell`（LazyInit 按 echoInput/bufMatchesWin 判定记录），非行编辑 shell（全屏 TUI）跳过会话 VT 重放，改由新增 `RestoreInjectionGeometry` 把缓冲/窗口恢复为注入尺寸（行编辑 shell 路径不变）；`test_tui_unload_restore` 断言卸载后 buffer==注入尺寸、window==注入矩形、画面逐行==注入前，PASS 3/3（旧 DLL FAIL） |
+| BUG-010 | 注入运行中的全屏 TUI 后鼠标事件全部丢失：TextBox 点击放置光标失效、拖拽变成 WT 选择行（用户报告，winui demo）。根因：目标在**注入前**已 `SetConsoleMode(ENABLE_MOUSE_INPUT…)`，注入后不再调 SetConsoleMode → `ModeChange` 消息永不发出（`ModeHooks.cpp` 仅模式变化时发送）→ mediator 从未向 WT 发 `\x1b[?1002h\x1b[?1006h`（其 `m_mouseReportEnabled` 初始 false 且握手不回填）→ WT 未启用鼠标报告，把点击/拖拽当默认选择行为，目标进程收不到任何 MOUSE_EVENT。现有 mouse e2e 全为"注入后才 set_mode"，此场景从未被覆盖 | 注入前启用鼠标模式的目标（0x98）注入后点击 → 目标 COUNT=0，mediator 日志无 OnModeChange/无 1002h | `test_presolve_mouse`（新增） | **已修复**（2026-08-19）：握手初始化——`Mediator::ApplyInitialMouseReport`（新增）在 Handshake 后按 Hello 初始 inputMode 补发启用/禁用序列并同步 `m_mouseReportEnabled`（幂等，与 OnModeChange 共享状态）；配套修正 `StateSnapshot::ToHelloPayload` 的 `consoleMode` 字段（原误填 outputMode，改填 inputMode，对齐协议注释）；`test_presolve_mouse` 断言握手发 1002h + 点击 down/up 到达 + 拖拽按下期间坐标移动，PASS（修复前 COUNT=0） |
+| BUG-012 | 注入后 resize WT，TUI 画面新旧布局叠画（用户报告"TUI 不响应窗口尺寸变化"，实为叠画误判）：winui demo 120 列布局注入 → 拖宽 WT 到 154 列 → demo 重排新帧，但旧 120 布局帧残片叠在新帧上（用户 dump：旧 TextArea col62-78 残片 + 新 TextArea col81-153 叠画，旧列表 col3-16 在新帧位置同时可见）。根因：`ConsoleToVt::WriteConsoleOutput` 全量路径（canDiff=false，如 resize 触发整屏重绘时）的"跳过默认空格"优化（IsDefaultBlank=' '&&attr==0x07 时不输出）假设 WT 屏幕初始为空白——但注入时 LazyInit 已把目标 ConHost 旧屏幕补发到 WT（或上一帧仍在 WT 上），全量渲染跳过空格 → 旧帧内容永不覆盖 → 叠画（DLL 日志：全量渲染 4935 cells 仅 outBytes=1~23） | exp_clean154.py：154 列 ConHost demo 注入 → 0.6x/1.4x 连续 resize → 每级重排后画面叠画、全量渲染 outBytes≈1 | `test_resize_overlay_clean`（新增） | **已修复**（2026-08-19）：`ConsoleToVt.cpp` 全量路径不再跳过 IsDefaultBlank，输出包括空格在内的全部 cell（diff 路径 canDiff=true 与 lastBuffer 比较完全不变）；`test_resize_overlay_clean` 断言 0.6x/1.4x/1.4x 后每行 '|' 计数 ≤2（无叠画）+ LAYOUT 键 ≥3（resize 驱动重绘），PASS（修复前叠画：'|' 计数 3-4） |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
 
