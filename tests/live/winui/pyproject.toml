@@ -1,0 +1,28 @@
+[project]
+name = "winui"
+version = "0.1.0"
+description = "基于 Win32 Console API（纯 ctypes）的全屏 TUI 框架"
+requires-python = ">=3.10"
+dependencies = ["wcwidth"]
+
+[project.optional-dependencies]
+test = ["pytest", "ruff"]
+# PTY e2e 需在环境中提供 pywezterm（桌面 pywezterm 目录，或 PYWEZTERM_PATH 指定）
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "RUF", "B"]
+ignore = [
+    "B008",  # Style() 是不可变 dataclass 默认值，安全
+    "B019",  # resolve 的 lru_cache 有 maxsize，无泄漏
+    "RUF012",  # ctypes 结构体 _fields_ 为类可变属性（标准写法）
+    "RUF002",  # 中文注释使用全角标点（项目规范）
+    "RUF003",
+    "RUF001",  # 界面文案使用全角标点
+]
