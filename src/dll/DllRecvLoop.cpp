@@ -21,7 +21,6 @@
 #include "state/InputQueue.h"          // Phase 6：输入队列
 #include "translator/VtInputParser.h"  // Phase 6：VT 输入分帧
 #include "hooks/SignalHooks.h"         // Phase 7：Ctrl+C 触发
-#include "hooks/HookCommon.h"          // BUG-013: IsConPtyConsole
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -119,16 +118,6 @@ void RecvLoopMain() {
         switch (type) {
             case protocol::MessageType::ResizeNotify: {
                 // WT 窗口尺寸变化：更新 ConsoleState 的 dwSize 与 srWindow
-                // BUG-013（2026-08-19）：ConPTY 场景（目标跑在 WT 内）跳过。
-                // ResizeNotify 携带的是注入窗口（mediator 所在 WT 窗口）尺寸，
-                // 与目标 ConPTY（目标所在 WT 窗口）相互独立；目标 ConPTY 尺寸
-                // 变化由 StatePoller 按真实 ConPTY 轮询感知（ApplyWtResize +
-                // EnqueueResizeEvent），此处应用注入窗口尺寸会把虚拟状态设错。
-                if (hooks::IsConPtyConsole()) {
-                    LOG_DEBUG("DllRecvLoop: ResizeNotify ignored (ConPTY target, "
-                              "size polled from real ConPTY)");
-                    break;
-                }
                 if (payload.size() < sizeof(protocol::ResizePayload)) {
                     LOG_WARN("DllRecvLoop: ResizeNotify payload too small %zu",
                              payload.size());

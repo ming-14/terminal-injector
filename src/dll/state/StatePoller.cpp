@@ -1,4 +1,4 @@
-// StatePoller 实现：注入后轮询真实 ConHost 状态补全快照
+// StatePoller 实现：注入后 3 秒高频轮询真实 ConHost 状态补全快照
 // 详见 docs/phases/10-state-sync-stability.md 4.1
 //
 // 流程：
@@ -16,22 +16,10 @@
 //   - 用 orig trampoline 而非直接调 API：Hook 已装，直接调会进入 Detour
 //     返回缓存，拿不到 ConHost 真实值
 //   - SendToMediator 线程安全，可在轮询线程直接调用（Phase 10 任务5 将重构其锁）
-//
-// BUG-013 扩展（2026-08-19）：ConPTY 场景（目标跑在 WT 内）。
-//   目标 ConPTY 尺寸由 WT 掌控（缓冲=窗口），且与注入窗口（mediator 所在
-//   WT 窗口）相互独立——mediator 的 ResizeNotify 携带的是注入窗口尺寸，对
-//   ConPTY 目标无效（DllRecvLoop 已跳过其尺寸应用）。此处改为 ConPTY 场景
-//   持续轮询真实 ConPTY 尺寸，检测变化时：
-//     a. ApplyWtResize 更新 VirtualConsoleState（GCSBI Hook 返回新尺寸）
-//     b. EnqueueResizeEvent 注入 WINDOW_BUFFER_SIZE_EVENT（目标 TUI 重排）
-//   ConPTY 场景不设时长上限（直到 Stop），轮询间隔放宽到 500ms 足够
-//   （WT 窗口拖动是秒级操作）。
 #include "StatePoller.h"
 #include "ConsoleState.h"
-#include "VirtualConsoleState.h"
-#include "InputQueue.h"
-#include "../hooks/HookCommon.h"
 #include "../hooks/CursorHooks.h"
+#include "../hooks/HookCommon.h"
 #include "../translator/VtEscape.h"
 #include "logging/Logger.h"
 
@@ -53,9 +41,8 @@ void StatePoller::Start() {
         return;
     }
     m_thread = std::thread(&StatePoller::PollLoop, this);
-    LOG_INFO("StatePoller started, interval=%dms duration=%dms conpty=%d",
-             kPollIntervalMs, kPollDurationMs,
-             hooks::IsConPtyConsole() ? 1 : 0);
+    LOG_INFO("StatePoller started, interval=%dms duration=%dms",
+             kPollIntervalMs, kPollDurationMs);
 }
 
 void StatePoller::Stop() {
@@ -75,11 +62,6 @@ void StatePoller::PollLoop() {
     // GetStdHandle 不被 Hook（Phase 9 决定），返回真实 Console 输出句柄
     // 窗口隐藏不影响句柄有效性，ConHost 仍存在
     const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    // ConPTY 场景：持续轮询真实 ConPTY 尺寸（由 WT 掌控，非本 DLL 可改）
-    const bool isConPty = hooks::IsConPtyConsole();
-
-    // ConPTY 尺寸缓存：上次轮询看到的真实 ConPTY 窗口尺寸（0 = 未初始化）
-    SHORT lastCols = 0, lastRows = 0;
 
     int pollCount = 0;
     int diffCount = 0;
@@ -109,45 +91,18 @@ void StatePoller::PollLoop() {
                          info.dwCursorPosition.X, info.dwCursorPosition.Y,
                          cached.X, cached.Y);
             }
-
-            // ConPTY 场景：检测真实 ConPTY 尺寸变化（用户拖动 WT 窗口）
-            if (isConPty) {
-                const SHORT cols = static_cast<SHORT>(
-                    info.srWindow.Right - info.srWindow.Left + 1);
-                const SHORT rows = static_cast<SHORT>(
-                    info.srWindow.Bottom - info.srWindow.Top + 1);
-                if (lastCols == 0 && lastRows == 0) {
-                    // 首次采样：仅记录基线（VirtualConsoleState 在 LazyInit
-                    // 已按真实 ConPTY 尺寸初始化，无需再 Apply）
-                    lastCols = cols;
-                    lastRows = rows;
-                } else if (cols != lastCols || rows != lastRows) {
-                    lastCols = cols;
-                    lastRows = rows;
-                    LOG_INFO("StatePoller(ConPTY): real ConPTY size changed to %dx%d, "
-                             "applying to virtual state + resize event",
-                             cols, rows);
-                    // 同步 VirtualConsoleState：GCSBI Hook 返回新尺寸，目标 TUI
-                    // 的 _poll_window_size 轮询也能看到（双重感知）
-                    VirtualConsoleState::Instance().ApplyWtResize(cols, rows);
-                    // 注入 WINDOW_BUFFER_SIZE_EVENT：目标被阻塞在 ReadConsoleInput
-                    // （如 winui 的事件循环）时必须靠事件唤醒重排
-                    InputQueue::Instance().EnqueueResizeEvent(cols, rows);
-                    InputQueue::Instance().SignalDataReady();
-                }
-            }
         }
 
-        // ConPTY 场景不退出（直到 Stop，由 Unloader 步骤 1 调用）
-        if (!isConPty && GetTickCount64() - startTick >= kPollDurationMs) {
+        // 超过总时长退出
+        if (GetTickCount64() - startTick >= kPollDurationMs) {
             break;
         }
         Sleep(kPollIntervalMs);
     }
 
     m_running = false;
-    LOG_INFO("StatePoller loop done, polls=%d diffs=%d duration=%llums conpty=%d",
-             pollCount, diffCount, GetTickCount64() - startTick, isConPty ? 1 : 0);
+    LOG_INFO("StatePoller loop done, polls=%d diffs=%d duration=%llums",
+             pollCount, diffCount, GetTickCount64() - startTick);
 }
 
 } // namespace terminjector
