@@ -7,6 +7,7 @@
 // Phase 10 任务5：VtOutput 走 BatchSender 攒批合并，减少高频小包的 IPC 次数
 //                 控制消息仍走本函数直接发送，保证即时性
 #include "HookCommon.h"
+#include "ProtectionHooks.h"
 #include "../BatchSender.h"
 #include "logging/Logger.h"
 #include "transport/ITransport.h"
@@ -14,6 +15,7 @@
 #include "protocol/Message.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace terminjector::hooks {
 
@@ -22,6 +24,25 @@ namespace {
 // 仅用于控制消息（ChildProcessNotify/ModeChange/CpChange 等）
 // VtOutput 走 BatchSender 内部的 g_batchSendLock
 SRWLOCK g_sendLock = SRWLOCK_INIT;
+}
+
+// ConPTY 场景检测（判定见 HookCommon.h 注释）
+// 注意：GetConsoleWindow 已被 Hook 返回 NULL，此处必须走 orig trampoline
+// 拿真实 HWND；GetClassName 偶发失败时按非 ConPTY 保守处理（不误判）
+bool IsConPtyConsole() {
+    HWND h = CallRealGetConsoleWindow();
+    if (h == nullptr) {
+        return false;
+    }
+    wchar_t cls[64] = {0};
+    if (GetClassNameW(h, cls, 64) == 0) {
+        LOG_WARN("IsConPtyConsole: GetClassNameW failed err=%lu, assume native console",
+                 GetLastError());
+        return false;
+    }
+    bool isPty = (wcscmp(cls, L"PseudoConsoleWindow") == 0);
+    LOG_INFO("IsConPtyConsole: hwnd=%p class='%ls' -> %d", h, cls, isPty ? 1 : 0);
+    return isPty;
 }
 
 bool SendToMediator(const void* data, size_t len, protocol::MessageType type,
