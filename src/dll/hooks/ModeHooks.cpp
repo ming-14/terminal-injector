@@ -141,13 +141,17 @@ BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
         bool newVT = (mode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
         state.SetInputMode(mode);
         if (mode != oldMode) {
-            // 模式切换：清空输入队列 + 重置鼠标按键状态，避免残留数据混淆
-            InputQueue::Instance().ClearAllOnModeSwitch();
-            state.SetMouseButtonState(0);  // Phase 16：重置鼠标按键状态
+            // Phase 13 设计（13-vt-passthrough-mode.md §4.2）：
+            // 仅在 VT_INPUT 标志变化时清空队列+重置鼠标按键状态+通知 mediator，
+            // 避免 msvcrt.getwch() 等临时 raw 模式读（SetConsoleMode(0)→读→恢复）
+            // 每次切换清队导致输入丢失（smartagent_tui 注入后无法输入）。
+            // ResetScrollback 和 NotifyModeChange 保持每次模式变化都执行。
             VirtualConsoleState::Instance().ResetScrollback();  // Phase 18：重置滚动计数
             NotifyModeChange();
-            // Phase 13：VT_INPUT 标志变化时通知 mediator 切换翻译策略
+            // Phase 13：VT_INPUT 标志变化时清空队列+重置鼠标按键状态
             if (oldVT != newVT) {
+                InputQueue::Instance().ClearAllOnModeSwitch();
+                state.SetMouseButtonState(0);  // Phase 16：重置鼠标按键状态
                 NotifyModeSwitch(newVT);
             }
             LOG_INFO("ModeHooks: input mode 0x%lx -> 0x%lx (VT_INPUT=%d)",

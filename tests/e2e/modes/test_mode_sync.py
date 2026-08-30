@@ -1,13 +1,16 @@
-"""特性: 模式状态机一致性（多轮 set/get + 切换清队列）    类别: modes
+"""特性: 模式状态机一致性（多轮 set/get + VT_INPUT 切换清队列）    类别: modes
 
 链路: 目标 SetConsoleMode/GetConsoleMode（DLL ModeHooks）+ 输入驱动
 
 预期:
   - 输入句柄：任意模式 set → get 一致（10 轮固定种子随机模式）
   - 输出句柄：set → get == set | ENABLE_VIRTUAL_TERMINAL_PROCESSING（强制）
-  - 模式切换清空输入队列：切换前注入的字符被清除，切换后 ReadConsoleInputW 无残留
+  - 队列清空语义（2026-08-30 修正，对齐 Phase 13 设计）：
+    仅当 ENABLE_VIRTUAL_TERMINAL_INPUT(0x200) 标志变化时清空输入队列
+    （翻译↔透传切换，残留记录会按错误语义被读取）；非 VT_INPUT 模式
+    切换（如 msvcrt.getwch 临时 raw 读）不清队，注入的字符保留。
 
-验证方式: 目标自检逐轮记录 + 驱动注入字符后断言队列清空
+验证方式: 目标自检逐轮记录 + 驱动注入字符后按 VT_INPUT 变化断言队列
 """
 import os
 import sys
@@ -40,13 +43,18 @@ for i in range(10):
     if g != m:
         ok_all = False
     if i == 3:
-        # 第 4 轮前留窗口给驱动注入字符，随后 set 切换应清空队列
+        # 第 4 轮前留窗口给驱动注入字符，随后 set 切换：
+        #   VT_INPUT 标志变化 → 清空队列；否则保留注入字符
         rec("STEP3", "1")
         time.sleep(3.0)
+        before = g  # STEP3 切换前的模式（i==3 刚 set 的）
         set_mode(h_in, cands[rnd() % len(cands)])
         time.sleep(0.3)
         ev = read_input_records(h_in, 8, peek=True)
+        new_g = get_mode(h_in)
+        vt_changed = ((before & 0x200) != 0) != ((new_g & 0x200) != 0)
         rec("QUEUE_AFTER_SWITCH", str(len(ev)))
+        rec("VT_CHANGED", str(int(vt_changed)))
 for i in range(3):
     m = cands[rnd() % len(cands)]
     set_mode(h_out, m)
@@ -65,14 +73,14 @@ def run() -> int:
             s.run_target(NAME, TARGET_BODY, ready_key="READY")
             time.sleep(0.5)
 
-            # 等 STEP3 出现后注入 "z"（将进入队列，随后被模式切换清空）
+            # 等 STEP3 出现后注入 "z"（将进入队列，随后按模式切换语义断言）
             v_step = s.wait_result(NAME, "STEP3", timeout=20.0)
             if not v_step:
                 print("  [FAIL] STEP3: 目标未到达第 4 轮")
                 failures += 1
             else:
                 s.type_text("z")
-                print("  [INFO] 已注入 z，等待目标切换清队列")
+                print("  [INFO] 已注入 z，等待目标模式切换")
 
             # 逐轮断言 set/get 一致
             for i in range(10):
@@ -88,15 +96,20 @@ def run() -> int:
                     failures += 1
             print("  [INFO] 输入侧 10 轮 set/get 校验完成")
 
+            # 队列清空语义：VT_INPUT 标志变化 → 清空（0）；否则保留注入的 z
             v_q = s.wait_result(NAME, "QUEUE_AFTER_SWITCH", timeout=20.0)
-            if not v_q:
-                print("  [FAIL] QUEUE_AFTER_SWITCH: 无结果")
+            v_c = s.wait_result(NAME, "VT_CHANGED", timeout=20.0)
+            if not v_q or not v_c:
+                print("  [FAIL] QUEUE_AFTER_SWITCH/VT_CHANGED: 无结果")
                 failures += 1
             else:
-                if v_q == "0":
-                    print("  [PASS] 切换清队列：注入的 z 已清除")
+                expect = "0" if v_c == "1" else "2"  # z 按下+释放两条记录
+                if v_q == expect:
+                    print("  [PASS] 队列语义正确: VT_CHANGED={} 队列={} "
+                          "(期望 {})".format(v_c, v_q, expect))
                 else:
-                    print("  [FAIL] QUEUE_AFTER_SWITCH: {}（期望 0，队列有残留）".format(v_q))
+                    print("  [FAIL] QUEUE_AFTER_SWITCH: {} VT_CHANGED={} "
+                          "（期望 {}）".format(v_q, v_c, expect))
                     failures += 1
 
             # 输出侧：set → get == set|0x4

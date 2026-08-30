@@ -38,7 +38,7 @@ import paths  # noqa: E402
 PROJECT_ROOT = paths.project_root()
 BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
-LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+LOG_PATH = os.path.join(BUILD_BIN, "logs", "terminal-injector.log")
 
 
 def find_pty_agent() -> str:

@@ -89,7 +89,7 @@ terminal_injector.exe --inject 1234 --dll "<path>\injected.dll" --pipe mypipe
 
 - 注入成功后 DLL 在目标进程内等待连接管道服务端（mediator）。
 - **手动执行 `--inject` 且没有对应 mediator 时**，DLL 连接失败属预期——注入器只是把 DLL 放进进程，桥接由 mediator 完成。
-- 注入器日志写入 `terminal-injector-inject-<pid>.log`（与 mediator 分文件，避免句柄互斥）。
+- 注入器日志写入 `<exe目录>\logs\terminal-injector-inject-<pid>.log`（与 mediator 分文件，避免句柄互斥）。
 
 ### 4.2 中介模式（`--mediator`）
 
@@ -127,7 +127,7 @@ terminal_injector.exe --unload-remote 1234 0x7ffa00000000
 
 - 由 DLL 的 Unloader 在管道断开时自动启动，一般**无需手动调用**。
 - 原理：远程线程调 `FreeLibrary` 使 LoadCount 归 0，触发 `DLL_PROCESS_DETACH` 清理全部 Hook；配合 LDR flush（远程 `LoadLibraryW("kernel32.dll")`）强制卸载待清理模块。
-- 日志写独立文件 `terminal-injector-unload.log`（避免与下一轮 mediator 并发互抢句柄）。
+- 日志写独立文件 `<exe目录>\logs\terminal-injector-unload.log`（避免与下一轮 mediator 并发互抢句柄）。
 
 ### 4.4 列出可注入进程（`--list-targets`）
 
@@ -162,7 +162,7 @@ terminal_injector.exe --list-targets --json
 
 ### 5.4 崩溃/异常后清理
 
-- 若 WT 异常退出导致 DLL 未卸载：执行 `--unload-remote <pid> <dllBase>`（dllBase 可从 `%TEMP%\injected_<pid>_*.log` 或 `terminal-injector-<pid>.log` 中查到）。
+- 若 WT 异常退出导致 DLL 未卸载：执行 `--unload-remote <pid> <dllBase>`（dllBase 可从 `<exe目录>\logs\injected_<pid>_*.log` 或 `<exe目录>\logs\terminal-injector-<pid>.log` 中查到）。
 - 目标进程被强杀：注入的 DLL 随进程消亡，无需清理。
 
 ---
@@ -181,10 +181,10 @@ terminal_injector.exe --list-targets --json
 
 | 日志 | 路径 | 内容 |
 |------|------|------|
-| mediator | `<exe目录>\terminal-injector-<pid>.log` | 握手、VT 桥接、ChildVtOutput、OnModeChange、尺寸同步、VtOutput hex |
-| 注入器 | `<exe目录>\terminal-injector-inject-<pid>.log` | 注入参数、RemotePipeSetup 返回码、注入结果 |
-| 卸载助手 | `<exe目录>\terminal-injector-unload.log` | 远程 FreeLibrary / LDR flush / 模块卸载状态 |
-| DLL | `<exe目录>\injected_<pid>_<时间戳>.log` | 目标进程内 Hook、状态缓存、翻译、批发送（每进程每会话独立文件） |
+| mediator | `<exe目录>\logs\terminal-injector-<pid>.log` | 握手、VT 桥接、ChildVtOutput、OnModeChange、尺寸同步、VtOutput hex |
+| 注入器 | `<exe目录>\logs\terminal-injector-inject-<pid>.log` | 注入参数、RemotePipeSetup 返回码、注入结果 |
+| 卸载助手 | `<exe目录>\logs\terminal-injector-unload.log` | 远程 FreeLibrary / LDR flush / 模块卸载状态 |
+| DLL | `<exe目录>\logs\injected_<pid>_<时间戳>.log` | 目标进程内 Hook、状态缓存、翻译、批发送（每进程每会话独立文件） |
 
 > DLL 日志中 `t=` 时间戳单位为**微秒**（RingBufferLogger `elapsedUs`）。
 
@@ -192,7 +192,7 @@ terminal_injector.exe --list-targets --json
 
 | 变量 | 作用 |
 |------|------|
-| `TI_INJECTED_LOG_DIR` | 覆盖 DLL 日志目录（默认 exe 所在目录，即 injected.dll 所在目录） |
+| `TI_INJECTED_LOG_DIR` | 覆盖 DLL 日志目录（默认 `exe所在目录\logs`） |
 | `TI_LOG_LEVEL` | DLL 日志级别：`TRACE/DEBUG/INFO/WARN/ERROR/FATAL`（默认 `DEBUG`） |
 | `TI_PROJECT_ROOT` | e2e 测试用：覆盖项目根目录（默认由 tests/e2e 路径推导） |
 | `TI_CDB_TOOLS` | legacy 调试脚本用：cdb 工具目录 |
@@ -201,9 +201,9 @@ terminal_injector.exe --list-targets --json
 
 | 现象 | 排查 |
 |------|------|
-| 注入失败 "Inject failed" | 看 `terminal-injector-inject-<pid>.log`：目标权限、DLL 路径、位数 |
-| 握手超时 | 看 mediator 日志是否出现 `Handshake failed`；确认目标未被清理/未被强杀 |
-| 目标程序无响应 | 可能 Hook 等待函数假句柄问题，看 DLL 日志 `injected_<pid>_*.log` |
+| 注入失败 "Inject failed" | 看 `<exe目录>\logs\terminal-injector-inject-<pid>.log`：目标权限、DLL 路径、位数 |
+| 握手超时 | 看 mediator 日志 `<exe目录>\logs\terminal-injector-<pid>.log` 是否出现 `Handshake failed`；确认目标未被清理/未被强杀 |
+| 目标程序无响应 | 可能 Hook 等待函数假句柄问题，看 DLL 日志 `<exe目录>\logs\injected_<pid>_*.log` |
 | 关闭 Tab 后目标未恢复 | 执行 `--unload-remote` 手动卸载（见 §5.4） |
 
 ---

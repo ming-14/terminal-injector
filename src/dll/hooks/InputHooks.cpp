@@ -820,10 +820,16 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
         }
     }
 
-    // 快速路径：非 stdin 直接调原 API（避免 ENSURE_INITIALIZED 开销）
-    // transport Recv 读管道走此路径，不受影响
-    if (h != GetCachedStdin()) {
-        if (log) LOG_INFO("ReadFile_Detour: #%d fast-path pass-through (h != cachedStdin)", callId);
+    // 快速路径：非控制台输入句柄（管道/文件/CONOUT$ 输出）直接调原 API
+    // 注意：不能只用 h != GetCachedStdin() 判断——目标进程 stdin 可能是服务端
+    // 通信管道（smartagent warp 版：stdin/stdout 重定向为管道），GetCachedStdin
+    // 缓存的是管道句柄，管道 ReadFile 会被误拦截（从 InputQueue 读、永远空 →
+    // 服务端消息丢失）。只有真实控制台【输入】句柄（CONIN$/控制台 stdin）
+    // 才需要拦截（Textual 等 TUI 用 ReadFile(stdin) 读输入）。
+    // IsInputHandle 对管道（非 console）在上一行已过滤；对 CONOUT$ 输出句柄
+    // 慢路径 GetNumberOfConsoleInputEvents_orig 返回 FALSE → 正确 pass-through。
+    if (!IsConsoleHandle(h) || !IsInputHandle(h)) {
+        if (log) LOG_INFO("ReadFile_Detour: #%d fast-path pass-through (not console input)", callId);
         return ReadFile_orig(h, buf, len, read, ov);
     }
 
@@ -997,9 +1003,20 @@ void KickStartBlockedReaders() {
         return;
     }
 
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    // 用 CreateFileW("CONIN$") 获取真实控制台输入句柄，而非 GetStdHandle：
+    // 目标进程 stdin 可能被重定向为服务端通信管道（smartagent warp 版），
+    // GetStdHandle(STD_INPUT_HANDLE) 返回管道句柄，WriteConsoleInputW 对
+    // 管道句柄调用失败 err=6（ERROR_INVALID_HANDLE），阻塞在旧 ReadConsole*
+    // 的主线程无法被唤醒 → 注入后键盘输入失效。
+    // CreateFileW("CONIN$") 始终返回当前进程的真实控制台输入句柄。
+    HANDLE hConIn = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+    HANDLE hStdin = (hConIn != nullptr && hConIn != INVALID_HANDLE_VALUE)
+                        ? hConIn : GetStdHandle(STD_INPUT_HANDLE);
     if (hStdin == nullptr || hStdin == INVALID_HANDLE_VALUE) {
         LOG_WARN("KickStart: stdin handle invalid, skip");
+        if (hConIn != nullptr && hConIn != INVALID_HANDLE_VALUE) CloseHandle(hConIn);
         return;
     }
 
@@ -1025,8 +1042,14 @@ void KickStartBlockedReaders() {
     // 用 orig 调用，绕过 Hook（避免写到 InputQueue）
     BOOL ok = WriteConsoleInputW_orig(hStdin, recs, 2, &written);
     DWORD err = ok ? 0 : GetLastError();
-    LOG_INFO("KickStart: wrote ENTER to ConHost, ok=%d written=%lu err=%lu",
-             ok, written, err);
+    LOG_INFO("KickStart: wrote ENTER to ConHost, ok=%d written=%lu err=%lu h=%p%s",
+             ok, written, err, hStdin,
+             (hConIn != INVALID_HANDLE_VALUE && hConIn != nullptr) ? " (via CONIN$)" : "");
+
+    // 关闭自己打开的 CONIN$ 句柄（GetStdHandle 路径的不关）
+    if (hConIn != nullptr && hConIn != INVALID_HANDLE_VALUE && hConIn != hStdin) {
+        CloseHandle(hConIn);
+    }
 }
 
 } // namespace terminjector::hooks

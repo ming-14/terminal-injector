@@ -126,3 +126,4 @@ _check_env*
 _run_build*
 build_dll_temp*
 diag_*.cdb
+_pypty/

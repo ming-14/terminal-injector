@@ -17,12 +17,13 @@ from common.paths import BUILD_BIN
 def injected_log_dir() -> str:
     """DLL 注入日志目录（与 src/dll/LazyInit.cpp GetInjectedLogDir 对齐）。
 
-    DLL 侧：TI_INJECTED_LOG_DIR 环境变量覆盖，否则 DLL 自身所在目录
-    （默认部署下 injected.dll 与 exe 同目录 = build/bin/Release）。
-    测试侧同样优先 TI_INJECTED_LOG_DIR，否则 BUILD_BIN（exe 目录），
+    DLL 侧：TI_INJECTED_LOG_DIR 环境变量覆盖，否则 DLL 自身所在目录下
+    的 logs 子目录（默认部署下 injected.dll 与 exe 同目录 =
+    build/bin/Release，日志即 build/bin/Release/logs）。
+    测试侧同样优先 TI_INJECTED_LOG_DIR，否则 BUILD_BIN/logs，
     保证与目标进程（由测试经 mediator 启动，继承测试环境变量）一致。
     """
-    return os.environ.get("TI_INJECTED_LOG_DIR") or BUILD_BIN
+    return os.environ.get("TI_INJECTED_LOG_DIR") or os.path.join(BUILD_BIN, "logs")
 
 
 def injected_log_glob() -> str:

@@ -78,7 +78,7 @@ if __name__ == "__main__":
 4. 在目标 cmd 中运行内嵌目标脚本（`python _targets/<name>.py`，脚本正文内嵌于测试文件）
 5. 目标脚本用 Console API 自检 → 写入 `results/<name>.txt`（`KEY=VALUE` 协议）
 6. runner 用 SendInput 驱动输入 + 轮询结果文件断言
-7. `vt_capture.py` 解析 mediator 日志（`terminal-injector-<pid>.log`）验证 VT 字节流
+7. `vt_capture.py` 解析 mediator 日志（`<build/bin/Release>\logs\terminal-injector-<pid>.log`）验证 VT 字节流
 8. `injector.cleanup()` 清理 cmd / mediator / WT（只清理本测试启动的窗口）
 
 ### 目录约定
@@ -109,9 +109,10 @@ e2e/
 
 - 结果文件协议：`PASS` / `FAIL:<原因>` / `UNSUPPORTED=<原因>` / `<KEY>=<值>` / `DONE=1`
 - `results/summary.json`：全量汇总（PASS/FAIL/UNSUPPORTED 计数）
-- DLL 日志：`<build/bin/Release>\injected_<pid>_<时间戳>.log`（默认与 exe 同目录，
-  每进程每会话独立文件，路径经 `common/childlog.py` 定位；`TI_INJECTED_LOG_DIR`
-  环境变量可覆盖目录，`TI_LOG_LEVEL` 可调级别，默认 Debug）——目标进程私有，调试用
+- DLL 日志：`<build/bin/Release>\logs\injected_<pid>_<时间戳>.log`（默认与 exe 同目录下
+  的 logs 子目录，每进程每会话独立文件，路径经 `common/childlog.py` 定位；
+  `TI_INJECTED_LOG_DIR` 环境变量可覆盖目录，`TI_LOG_LEVEL` 可调级别，默认 Debug）
+  ——目标进程私有，调试用
 - 已知问题（架构限制 vs 工程 bug）记录在 `docs/PHASES.md` 末节：
   - `BUG-xxx`：工程缺陷（修复后测试恢复断言）
   - `LIM-xxx`：上游/架构限制（ConPTY、WT 行为），测试按实际语义断言或 SKIP

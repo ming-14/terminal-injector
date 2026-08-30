@@ -540,28 +540,29 @@ static int Run(int argc, char* argv[]) {
     // mediator 按 pid 分文件（terminal-injector-<pid>.log），互不抢占。
     auto args = ParseArgs(argc, argv);
 
-    // 用 exe 同目录的绝对路径写日志，避免 WT 启动时工作目录不确定
-    // 否则相对路径 "terminal-injector.log" 可能写到不可预测的位置
-    std::wstring exeDir = GetExeDir();
+    // 日志统一写入 <exeDir>\logs\ 目录，按模式分文件
+    // 创建 logs 目录（若不存在），避免 WT 启动时工作目录不确定写错位置
+    const std::wstring logDir = GetExeDir() + L"\\logs";
+    CreateDirectoryW(logDir.c_str(), nullptr);
     std::wstring logPath;
     if (args.mode == CliArgs::Mode::UnloadRemote) {
         // 助手进程独立日志：terminal-injector-unload.log
         // （--unload-remote 由 DLL 在 DoUnload 末尾启动，与后续 mediator 并发）
-        logPath = exeDir + L"\\terminal-injector-unload.log";
+        logPath = logDir + L"\\terminal-injector-unload.log";
     } else if (args.mode == CliArgs::Mode::Mediator) {
         // mediator 按目标 pid 分文件：terminal-injector-<pid>.log
         // - 与 DLL 侧 injected_<pid>.log 约定对齐，按会话归档定位
         // - 并发 mediator（上次循环残留 + 本次）各写独立文件，不再互抢句柄
-        logPath = exeDir + L"\\terminal-injector-" + std::to_wstring(args.targetPid) + L".log";
+        logPath = logDir + L"\\terminal-injector-" + std::to_wstring(args.targetPid) + L".log";
     } else if (args.mode == CliArgs::Mode::Inject) {
         // 注入器进程与 mediator 并发运行且 targetPid 相同，若共用
         // terminal-injector-<pid>.log（Logger 不 share write）会互斥失败、
         // 注入器日志全部丢失 → 注入器独立日志文件
-        logPath = exeDir + L"\\terminal-injector-inject-" +
+        logPath = logDir + L"\\terminal-injector-inject-" +
                   std::to_wstring(args.targetPid) + L".log";
     } else {
         // Help/Version 等模式：terminal-injector.log
-        logPath = exeDir + L"\\terminal-injector.log";
+        logPath = logDir + L"\\terminal-injector.log";
     }
     Logger::Initialize(logPath.c_str(), LogLevel::Debug);
     LOG_INFO("=== terminal-injector starting, argc=%d ===", argc);

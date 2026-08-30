@@ -34,8 +34,12 @@ def build_bin() -> str:
 
 
 def injected_log_dir() -> str:
-    """DLL 注入日志目录（与 e2e common/childlog.py、src/dll LazyInit 对齐）。"""
-    return os.environ.get("TI_INJECTED_LOG_DIR") or tempfile.gettempdir()
+    """DLL 注入日志目录（与 e2e common/childlog.py、src/dll LazyInit 对齐）。
+
+    优先 TI_INJECTED_LOG_DIR；否则 <build/bin/Release>\logs（DLL 默认写
+    exe 所在目录下的 logs 子目录）。
+    """
+    return os.environ.get("TI_INJECTED_LOG_DIR") or os.path.join(build_bin(), "logs")
 
 
 def injected_log(pid: int) -> str:

@@ -28,7 +28,7 @@ PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".
 BUILD_BIN = os.path.join(PROJECT_ROOT, "build", "bin", "Release")
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
-LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+LOG_PATH = os.path.join(BUILD_BIN, "logs", "terminal-injector.log")
 
 
 def start_target_cmd() -> int:

@@ -17,7 +17,7 @@ import paths  # noqa: E402
 BUILD_BIN = paths.build_bin()
 MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
-LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+LOG_PATH = os.path.join(BUILD_BIN, "logs", "terminal-injector.log")
 
 
 def main():

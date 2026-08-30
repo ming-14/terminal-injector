@@ -35,10 +35,10 @@ INJECTED_DLL = os.path.join(BUILD_BIN, "injected.dll")
 def log_path(target_pid: int) -> str:
     """按目标 pid 定位 mediator 日志（与 DLL 侧 injected_<pid>.log 约定对齐）。
 
-    mediator 按 pid 分日志文件（main.cpp Run()），并发会话互不干扰；
-    握手扫描只匹配本会话日志，消除旧日志假阳性。
+    mediator 按 pid 分日志文件（main.cpp Run()，位于 <exe目录>\logs\），
+    并发会话互不干扰；握手扫描只匹配本会话日志，消除旧日志假阳性。
     """
-    return os.path.join(BUILD_BIN, "terminal-injector-{}.log".format(target_pid))
+    return os.path.join(BUILD_BIN, "logs", "terminal-injector-{}.log".format(target_pid))
 
 
 def start_target_cmd() -> int:

@@ -25,7 +25,7 @@ MEDIATOR_EXE = os.path.join(BUILD_BIN, "terminal_injector.exe")
 DLL_PATH = os.path.join(BUILD_BIN, "injected.dll")
 WT_EXE = os.path.join(os.environ.get("LOCALAPPDATA", ""),
                       "Microsoft", "WindowsApps", "wt.exe")
-LOG_PATH = os.path.join(BUILD_BIN, "terminal-injector.log")
+LOG_PATH = os.path.join(BUILD_BIN, "logs", "terminal-injector.log")
 PID_FILE = os.path.join(paths.out_dir(), "debug_pids.txt")
 
 # Clean mediator log

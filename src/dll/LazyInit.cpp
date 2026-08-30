@@ -58,24 +58,28 @@ bool g_isTargetProcess = false;
 thread_local bool t_inLazyInit = false;
 
 // 注入日志目录：优先 TI_INJECTED_LOG_DIR（测试/诊断覆盖），
-// 否则取 DLL 自身所在目录（默认部署下 injected.dll 与 terminal_injector.exe
-// 同目录，日志即写到 exe 所在目录，与 mediator/注入器/卸载日志集中在一处，
-// 便于排查）；最后回退系统临时目录。
+// 否则取 DLL 自身所在目录下的 logs 子目录（默认部署下 injected.dll 与
+// terminal_injector.exe 同目录，日志即写到 <exe目录>\logs，与 mediator/
+// 注入器/卸载日志集中在一处，便于排查）；最后回退系统临时目录。
+// 返回的目录保证已创建（CreateDirectoryW 幂等）。
 std::wstring GetInjectedLogDir() {
     wchar_t envBuf[MAX_PATH] = {0};
     const DWORD n = GetEnvironmentVariableW(L"TI_INJECTED_LOG_DIR", envBuf, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
+        CreateDirectoryW(envBuf, nullptr);
         return std::wstring(envBuf);
     }
     // DLL 自身模块路径：GetModuleFileNameW 对当前进程已加载的模块可靠，
-    // 取目录即 exe 所在目录（默认部署 DLL 与 exe 同目录）
+    // 取目录即 exe 所在目录（默认部署 DLL 与 exe 同目录），再拼 logs 子目录
     HMODULE hSelf = GetModuleHandleW(L"injected.dll");
     wchar_t dllPath[MAX_PATH] = {0};
     if (hSelf != nullptr && GetModuleFileNameW(hSelf, dllPath, MAX_PATH) > 0) {
         std::wstring p(dllPath);
         const size_t pos = p.find_last_of(L"\\/");
         if (pos != std::wstring::npos) {
-            return p.substr(0, pos);
+            const std::wstring dir = p.substr(0, pos) + L"\\logs";
+            CreateDirectoryW(dir.c_str(), nullptr);
+            return dir;
         }
     }
     wchar_t tmpBuf[MAX_PATH] = {0};
@@ -83,7 +87,9 @@ std::wstring GetInjectedLogDir() {
         // 极端环境（无 %TEMP% 且模块路径不可得）回退当前目录，避免日志完全丢失
         return std::wstring(L".");
     }
-    return std::wstring(tmpBuf);
+    const std::wstring tmpDir = std::wstring(tmpBuf) + L"logs";
+    CreateDirectoryW(tmpDir.c_str(), nullptr);
+    return tmpDir;
 }
 
 // 构造注入日志文件名：injected_<pid>_<YYYYMMDD-HHMMSS-mmm>.log
@@ -407,7 +413,16 @@ void EnsureLazyInitialized() {
         const bool echoInput = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
         const bool bufMatchesWin = snap.screenBufferInfo.dwSize.X == winW &&
                                    snap.screenBufferInfo.dwSize.Y == winH;
-        const bool isLineShell = echoInput && !bufMatchesWin;
+        // 行编辑/流式 shell 判据（2026-08-30 修复）：
+        // 核心信号是"有滚动历史"（buffer 高于窗口，bufMatchesWin=false）——
+        // alt buffer 全屏 TUI（vim/ncurses/Textual）缓冲==窗口，无历史。
+        // 此前要求 echoInput 为必要条件，但 msvcrt.getwch() 类程序（python
+        // 单字符 raw 读）注入瞬间 inputMode=0x0（getwch 临时把模式清为 0），
+        // 无 ECHO_INPUT → 被误判为全屏 TUI → 尺寸不匹配时跳过 scrollback
+        // 重放 → 注入后之前的画面/历史全部丢失（smartagent_tui 报告）。
+        // 修正：不再要求 echoInput，有滚动历史即按流式 shell 重放（scrollback
+        // 是其设计特性）；echoInput 仅用于日志参考。
+        const bool isLineShell = !bufMatchesWin;
 
         // 卸载分流基准（BUG-009）：把注入瞬间的进程类别记录到 VirtualConsoleState。
         // 全屏 TUI（isLineShell=false）卸载时不做会话 VT 重放（其 VT 流是 WT
