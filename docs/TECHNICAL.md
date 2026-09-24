@@ -74,6 +74,7 @@ injected_dll（运行时独立编译注入）
 | `src/injector` | 打开目标进程 → 注入 DLL → 下发管道参数 → 等 DLL 连接握手 |
 | `src/mediator` | stdin↔管道桥接、`ChildSession`（子进程会话）、`WtSizeWatcher`（尺寸）、`VtParser`（DSR/DA/应答）、`VtPassThrough`（输出直通） |
 | `src/dll` | Hook 全集 + 状态缓存 + 翻译器 + 行编辑 + 卸载 |
+| `src/relay32` | 32 位中继 `relay32.dll` + 注入助手 `relay32inject.exe`：跨位数子进程链路的补链（见 §4） |
 | `src/common` | 不依赖任何业务模块的基础设施 |
 
 ## 4. 注入机制
@@ -86,6 +87,14 @@ injected_dll（运行时独立编译注入）
 6. 安全：管道名随机生成（`terminjector_<pid>_<hex>`），DLL 连接后校验服务端进程 PID 等于注入参数中的 mediator PID。
 
 **RemoteCall 框架**（`src/common/remote`）：注入器在目标进程内执行远程函数调用的封装（参数经远程内存传递、远程线程退出码回读），用于注入后置步骤（如 `RemotePipeSetup`、LDR flush 等）。
+
+**跨位数子进程链路（`src/relay32`，Phase 23）**：x64 进程**无法**向 32 位进程注入 `LoadLibraryW`（实测返回 0），因此链路里出现 32 位环节时（典型：`C:\Windows\py.exe` 启动器 → `python.exe`）会整段断链、孙进程漏网。处理方式：
+
+1. `ProcessHooks` 用 `GetBinaryTypeW` 判定子进程位数（见 `src/common/process/ProcessBitness.h`；不要用 `IsWow64Process`，其语义随调用方位数而变）。
+2. 子进程为 32 位 → fork 同目录的 `relay32inject.exe`（32 位助手）把 `relay32.dll` 注入进去。
+3. `relay32.dll` 只 hook `CreateProcessW/A`、强制 `CREATE_SUSPENDED`，再按孙进程位数分派：32 位自己注入；64 位上报 mediator，由 x64 侧注入 `injected.dll` 并回 `RelayChildAck` 后才恢复孙进程（freeze + ack，消除"创建到首行输出仅 64~80ms"的注入竞态）。
+4. 中继**不接管 Console**（启动器本身不产出终端内容）；"32 位程序本体被接管"记为 `TODO(32bit-target)`。
+5. 中继的接收循环必须用 `PeekNamedPipe` 轮询而非阻塞 `RecvPacket` —— 同步管道句柄上挂起的 `ReadFile` 会堵住同句柄的 `WriteFile`，使上报帧永远发不出去（详见 §8 与 `tests/_probe/pipe_io_serialize_probe.py`）。
 
 **KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则 ENTER 残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。
 
@@ -103,7 +112,7 @@ injected_dll（运行时独立编译注入）
 | `ModeHooks` | Get/SetConsoleMode、Get/SetConsoleCP、Get/SetConsoleTitle 等 |
 | `BufferHooks` | SetActiveScreenBuffer（Alt Buffer）、SetConsoleScreenBufferSize、SetConsoleWindowInfo 等 |
 | `SignalHooks` | SetConsoleCtrlHandler、GenerateConsoleCtrlEvent（Ctrl+C/Ctrl+Break 传递） |
-| `ProcessHooks` | CreateProcessW/A（子进程自动注入）、CreateProcessAsUser 等 |
+| `ProcessHooks` | CreateProcessW/A（子进程自动注入；32 位子进程改由 `relay32inject.exe` 注入 `relay32.dll`）、CreateProcessAsUser 等 |
 | `ProtectionHooks` | AttachConsole、FreeConsole、AllocConsole、GetConsoleWindow、CloseHandle（假句柄拦截） |
 | `WaitHooks` | WaitForSingleObject/Ex、WaitForMultipleObjects（假句柄 → 手动重置事件映射，防假死） |
 | `FontHooks` | SetConsoleFont 等字体相关 |
@@ -203,7 +212,7 @@ injected_dll（运行时独立编译注入）
 
 - 用户态劫持天花板：约 5% 行为与内核 ConPTY 有差异（如 `ENABLE_WRAP_AT_EOL` 在 ConPTY 下不被尊重），测试按 ConPTY 实际语义断言而非理想语义。
 - 中文输入法激活时 SendInput 组合键可能被 IME 吞掉（测试自动禁用目标窗口 IME）。
-- 仅支持 x64 目标进程。
+- **目标进程本体仅支持 x64**：32 位程序无法被接管（其 Console/翻译栈需整套 32 位实现，记为 `TODO(32bit-target)`）。但**子进程链路**已覆盖 32 位环节 —— 链路上出现 32 位启动器（如 `C:\Windows\py.exe`）时由 `relay32.dll` 补链，孙进程（x64）照常接管；详见 §4。
 
 ## 15. 相关文档
 

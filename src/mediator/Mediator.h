@@ -52,6 +52,18 @@ private:
     // fork 命令行携带 --pipe（随机管道名）与 --mediator-pid（服务端身份）
     bool SpawnInjector(uint32_t targetPid, const std::wstring& dllPath);
 
+    // 同 SpawnInjector，但等注入器退出并取退出码（只有真的知道注入成败才返回 true）
+    // 用于中继托付的注入：中继在等 RelayChildAck，必须知道成没成
+    // pipeName 是【被注入的子会话】的管道名（不是 m_pipeName）
+    bool SpawnInjectorAndWait(uint32_t targetPid, const std::wstring& pipeName,
+                              DWORD timeoutMs);
+
+    // 构造注入器命令行（fork 自身 --inject ...）。抽出来是为了让上面两条路径
+    // 用同一份命令行 —— 少一处就会在 --mediator-pid 之类的细节上走样。
+    std::wstring MakeInjectorCommandLine(uint32_t targetPid,
+                                         const std::wstring& dllPath,
+                                         const std::wstring& pipeName) const;
+
     // 执行 Hello 握手
     // 收 DLL 发来的 Hello，回 HelloAck
     bool Handshake();
@@ -67,8 +79,21 @@ private:
     // parentPid 父进程 PID
     // pipeName 父 DLL 生成的子会话随机管道名（安全加固，
     //           子 DLL 连接后校验服务端进程身份 == 本 mediator）
+    // peerIsRelay 子会话对端是否为 32 位中继 relay32.dll（Phase 23）：
+    //           为 true 时该会话无 Console 语义，握手走 RelayHello
     void OnChildProcessNotify(uint32_t childPid, uint32_t parentPid,
-                              const std::wstring& pipeName);
+                              const std::wstring& pipeName, bool peerIsRelay);
+
+    // Phase 23：收到中继的 RelayChildNotify 时的处理
+    // 中继（32 位，如 py.exe 里的 relay32.dll）捕获到子进程并已冻在 CREATE_SUSPENDED，
+    // 但自己是 32 位、无法向 64 位子进程注入，故请 mediator：
+    //   1) 建立该子进程的会话管道（peerIsRelay=false：子进程内是 injected.dll）
+    //   2) 用 x64 注入器向【仍挂起】的子进程注入 injected.dll
+    //   3) 回到 ChildSession 后由它回 RelayChildAck
+    // 返回 true 表示注入成功（即回给中继的 ack.ok）。失败也必须回 ack，
+    // 否则中继不会 ResumeThread，子进程永远挂着。
+    bool OnRelayChildNotify(uint32_t childPid, uint32_t parentPid,
+                            const std::wstring& pipeName);
 
     // 子进程退出时同步 ConPTY 光标给父进程 DLL
     // childPid 退出的子进程 PID
@@ -139,6 +164,8 @@ private:
     uint32_t m_targetPid = 0;
     uint32_t m_selfPid = 0;  // mediator 自身 PID（DLL 服务端身份校验目标）
     std::wstring m_pipeName;  // 随机管道名（SpawnInjector fork 时传给注入器）
+    // injected.dll 路径：中继托付注入时（OnRelayChildNotify）要给孙进程注入它
+    std::wstring m_dllPath;
 
     // Phase 11：injected.dll 在目标进程中的基址（Hello 上报）
     // OnUnloadComplete 据此远程调 FreeLibrary(m_dllBase)

@@ -85,7 +85,13 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 ./build_dll.ps1
 ```
 
-Artifacts: `build/bin/Release/terminal_injector.exe`, `build/bin/Release/injected.dll`.
+Artifacts: `build/bin/Release/terminal_injector.exe`, `build/bin/Release/injected.dll`,
+plus `relay32.dll` and `relay32inject.exe` (32-bit relay for cross-bitness child chains,
+built by `build_relay.ps1`, which `build.ps1` / `build_dll.ps1` already invoke).
+
+> The two `relay32*` files are required at runtime, not optional: when the injected
+> x64 DLL sees a 32-bit child (e.g. `C:\Windows\py.exe`), it locates and launches them
+> from its own directory. Ship all four files together.
 
 ### Usage
 
@@ -230,7 +236,13 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 ./build_dll.ps1
 ```
 
-产物：`build/bin/Release/terminal_injector.exe`、`build/bin/Release/injected.dll`。
+产物：`build/bin/Release/terminal_injector.exe`、`build/bin/Release/injected.dll`，
+以及 `relay32.dll` 与 `relay32inject.exe`（跨位数子进程链路用的 32 位中继，由
+`build_relay.ps1` 构建；`build.ps1` / `build_dll.ps1` 已自动调用它）。
+
+> 这两个 `relay32*` 文件是**运行时必需**产物，不是可选项：injected.dll（x64）遇到
+> 32 位子进程（如 `C:\Windows\py.exe`）时，会按自身所在目录定位并拉起它们。
+> 部署时四个文件必须放在同一目录。
 
 ## 使用
 
@@ -263,7 +275,7 @@ terminal_injector.exe --list-targets [--json] [--all]
 
 ## 测试
 
-e2e 套件（109 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（114 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e

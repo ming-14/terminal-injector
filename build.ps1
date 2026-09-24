@@ -21,4 +21,9 @@ $msbuild = Join-Path $vsInstallDir 'MSBuild\Current\Bin\MSBuild.exe'
 
 # Build
 & $msbuild (Join-Path $projectRoot 'build\ALL_BUILD.vcxproj') /p:Configuration=Release /p:Platform=x64 /t:Rebuild /m
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# 32 位中继 DLL（relay32）：单独构建树，产物拷到 x64 输出目录
+# 中继必须与 32 位目标进程同位数，主产物是 x64，无法在同一构建树产出
+& (Join-Path $projectRoot 'build_relay.ps1')
 exit $LASTEXITCODE

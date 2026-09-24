@@ -103,6 +103,7 @@ int Mediator::Run(uint32_t targetPid, const std::wstring& pipeName,
     m_targetPid = targetPid;
     m_selfPid = selfPid;
     m_pipeName = pipeName;
+    m_dllPath = dllPath;
     LOG_INFO("Mediator starting, targetPid=%u pipe=%ls dll=%ls selfPid=%u",
              targetPid, pipeName.c_str(), dllPath.c_str(), selfPid);
 
@@ -171,21 +172,30 @@ int Mediator::Run(uint32_t targetPid, const std::wstring& pipeName,
     return 0;
 }
 
-bool Mediator::SpawnInjector(uint32_t targetPid, const std::wstring& dllPath) {
-    // fork 自身：terminal-injector.exe --inject <pid> --dll <path>
+std::wstring Mediator::MakeInjectorCommandLine(uint32_t targetPid,
+                                               const std::wstring& dllPath,
+                                               const std::wstring& pipeName) const {
+    // fork 自身：terminal-injector.exe --inject <pid> --dll <path> --pipe <name>
+    //            --mediator-pid <self>
     // 注意：CreateProcessW 的 lpCommandLine 需可写，且首 token 是 exe 路径
     // 用 GetModuleFileNameW 获取自身路径作为首 token
     wchar_t exePath[MAX_PATH] = {0};
     if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) {
         LOG_ERROR("GetModuleFileNameW failed: %lu", GetLastError());
+        return std::wstring();
+    }
+    return std::wstring(exePath) +
+           L" --inject " + std::to_wstring(targetPid) +
+           L" --dll \"" + dllPath + L"\"" +
+           L" --pipe \"" + pipeName + L"\"" +
+           L" --mediator-pid " + std::to_wstring(m_selfPid);
+}
+
+bool Mediator::SpawnInjector(uint32_t targetPid, const std::wstring& dllPath) {
+    const std::wstring cmd = MakeInjectorCommandLine(targetPid, dllPath, m_pipeName);
+    if (cmd.empty()) {
         return false;
     }
-
-    std::wstring cmd = std::wstring(exePath) +
-                       L" --inject " + std::to_wstring(targetPid) +
-                       L" --dll \"" + dllPath + L"\"" +
-                       L" --pipe \"" + m_pipeName + L"\"" +
-                       L" --mediator-pid " + std::to_wstring(m_selfPid);
     LOG_INFO("SpawnInjector cmd: %ls", cmd.c_str());
 
     STARTUPINFOW si{};
@@ -209,6 +219,42 @@ bool Mediator::SpawnInjector(uint32_t targetPid, const std::wstring& dllPath) {
     CloseHandle(pi.hProcess);
     LOG_INFO("Injector spawned, pid=%lu", pi.dwProcessId);
     return true;
+}
+
+bool Mediator::SpawnInjectorAndWait(uint32_t targetPid, const std::wstring& pipeName,
+                                    DWORD timeoutMs) {
+    const std::wstring cmd = MakeInjectorCommandLine(targetPid, m_dllPath, pipeName);
+    if (cmd.empty()) {
+        return false;
+    }
+    LOG_INFO("SpawnInjectorAndWait cmd: %ls (timeout=%lu ms)", cmd.c_str(), timeoutMs);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    if (!CreateProcessW(nullptr, cmdBuf.data(),
+                        nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi)) {
+        LOG_ERROR("SpawnInjectorAndWait: CreateProcessW failed: %lu", GetLastError());
+        return false;
+    }
+    CloseHandle(pi.hThread);
+
+    const ULONGLONG t0 = GetTickCount64();
+    const DWORD waitRes = WaitForSingleObject(pi.hProcess, timeoutMs);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+
+    const bool ok = (waitRes == WAIT_OBJECT_0) && (exitCode == 0);
+    LOG_INFO("SpawnInjectorAndWait: pid=%lu targetPid=%u wait=%lu exitCode=%lu ok=%d "
+             "elapsed=%llu ms", pi.dwProcessId, targetPid, waitRes, exitCode,
+             ok ? 1 : 0, GetTickCount64() - t0);
+    return ok;
 }
 
 bool Mediator::Handshake() {
@@ -426,7 +472,10 @@ void Mediator::BridgeLoop() {
                     // 子会话随机管道名由父 DLL 生成上报（安全加固），
                     // 与父 DLL 注入子 DLL 时下发的参数必须一致
                     std::wstring childPipe(notify.pipeName);
-                    OnChildProcessNotify(notify.childPid, notify.parentPid, childPipe);
+                    // peerIsRelay：父 DLL 已按子进程位数决定注入 relay32.dll 还是
+                    // injected.dll，中继会话的握手方式与普通会话不同
+                    OnChildProcessNotify(notify.childPid, notify.parentPid, childPipe,
+                                         notify.peerIsRelay != 0);
                 }
             } else if (type == protocol::MessageType::ModeChange) {
                 // DLL 上报目标 SetConsoleMode 模式变更
@@ -604,21 +653,26 @@ void Mediator::OnModeSwitchNotify(uint32_t vtInputMode, uint32_t vtOutputMode) {
 // ============================================================
 
 void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid,
-                                    const std::wstring& pipeName) {
-    LOG_INFO("OnChildProcessNotify: childPid=%u parentPid=%u pipe=%ls",
-             childPid, parentPid, pipeName.c_str());
+                                    const std::wstring& pipeName, bool peerIsRelay) {
+    LOG_INFO("OnChildProcessNotify: childPid=%u parentPid=%u pipe=%ls peerIsRelay=%d",
+             childPid, parentPid, pipeName.c_str(), peerIsRelay ? 1 : 0);
 
     // 创建子进程会话：管道实例 + Handshake + 接收线程
     // VtOutput 回调：子进程输出写到 WT stdout（与父进程输出合并）
     // ChildNotify 回调：子进程创建孙进程时递归创建 ChildSession
+    // RelayChildNotify 回调：对端是 32 位中继时，替它注入 64 位子进程（Phase 23）
     // Exit 回调：子进程退出时同步 ConPTY 光标给父进程 DLL（OnChildExit）
     // ModeChange 回调：子进程 SetConsoleMode 时发 VT 鼠标报告启用/禁用序列给 WT
     // pipeName：父 DLL 生成的随机管道名（必须与父 DLL 传给子 DLL 的一致）
+    // peerIsRelay：对端是 relay32.dll（无 Console 语义，握手走 RelayHello）
     auto session = std::make_shared<ChildSession>(
-        childPid, pipeName,
+        childPid, pipeName, peerIsRelay,
         [this](const uint8_t* data, size_t len) { WriteChildVtOutput(data, len); },
+        [this](uint32_t cp, uint32_t pp, const std::wstring& grandPipe,
+               bool grandIsRelay) {
+            OnChildProcessNotify(cp, pp, grandPipe, grandIsRelay); },
         [this](uint32_t cp, uint32_t pp, const std::wstring& grandPipe) {
-            OnChildProcessNotify(cp, pp, grandPipe); },
+            return OnRelayChildNotify(cp, pp, grandPipe); },
         [this](uint32_t cp) { OnChildExit(cp); },
         [this](uint32_t in, uint32_t out, bool fromChild) { OnModeChange(in, out, fromChild); },
         [this](uint32_t vtIn, uint32_t vtOut) { OnModeSwitchNotify(vtIn, vtOut); });
@@ -627,8 +681,43 @@ void Mediator::OnChildProcessNotify(uint32_t childPid, uint32_t parentPid,
     // 加入会话列表（线程安全）
     std::lock_guard<std::mutex> lock(m_childMutex);
     m_childSessions.push_back(session);
-    LOG_INFO("OnChildProcessNotify: ChildSession started, pid=%u, total=%zu",
-             childPid, m_childSessions.size());
+    LOG_INFO("OnChildProcessNotify: ChildSession started, pid=%u relay=%d, total=%zu",
+             childPid, peerIsRelay ? 1 : 0, m_childSessions.size());
+}
+
+// 等注入器退出的上限。正常路径约 70ms（注入 + 管道握手）；
+// 注入器内部对 LoadLibraryW 与 RemoteCallExport 各有 10s 超时，故留足余量。
+// 注意：此刻被注入的子进程正被中继冻着，超时会连带把中继拖住，不宜设得过大。
+static constexpr DWORD kRelayChildInjectWaitMs = 30000;
+
+bool Mediator::OnRelayChildNotify(uint32_t childPid, uint32_t parentPid,
+                                  const std::wstring& pipeName) {
+    LOG_INFO("OnRelayChildNotify: childPid=%u parentPid=%u pipe=%ls",
+             childPid, parentPid, pipeName.c_str());
+
+    if (m_dllPath.empty()) {
+        LOG_ERROR("OnRelayChildNotify: m_dllPath is empty, cannot inject (child=%u)",
+                  childPid);
+        return false;
+    }
+
+    // 1. 先建孙进程会话（peerIsRelay=false：孙进程内是 injected.dll）。
+    //    会话线程自己去 Create 管道实例并等连接，而孙进程内的 DLL 连接端带
+    //    重试，所以这里不必等管道就绪再注入 —— 与 Phase 12 父 DLL 注入时的
+    //    先后关系一致（当时也是先通知 mediator 再注入）。
+    OnChildProcessNotify(childPid, parentPid, pipeName, /*peerIsRelay=*/false);
+
+    // 2. 向【仍被冻在 CREATE_SUSPENDED】的孙进程注入 x64 injected.dll。
+    //    中继是 32 位，跨位数注入不可能（实测 LoadLibraryW 返回 0），
+    //    所以必须由 mediator 这边的 x64 注入器完成。
+    //    子进程冻着等我们回执，注入完成前它不会跑任何用户代码。
+    LOG_INFO("OnRelayChildNotify: injecting injected.dll into frozen child %u", childPid);
+    const bool ok = SpawnInjectorAndWait(childPid, pipeName, kRelayChildInjectWaitMs);
+    if (!ok) {
+        LOG_ERROR("OnRelayChildNotify: injection into child %u failed; "
+                  "ack ok=0 so relay can resume it without hooks", childPid);
+    }
+    return ok;
 }
 
 void Mediator::WriteChildVtOutput(const uint8_t* data, size_t len) {

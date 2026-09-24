@@ -9,6 +9,14 @@
 //   - 接收线程：收 VtOutput → 回调 mediator 写 stdout；
 //                收 ChildProcessNotify → 回调 mediator 创建孙进程会话
 //
+// Phase 23：会话分两种对端
+//   - 普通会话（peerIsRelay=false）：对端是 injected.dll，握手走 Hello/HelloAck，
+//     有 VtOutput 与输入路由
+//   - 中继会话（peerIsRelay=true）：对端是 32 位 relay32.dll（如 py.exe 里的），
+//     它没有 Console 会话 —— 握手走 RelayHello（不回 HelloAck）、不参与输入路由、
+//     不产生 VtOutput；它只会发 RelayChildNotify 请 mediator 替它注入 64 位子进程，
+//     并等 RelayChildAck
+//
 // 生命周期：
 //   Start()  → 线程启动（Create + WaitClient + Handshake + RecvLoop）
 //   RecvLoop 退出 → 线程结束（HasExited() 返回 true）
@@ -37,7 +45,15 @@ public:
     using VtOutputCallback    = std::function<void(const uint8_t*, size_t)>;
     // 收到 ChildProcessNotify 时调用（mediator 据此创建孙进程会话）
     // 第三个参数 pipeName：子/孙 DLL 生成的随机管道名
-    using ChildNotifyCallback = std::function<void(uint32_t childPid, uint32_t parentPid, const std::wstring& pipeName)>;
+    // 第四个参数 peerIsRelay：孙会话对端是否为 32 位中继（决定其握手方式）
+    using ChildNotifyCallback = std::function<void(uint32_t childPid, uint32_t parentPid,
+                                                   const std::wstring& pipeName,
+                                                   bool peerIsRelay)>;
+    // 收到中继的 RelayChildNotify 时调用（mediator 据此建孙会话 + 注入 + 返回成败）
+    // 返回值即回给中继的 RelayChildAck.ok —— 中继据此决定是否记录注入失败
+    using RelayChildNotifyCallback =
+        std::function<bool(uint32_t childPid, uint32_t parentPid,
+                           const std::wstring& pipeName)>;
     // 子进程退出时调用（RecvLoop 结束后触发，mediator 据此同步 ConPTY 光标给父进程 DLL）
     using ExitCallback        = std::function<void(uint32_t childPid)>;
     // 收到 ModeChange 时调用（mediator 据此发 VT 鼠标报告启用/禁用序列给 WT）
@@ -50,8 +66,10 @@ public:
 
     ChildSession(uint32_t childPid,
                  const std::wstring& pipeName,
+                 bool peerIsRelay,
                  VtOutputCallback    onVtOutput,
                  ChildNotifyCallback onChildNotify,
+                 RelayChildNotifyCallback onRelayChildNotify,
                  ExitCallback        onExit,
                  ModeChangeCallback  onModeChange,
                  ModeSwitchNotifyCallback onModeSwitchNotify);
@@ -63,6 +81,9 @@ public:
     // 启动会话线程（非阻塞）
     // 线程内执行：Create pipe → WaitClient → Handshake → RecvLoop
     void Start();
+
+    // 会话对端是否为 32 位中继（无 Console 语义）
+    bool IsRelay() const { return m_isRelay; }
 
     // 转发 VtInput 给子进程 DLL（Phase 6+ 使用）
     void SendVtInput(const uint8_t* data, size_t len);
@@ -79,8 +100,10 @@ public:
 
     // 会话是否活跃（未退出 + 管道已建立 + 仍连接）
     // mediator 的 RouteInput 据此判断是否向此 ChildSession 转发输入
+    // 中继会话恒为 false：中继进程没有 Console，输入不该发给它
     bool IsActive() const {
-        return !m_exited.load() && m_running.load() && m_transport && m_transport->IsConnected();
+        return !m_isRelay && !m_exited.load() && m_running.load() &&
+               m_transport && m_transport->IsConnected();
     }
 
     uint32_t Pid() const { return m_childPid; }
@@ -88,6 +111,7 @@ public:
 private:
     uint32_t m_childPid;
     std::wstring m_pipeName;  // 随机管道名（父 DLL 生成上报）
+    bool m_isRelay;           // 对端是否 32 位中继（决定握手与是否参与输入路由）
     std::unique_ptr<NamedPipeTransport> m_transport;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
@@ -95,6 +119,7 @@ private:
 
     VtOutputCallback         m_onVtOutput;
     ChildNotifyCallback      m_onChildNotify;
+    RelayChildNotifyCallback m_onRelayChildNotify;
     ExitCallback             m_onExit;
     ModeChangeCallback       m_onModeChange;
     ModeSwitchNotifyCallback m_onModeSwitchNotify;
@@ -102,11 +127,15 @@ private:
     // 线程主函数：Create + WaitClient + Handshake + RecvLoop
     void Run();
 
-    // Hello 握手：收 Hello，回 HelloAck（不 ApplySnapshot，子进程不调整 WT 尺寸）
+    // 握手：普通会话收 Hello 回 HelloAck；中继会话收 RelayHello（不回 Ack，
+    // 中继没有 Console 状态快照要接收）
     bool DoHandshake();
 
-    // 接收循环：处理 VtOutput / ChildProcessNotify / ByeAck
+    // 接收循环：处理 VtOutput / ChildProcessNotify / RelayChildNotify / ByeAck
     void RecvLoop();
+
+    // 给中继回 RelayChildAck（成败都要回：中继靠它 ResumeThread）
+    void SendRelayChildAck(uint32_t childPid, uint32_t ok);
 };
 
 } // namespace terminjector

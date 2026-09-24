@@ -1,0 +1,18 @@
+; relay32.dll 模块定义文件
+;
+; 为什么需要它：
+;   RemotePipeSetup 以 WINAPI(__stdcall) 声明 —— 它是要被 CreateRemoteThread
+;   当线程入口调用的，必须是 __stdcall。但 x86 下 __stdcall 的导出名会被修饰成
+;   _RemotePipeSetup@4，而注入方（RemoteCallExport）按【裸名】GetProcAddress
+;   （x64 下不存在名称修饰，两个位数必须同名，否则同一份调用代码只能改名叫）。
+;   .def 里写裸名，由链接器去匹配被修饰的符号，导出名即保持裸名。
+;
+; 注：RemoteParams.cpp 仍带 __declspec(dllexport)，因此导出表里会同时存在
+;     被修饰的 _RemotePipeSetup@4（冗余但无害；实际调用走裸名那条）。
+LIBRARY relay32
+
+EXPORTS
+    ; 注入参数下发（被 RemoteCallExport 跨进程调用）
+    RemotePipeSetup
+    ; 探针：确认加载的是中继 DLL 而非 injected.dll
+    Relay_QueryBitness

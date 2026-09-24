@@ -95,15 +95,19 @@ class TestSession:
         injector.focus_wt()
 
     def run_target(self, name: str, body: str, ready_key: str = None,
-                   ready_timeout: float = 20.0) -> None:
+                   ready_timeout: float = 20.0, launcher: str = "python") -> None:
         """生成目标脚本并在注入 cmd 中运行。
 
         ready_key 非空时阻塞等待结果文件中出现该 KEY（脚本就绪）。
         超时抛 RuntimeError（含前台/结果文件诊断，定位输入丢失）。
+
+        launcher 默认 "python"；跨位数链路测试可传 "py -3"（32 位启动器），
+        此时进程链为 cmd(64) → py.exe(32) → python.exe(64)，用来验证中继路径。
         """
         result_mod.clear_result(name)
         script_path = target_mod.write_target(name, body)
-        cmd = 'python "{}" "{}"'.format(script_path, result_mod.result_file(name))
+        cmd = '{} "{}" "{}"'.format(launcher, script_path,
+                                    result_mod.result_file(name))
         self._ensure_wt_foreground()
         input_sim.type_text(cmd)
         time.sleep(0.3)

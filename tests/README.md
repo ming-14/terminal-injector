@@ -34,7 +34,7 @@
 在 `tests/e2e/` 目录下执行：
 
 ```powershell
-python run_all.py                        # 全量回归（109 个测试）
+python run_all.py                        # 全量回归（115 个测试）
 python run_all.py --list                 # 列出全部测试文件
 python run_all.py --cat mouse            # 运行指定类别（vt_output / keyboard / mouse / lifecycle ...）
 python run_all.py --phase 8              # 按 PHASES.md 阶段运行（0-15）
@@ -98,6 +98,15 @@ e2e/
 ```
 
 类别与阶段映射见 `docs/PHASES.md`（如 Phase 8 = mouse、Phase 13 = lifecycle）。
+
+值得单独说明的两个用例：
+
+- `lifecycle/test_conpty_hosted_target.py`：**目标进程自身跑在终端（ConPTY）里**时的
+  注入回归。用 pywezterm 的 ConPTY 作目标宿主（与 WT 同属伪控制台，但能直接断言字节、
+  零焦点依赖、秒级完成）；未装 pywezterm 时按约定记 UNSUPPORTED。背景见 `docs/PHASES.md`
+  的 BUG-013（误判全屏 TUI）与 BUG-014（控制台输入模式被冻结）。
+- `lifecycle/test_launcher_chain.py`：32/64 位跨位数启动链的逐环断言，失败会直接指出
+  断在哪一环。
 
 ### 三层验证方式
 

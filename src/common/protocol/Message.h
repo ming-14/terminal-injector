@@ -10,6 +10,9 @@
 //   DLL  -> 中介：Hello / VtOutput / ModeChange / CpChange / Pong / ByeAck
 //                  UnloadComplete / ChildProcessNotify / ChildExitNotify
 //   中介 -> DLL：HelloAck / VtInput / ResizeNotify / Ping / Shutdown
+//
+//   中继(32位) -> 中介：RelayHello / RelayChildNotify（Phase 23）
+//   中介 -> 中继(32位)：RelayChildAck（Phase 23）
 #pragma once
 
 #include <cstdint>
@@ -60,6 +63,28 @@ enum class MessageType : uint32_t {
     // 光标定位序列，把 ConPTY 光标拉回旧位置，覆盖子进程输出。
     // 中介在子进程退出时查询 ConPTY 当前光标，通过此消息发给父进程 DLL 对齐缓存。
     ChildExitSync       = 0x0062,
+
+    // 32 位中继（Phase 23）
+    //
+    // 背景：32 位进程（如 C:\Windows\py.exe）无法被 x64 injected.dll 注入
+    //   （跨位数 LoadLibraryW 必然失败），因此它拉起的 64 位孙进程会漏网。
+    //   解法是给 32 位进程注入一个极小的 32 位中继 DLL（relay32.dll）：
+    //   它只做"捕获子进程 + 冻结 + 上报 + 等回执 + 恢复"。
+    //
+    // RelayHello（0x0063）中继->中介：中继已连上会话管道，携带自身 pid/位数。
+    //   收到它的会话即"中继模式"会话（父 DLL 已在 ChildProcessNotify 里用
+    //   peerIsRelay 标明），该会话不会有注入目标的 VtOutput / 输入。
+    RelayHello          = 0x0063,
+    // RelayChildNotify（0x0064）中继->中介：中继捕获到子进程并已将其冻结在
+    //   CREATE_SUSPENDED。中继是 32 位、无法向 64 位子进程注入，故请中介：
+    //   1) 建立子会话管道（名字由中继生成并在此上报）
+    //   2) 向【仍处于挂起】的子进程注入 x64 injected.dll（race-free）
+    //   3) 回 RelayChildAck
+    //   payload 复用 ChildProcessNotifyPayload（childPid/parentPid/pipeName）
+    RelayChildNotify    = 0x0064,
+    // RelayChildAck（0x0065）中介->中继：子进程注入流程结束（成功或失败），
+    //   中继收到后 ResumeThread。失败也必须回，否则子进程永远挂起。
+    RelayChildAck       = 0x0065,
 
     // 模式切换通知（Phase 13）
     // DLL->中介：VT 直通模式与行编辑模式切换
@@ -157,13 +182,40 @@ static_assert(sizeof(CpChangePayload) == 8, "CpChangePayload 大小应为 8 字�
 //   - 父 DLL 生成随机名，一并通过注入参数（RemotePipeSetup）传给子 DLL
 //   - 本消息把同一名字上报给 mediator 创建服务端，两侧名字必须一致
 //   - 名字不可预测，防同会话进程预创建抢占；DLL 再校验服务端进程身份
+//
+// peerIsRelay（Phase 23）：本会话的对端是不是 32 位中继 DLL
+//   - 上报方已按子进程位数决定注入哪个 DLL：
+//       64 位子进程 → injected.dll       → peerIsRelay = 0（普通会话）
+//       32 位子进程 → relay32.dll        → peerIsRelay = 1（中继会话）
+//   - 中继会话不会有 VtOutput / 输入，也不参与输入路由；中介据此选择握手方式
 struct ChildProcessNotifyPayload {
     uint32_t childPid;     // 新创建的子进程 PID
     uint32_t parentPid;    // 父进程 PID（即上报方）
     wchar_t  pipeName[128]; // 子会话随机管道名
+    uint32_t peerIsRelay;  // 1=对端是 32 位中继 DLL（握手走 RelayHello）
 };
-static_assert(sizeof(ChildProcessNotifyPayload) == 264,
-              "ChildProcessNotifyPayload 大小应为 264 字节");
+static_assert(sizeof(ChildProcessNotifyPayload) == 268,
+              "ChildProcessNotifyPayload 大小应为 268 字节");
+
+// RelayHello 消息 payload（中继 -> 中介，Phase 23）
+// 中继连上会话管道后的第一帧，用于确认连接并记录中继身份。
+// 中继没有 Console 会话，因此不携带状态快照（与 HelloPayload 的区别）。
+struct RelayHelloPayload {
+    uint32_t pid;      // 中继所在进程 PID（应等于会话的 childPid）
+    uint32_t bitness;  // 中继自身位数，固定 32
+};
+static_assert(sizeof(RelayHelloPayload) == 8,
+              "RelayHelloPayload 大小应为 8 字节");
+
+// RelayChildAck 消息 payload（中介 -> 中继，Phase 23）
+// 中介完成"对挂起子进程注入 x64 injected.dll"后回报，中继据此 ResumeThread。
+// 注入失败也必须回报（ok=0），否则子进程永远挂起。
+struct RelayChildAckPayload {
+    uint32_t childPid;  // 对应 RelayChildNotify 的子进程 PID
+    uint32_t ok;        // 1=注入成功，0=失败（失败时子进程仍需恢复）
+};
+static_assert(sizeof(RelayChildAckPayload) == 8,
+              "RelayChildAckPayload 大小应为 8 字节");
 
 // ChildExitSync 消息 payload（中介 -> 父进程 DLL）
 // 子进程退出后，中介查询 ConPTY 当前光标，发给父进程 DLL 对齐 ConsoleState 缓存

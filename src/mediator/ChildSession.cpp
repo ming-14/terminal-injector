@@ -51,15 +51,19 @@ bool GetWtCursorPos(uint16_t& cursorX, uint16_t& cursorY) {
 
 ChildSession::ChildSession(uint32_t childPid,
                            const std::wstring& pipeName,
+                           bool peerIsRelay,
                            VtOutputCallback         onVtOutput,
                            ChildNotifyCallback      onChildNotify,
+                           RelayChildNotifyCallback onRelayChildNotify,
                            ExitCallback             onExit,
                            ModeChangeCallback       onModeChange,
                            ModeSwitchNotifyCallback onModeSwitchNotify)
     : m_childPid(childPid)
     , m_pipeName(pipeName)
+    , m_isRelay(peerIsRelay)
     , m_onVtOutput(std::move(onVtOutput))
     , m_onChildNotify(std::move(onChildNotify))
+    , m_onRelayChildNotify(std::move(onRelayChildNotify))
     , m_onExit(std::move(onExit))
     , m_onModeChange(std::move(onModeChange))
     , m_onModeSwitchNotify(std::move(onModeSwitchNotify)) {
@@ -123,7 +127,10 @@ void ChildSession::Run() {
     // 子进程已退出（RecvLoop 结束）：通知 mediator 同步 ConPTY 光标给父进程 DLL
     // 必须在 RecvLoop 之后、线程退出之前触发，让 mediator 抢在父进程输出新 prompt
     // 前把 ConPTY 光标发给父进程 DLL 对齐 ConsoleState 缓存
-    if (m_onExit) {
+    //
+    // 中继会话不发：中继进程（如 py.exe）不产出任何终端内容，ConPTY 光标在它
+    // 存在期间没有被它推进过，发过去只是重复对齐。
+    if (m_onExit && !m_isRelay) {
         m_onExit(m_childPid);
     }
 
@@ -132,6 +139,30 @@ void ChildSession::Run() {
 
 bool ChildSession::DoHandshake() {
     using namespace protocol;
+
+    // 中继会话：对端是 32 位 relay32.dll，它没有 Console 会话，
+    // 首帧是 RelayHello，且不回 HelloAck（无状态快照可给它）
+    if (m_isRelay) {
+        MessageType rtype;
+        std::vector<uint8_t> rpayload;
+        if (!RecvPacket(m_transport.get(), rtype, rpayload)) {
+            LOG_ERROR("ChildSession Handshake: RecvPacket(RelayHello) failed, pid=%u",
+                      m_childPid);
+            return false;
+        }
+        if (rtype != MessageType::RelayHello) {
+            LOG_ERROR("ChildSession Handshake: expected RelayHello, got type=0x%08X, pid=%u",
+                      static_cast<uint32_t>(rtype), m_childPid);
+            return false;
+        }
+        RelayHelloPayload rhello{};
+        if (rpayload.size() >= sizeof(rhello)) {
+            std::memcpy(&rhello, rpayload.data(), sizeof(rhello));
+        }
+        LOG_INFO("ChildSession Handshake: RelayHello pid=%u bitness=%u (session pid=%u)",
+                 rhello.pid, rhello.bitness, m_childPid);
+        return true;
+    }
 
     // 收 Hello
     MessageType type;
@@ -246,11 +277,41 @@ void ChildSession::RecvLoop() {
                     // 提取孙进程随机管道名（子 DLL 生成），供 mediator 创建孙会话
                     std::wstring grandPipe(notify.pipeName);
                     LOG_INFO("ChildSession RecvLoop: ChildProcessNotify "
-                             "grandchild=%u parent=%u pipe=%ls",
-                             notify.childPid, notify.parentPid, grandPipe.c_str());
-                    m_onChildNotify(notify.childPid, notify.parentPid, grandPipe);
+                             "grandchild=%u parent=%u pipe=%ls peerIsRelay=%u",
+                             notify.childPid, notify.parentPid, grandPipe.c_str(),
+                             notify.peerIsRelay);
+                    m_onChildNotify(notify.childPid, notify.parentPid, grandPipe,
+                                    notify.peerIsRelay != 0);
                 }
                 break;
+
+            case MessageType::RelayChildNotify: {
+                // 中继捕获到子进程并已将其冻在 CREATE_SUSPENDED，请 mediator 建子会话
+                // + 注入 x64 injected.dll（中继是 32 位，跨位数注入不可能）。
+                if (payload.size() < sizeof(ChildProcessNotifyPayload)) {
+                    // 拿不到 childPid 就没法回执；中继侧会按超时恢复子进程，
+                    // 不会把子进程永远挂着
+                    LOG_ERROR("ChildSession RecvLoop: RelayChildNotify payload too small "
+                              "(%zu), pid=%u", payload.size(), m_childPid);
+                    break;
+                }
+                ChildProcessNotifyPayload notify{};
+                std::memcpy(&notify, payload.data(), sizeof(notify));
+                const std::wstring childPipe(notify.pipeName);
+                LOG_INFO("ChildSession RecvLoop: RelayChildNotify child=%u parent=%u "
+                         "pipe=%ls", notify.childPid, notify.parentPid, childPipe.c_str());
+                bool ok = false;
+                if (m_onRelayChildNotify) {
+                    ok = m_onRelayChildNotify(notify.childPid, notify.parentPid, childPipe);
+                } else {
+                    LOG_ERROR("ChildSession RecvLoop: RelayChildNotify has no handler, "
+                              "child=%u stays frozen until relay times out",
+                              notify.childPid);
+                }
+                // 成败都必须回执：中继靠它 ResumeThread，不回子进程永远挂着
+                SendRelayChildAck(notify.childPid, ok ? 1u : 0u);
+                break;
+            }
 
             case MessageType::ByeAck:
                 // 子进程 DLL 卸载（Phase 11），退出接收循环
@@ -295,6 +356,22 @@ void ChildSession::RecvLoop() {
                 break;
         }
     }
+}
+
+void ChildSession::SendRelayChildAck(uint32_t childPid, uint32_t ok) {
+    if (!m_transport || !m_transport->IsConnected()) {
+        LOG_ERROR("ChildSession SendRelayChildAck: pipe not connected, child=%u "
+                  "(relay will resume child on timeout)", childPid);
+        return;
+    }
+    protocol::RelayChildAckPayload ack{};
+    ack.childPid = childPid;
+    ack.ok = ok;
+    auto pkt = protocol::Serialize(protocol::MessageType::RelayChildAck, &ack,
+                                   sizeof(ack));
+    const int sent = m_transport->Send(pkt.data(), pkt.size());
+    LOG_INFO("ChildSession SendRelayChildAck: child=%u ok=%u sent=%d/%zu (session pid=%u)",
+             childPid, ok, sent, pkt.size(), m_childPid);
 }
 
 void ChildSession::SendVtInput(const uint8_t* data, size_t len) {

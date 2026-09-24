@@ -5,14 +5,21 @@
 //   1. ENSURE_INITIALIZED() 触发懒加载
 //   2. 强制加入 CREATE_SUSPENDED 标志
 //   3. 调原始 CreateProcessW/A → 得到子进程 PID + 主线程句柄
-//   4. 生成子会话随机管道名，发 ChildProcessNotify 给 mediator
+//   4. 判定子进程位数（决定注入哪个 DLL，也决定 mediator 的握手方式）
+//   5. 生成子会话随机管道名，发 ChildProcessNotify 给 mediator
 //      （mediator 据此创建子进程管道实例；名字不可预测，防抢占）
-//   5. 用 CreateRemoteThread + LoadLibraryW 注入 DLL 到子进程，
-//      并经 RemoteCallExport 传注入参数（随机管道名 + mediatorPid）
-//   6. ResumeThread（如果原始 flags 没有 SUSPENDED）
+//   6. 按位数分派注入：
+//        64 位 → 本 DLL 自己用 CreateRemoteThread + LoadLibraryW 注入 injected.dll
+//        32 位 → fork 同目录 relay32inject.exe 代劳注入 relay32.dll（见下）
+//      两者都经 RemoteCallExport 传注入参数（随机管道名 + mediatorPid）
+//   7. ResumeThread（如果原始 flags 没有 SUSPENDED）
 //
 // 关键设计：
 //   - thread_local 重入保护：防止 Detour 内部间接递归调用 CreateProcess
+//   - 跨位数注入不可能：本地 kernel32!LoadLibraryW 是 64 位地址，在 32 位目标
+//     里没有意义（实测跨位数注入返回 0）。同位数注入才是可行路径，因此 32 位
+//     子进程由 32 位的 relay32inject.exe 注入 —— 它复用 relay32.dll 同一份
+//     注入原语（src/relay32/child_inject.cpp），不是另写一遍
 //   - 子进程 DLL 的管道参数由父 DLL 注入时下发（安全审查 HIGH #2 修复，
 //     旧方案子 DLL 用 GetCurrentProcessId() 自发现约定名，可被预创建抢占）
 //   - 注入失败降级：子进程不被注入，输出走 ConHost（与无注入时一致）
@@ -21,12 +28,14 @@
 #include "HookWhitelist.h"
 #include "../HookManager.h"
 #include "../RemoteParams.h"
+#include "process/ProcessBitness.h"
 #include "protocol/Message.h"
 #include "transport/NamedPipeTransport.h"
 #include "remote/RemoteCall.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include <cwctype>
@@ -54,6 +63,11 @@ DEFINE_ORIG_PTR(CreateProcessA, BOOL WINAPI(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES
 // （如 Logger 初始化、LazyInit 等场景若触发 CreateProcess）
 namespace {
 thread_local bool t_inCreateProcess = false;
+
+// 等 32 位注入助手（relay32inject.exe）退出的上限。
+// 正常路径 ~40ms；助手内部对 LoadLibraryW 与 RemoteCallExport 各有 10s 超时，
+// 这里取足够覆盖最坏情况的值，同时避免异常时把父进程冻得太久。
+constexpr DWORD kRelayInjectWaitMs = 30000;
 }
 
 // ============================================================
@@ -111,25 +125,44 @@ static HMODULE FindChildModuleByPath(HANDLE hProcess,
     return nullptr;
 }
 
-static bool InjectDllToChild(HANDLE hProcess, uint32_t childPid,
-                             const std::wstring& pipeName,
-                             uint32_t mediatorPid) {
-    // 1. 获取当前 DLL 路径（与 InjectDllToChild 函数地址同模块）
-    wchar_t dllPath[MAX_PATH] = {0};
+// 取本 DLL 的所在目录与文件名（地址取自本函数，保证落在本模块内）。
+// 同目录下放着全部协作产物：injected.dll、relay32.dll、relay32inject.exe。
+static bool GetSelfModuleLocation(std::wstring& outDir, std::wstring& outName) {
     HMODULE hSelf = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&InjectDllToChild), &hSelf)) {
-        LOG_ERROR("InjectDllToChild: GetModuleHandleExW failed: %lu", GetLastError());
+                            reinterpret_cast<LPCWSTR>(&GetSelfModuleLocation), &hSelf)) {
+        LOG_ERROR("GetSelfModuleLocation: GetModuleHandleExW failed: %lu", GetLastError());
         return false;
     }
+    wchar_t dllPath[MAX_PATH] = {0};
     if (!GetModuleFileNameW(hSelf, dllPath, MAX_PATH)) {
-        LOG_ERROR("InjectDllToChild: GetModuleFileNameW failed: %lu", GetLastError());
+        LOG_ERROR("GetSelfModuleLocation: GetModuleFileNameW failed: %lu", GetLastError());
         return false;
     }
+    std::wstring path(dllPath);
+    const size_t pos = path.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) {
+        LOG_ERROR("GetSelfModuleLocation: no separator in %ls", dllPath);
+        return false;
+    }
+    outDir = path.substr(0, pos);
+    outName = path.substr(pos + 1);
+    return true;
+}
+
+static bool InjectDllToChild(HANDLE hProcess, uint32_t childPid,
+                             const std::wstring& pipeName,
+                             uint32_t mediatorPid) {
+    // 1. 获取当前 DLL 全路径（远程 LoadLibraryW 的入参）
+    std::wstring dllDir, selfName;
+    if (!GetSelfModuleLocation(dllDir, selfName)) {
+        return false;
+    }
+    const std::wstring dllPath = dllDir + L"\\" + selfName;
 
     // 2. 在子进程分配内存，写入 DLL 路径（含 null 终止符）
-    const size_t pathBytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
+    const size_t pathBytes = (dllPath.size() + 1) * sizeof(wchar_t);
     LPVOID remoteBuf = VirtualAllocEx(hProcess, nullptr, pathBytes,
                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remoteBuf) {
@@ -138,7 +171,8 @@ static bool InjectDllToChild(HANDLE hProcess, uint32_t childPid,
     }
 
     SIZE_T written = 0;
-    if (!WriteProcessMemory(hProcess, remoteBuf, dllPath, pathBytes, &written) ||
+    if (!WriteProcessMemory(hProcess, remoteBuf, dllPath.c_str(), pathBytes,
+                            &written) ||
         written != pathBytes) {
         LOG_ERROR("InjectDllToChild: WriteProcessMemory failed: %lu", GetLastError());
         VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
@@ -219,7 +253,78 @@ static bool InjectDllToChild(HANDLE hProcess, uint32_t childPid,
     }
 
     LOG_INFO("InjectDllToChild: success pid=%u dll=%ls pipe=%ls", childPid,
-             dllPath, pipeName.c_str());
+             dllPath.c_str(), pipeName.c_str());
+    return true;
+}
+
+// ============================================================
+// 跨位数注入：32 位子进程交给 32 位注入器
+// ============================================================
+// 为什么本 DLL 不能自己注入 32 位子进程：
+//   远程 LoadLibraryW 的入口地址取自【本进程】的 kernel32，靠的是"kernel32 是
+//   KnownDLL、同一 boot 内同位数进程共享同一基址"。本 DLL 是 64 位进程，取到的
+//   是 64 位地址，写进 32 位目标毫无意义 —— 实测该远程线程会起来但 LoadLibraryW
+//   返回 0（加载失败）。所以必须由 32 位进程来注入。
+//
+// 为什么是 fork 一个短命助手而不是让 mediator 代劳：
+//   子进程句柄本来就在本 Detour 手里（lpPi->hProcess，mediator 只有 PID），
+//   注入的成败也由本 Detour 决定何时 ResumeThread。放这里就无需新增协议往返，
+//   也不会因为 mediator 异常而让子进程白冻到超时。
+//
+// 助手与 relay32.dll 共用同一份注入原语（src/relay32/child_inject.cpp），
+// 不是把注入逻辑再写一遍。
+static bool InjectRelayInto32BitChild(uint32_t childPid,
+                                      const std::wstring& pipeName,
+                                      uint32_t mediatorPid) {
+    std::wstring dir, selfName;
+    if (!GetSelfModuleLocation(dir, selfName)) {
+        return false;
+    }
+    const std::wstring exePath = dir + L"\\relay32inject.exe";
+    const std::wstring relayPath = dir + L"\\relay32.dll";
+
+    std::wstring cmd = L"\"" + exePath + L"\" --child " + std::to_wstring(childPid) +
+                       L" --dll \"" + relayPath + L"\" --pipe \"" + pipeName + L"\"";
+    if (mediatorPid != 0) {
+        cmd += L" --mediator-pid " + std::to_wstring(mediatorPid);
+    }
+    LOG_INFO("InjectRelayInto32BitChild: pid=%u cmd=%ls", childPid, cmd.c_str());
+
+    // CreateProcessW 的 lpCommandLine 必须是可写缓冲
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // 直接走原始入口，不经过本 Detour：助手进程自己不该被我们注入（否则会递归
+    // 成"起注入器去注入注入器"）。CreateProcessW_orig 天然绕开这条路径。
+    // CREATE_NO_WINDOW：助手是控制台程序，不能让它占用/弹出一个控制台 ——
+    // 目标进程的输出正被接管到 WT，多一个控制台会污染显示。
+    if (!CreateProcessW_orig(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        LOG_ERROR("InjectRelayInto32BitChild: CreateProcessW failed: %lu",
+                  GetLastError());
+        return false;
+    }
+
+    const DWORD waitRes = WaitForSingleObject(pi.hProcess, kRelayInjectWaitMs);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (waitRes != WAIT_OBJECT_0) {
+        LOG_ERROR("InjectRelayInto32BitChild: helper not finished (wait=%lu), pid=%u; "
+                  "child will be resumed without relay", waitRes, childPid);
+        return false;
+    }
+    if (exitCode != 0) {
+        LOG_ERROR("InjectRelayInto32BitChild: helper exit code=%lu, pid=%u",
+                  exitCode, childPid);
+        return false;
+    }
+    LOG_INFO("InjectRelayInto32BitChild: relay injected into 32-bit child %u", childPid);
     return true;
 }
 
@@ -241,6 +346,12 @@ static void OnChildProcessCreated(LPPROCESS_INFORMATION lpPi, bool needResume) {
     //    父 DLL 既上报 mediator 创建服务端，又传给子 DLL 连接，两侧一致
     const std::wstring childPipe = MakeRandomPipeName(lpPi->dwProcessId);
 
+    // 0.6 判子进程位数，定下"注入哪个 DLL"
+    //     必须在上报 mediator 之前定：子会话的对端是 relay32.dll 还是
+    //     injected.dll 决定 mediator 用哪种握手（RelayHello / Hello）
+    const ProcessBitness bits = QueryProcessBitness(lpPi->hProcess);
+    const bool peerIsRelay = (bits == ProcessBitness::X86);
+
     // 1. 通知 mediator：子进程已创建 + 随机管道名，请创建管道实例
     //    mediator 收到后创建对应名字的管道并等待连接
     protocol::ChildProcessNotifyPayload notify{};
@@ -248,13 +359,34 @@ static void OnChildProcessCreated(LPPROCESS_INFORMATION lpPi, bool needResume) {
     notify.parentPid = GetCurrentProcessId();
     wcsncpy_s(notify.pipeName, sizeof(notify.pipeName) / sizeof(wchar_t),
               childPipe.c_str(), _TRUNCATE);
+    notify.peerIsRelay = peerIsRelay ? 1u : 0u;
     SendToMediator(&notify, sizeof(notify), protocol::MessageType::ChildProcessNotify);
 
-    // 2. 注入 DLL 到子进程
+    // 2. 按位数分派注入
     //    注入后子进程 DllMain 执行（LazyInit 懒加载，不阻塞）
     //    子进程首个 Console API 调用时触发 LazyInit，连接管道
-    if (!InjectDllToChild(lpPi->hProcess, lpPi->dwProcessId, childPipe,
-                          haveParams ? parentParams.mediatorPid : 0)) {
+    const uint32_t mediatorPid = haveParams ? parentParams.mediatorPid : 0;
+    bool injected = false;
+    if (peerIsRelay) {
+        // 32 位子进程（如 C:\Windows\py.exe）：本 DLL 是 64 位，跨位数注入不可能，
+        // 由 32 位的 relay32inject.exe 注入 relay32.dll。
+        // 中继只做"捕获它拉起的子进程"，不接管 Console（32 位程序本体接管是
+        // TODO(32bit-target)）。
+        LOG_INFO("OnChildProcessCreated: child %u is 32-bit, injecting relay32 via helper",
+                 lpPi->dwProcessId);
+        injected = InjectRelayInto32BitChild(lpPi->dwProcessId, childPipe, mediatorPid);
+    } else if (bits == ProcessBitness::X64) {
+        injected = InjectDllToChild(lpPi->hProcess, lpPi->dwProcessId, childPipe,
+                                    mediatorPid);
+    } else {
+        // 位数判不出来（拿不到镜像路径等）：沿用旧行为按 64 位处理，
+        // 失败也只是子进程不被注入，与无注入时一致
+        LOG_WARN("OnChildProcessCreated: child %u bitness unknown, assuming 64-bit",
+                 lpPi->dwProcessId);
+        injected = InjectDllToChild(lpPi->hProcess, lpPi->dwProcessId, childPipe,
+                                    mediatorPid);
+    }
+    if (!injected) {
         LOG_WARN("OnChildProcessCreated: inject failed pid=%u, child runs without hooks",
                  lpPi->dwProcessId);
         // 降级：子进程不被注入，输出走 ConHost（与无注入时一致）
