@@ -25,6 +25,19 @@
 | `tracker_cursor_probe.py` | 用"标记 + 解析 `CursorSync`"读出 `VtCursorTracker` 的坐标，与 pyte 真值逐构造比对 |
 | `launcher_chain_probe.py` | 跨位数启动链逐环断言（L1~L6） |
 | `pipe_io_serialize_probe.py` | 同步命名管道"挂起读堵死同句柄写"的隔离复现 |
+| `cross_inject.py` | x64 进程向 32 位进程注入 32 位 DLL 的可行性判定（决定是否必须另做 32 位注入器） |
+| `direct_inject.py` | 最小变量隔离的 `CreateRemoteThread+LoadLibraryW` 注入（同位数/跨位数对照），并导出 `inject()` 供其他探针复用 |
+| `inj_time.py` | 测量"注入一针"本身的耗时（远程线程退出即 Hook 就位，作为"轮询补注入"的硬下限） |
+| `inject_suspended.py` | `--inject` 能否注入【挂起中】的 64 位进程（注入前后模块表对照） |
+| `inject_suspended_pipe.py` | 挂起进程注入耗时 5.5s 的根因定位（缺管道服务端时 `Connect` 吃满超时） |
+| `relay_bootstrap_probe.py` | 跨位数向【挂起的 32 位子进程】注入 32 位中继的路线判定（判据 A~E） |
+| `relay_e2e.py` | 32 位中继 DLL 方案端到端（钩 `CreateProcessW` / 冻结 / 注入 / ack 四环节 + 铁证） |
+| `suspended32_probe.py` | 挂起的 WOW64 进程能否枚举出 32 位模块表 |
+| `mapping_base_probe.py` | 用 `VirtualQueryEx`+`GetMappedFileNameW` 取挂起进程内 DLL 基址（不依赖 KnownDLL 同址） |
+| `sgr_colon_filter_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 在 DLL SGR 过滤器下的字节变化（现场错色 bug） |
+| `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
+
+`timing.py` / `slack.py` 依赖同目录的微型目标 `hello.py` / `firstout.py`。
 
 渲染终端字节用 `pyte`（`pip install pyte`）；承载真 ConPTY 用 `pywezterm`
 （可选，未安装时相关探针会提示并跳过）。
