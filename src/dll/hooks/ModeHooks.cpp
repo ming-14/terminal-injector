@@ -140,6 +140,24 @@ BOOL WINAPI SetConsoleMode_Detour(HANDLE h, DWORD mode) {
         bool oldVT = (oldMode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
         bool newVT = (mode & ENABLE_VIRTUAL_TERMINAL_INPUT) != 0;
         state.SetInputMode(mode);
+
+        // 输入模式必须**同时落到真实控制台**（2026-09-24 修复）。
+        //
+        // 控制台输入模式不是本进程私有视图，而是被共享的状态：子进程被 spawn 时按它
+        // 选读路径（Python 的 input() 看行模式，行模式关则行语义永不出现 → 挂住）；
+        // KickStart 往真实 ConHost 写 ENTER、以及直通读（transport 断开/卸载）也都
+        // 按真实模式成形。此前只记录不调原 API ⇒ 模式被**冻结在注入瞬间的值**，而
+        // 父 shell 本会在"读键"(raw 0x1e4) 与"执行命令"(0x1f7) 间来回切；子进程恰在
+        // 执行命令期间创建 ⇒ 原生看到 0x1f7、注入看到 0x1e4（对照：
+        // tests/_probe/console_mode_freeze_probe.py、child_input_probe.py）。
+        //
+        // 只镜像**输入**句柄：实测同一子进程 STDOUT 模式原生/注入一致(0x7)，只有
+        // STDIN 有偏差；输出句柄继续不调原 API（ConHost 不参与画面语义）。
+        if (!SetConsoleMode_orig(h, mode)) {
+            LOG_WARN("ModeHooks: mirror input mode 0x%lx to real console failed: %lu",
+                     mode, GetLastError());
+        }
+
         if (mode != oldMode) {
             // Phase 13 设计（13-vt-passthrough-mode.md §4.2）：
             // 仅在 VT_INPUT 标志变化时清空队列+重置鼠标按键状态+通知 mediator，

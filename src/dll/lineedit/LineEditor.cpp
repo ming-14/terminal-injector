@@ -26,6 +26,7 @@
 #include "LineEditor.h"
 #include "TabCompleter.h"
 #include "../state/ConsoleState.h"
+#include "../state/VirtualConsoleState.h"
 #include "logging/Logger.h"
 
 #include <windows.h>
@@ -138,6 +139,25 @@ void LineEditor::BeginSession() {
     m_savedLine.clear();
     m_tabCompleter->Cancel();
     m_startCursor = ConsoleState::Instance().GetCursorPosition();
+
+    // 回显定位基准取**目的地空间**（VirtualConsoleState = ConPTY/WT 侧真实坐标）。
+    //
+    // 为什么不能用上面那个 ConsoleState：它记录的是 ConHost 缓冲【绝对】行号，而
+    // VT 直通输出分支只喂 VtCursorTracker（→ CommitCursor 回写 VirtualConsoleState），
+    // **不推进 ConsoleState** —— 子进程输出 40 行菜单后它仍停在注入对齐时的初值。
+    // 子进程回显前用 GetCurrentUiCursor() 发 CursorSync 定位（InputHooks 里那两处），
+    // 于是字符被写到几十行之外（2026-09-24 用户报告：run.py 菜单里敲 `2`，
+    // `2` 落在第 3 行而不是 ` 选择 >` 之后）。
+    //
+    // 只有输出没超过一屏、绝对行号恰好等于视口行号时两者才巧合相等，这也是既有测试
+    // 一直没暴露它的原因。VirtualConsoleState 由直通（经 tracker）与翻译两条路径共同
+    // 维护，且子进程 LazyInit 已用 HelloAck 的 WT 光标设好初值。
+    {
+        COORD ui = VirtualConsoleState::Instance().GetCursorPos();
+        if (ui.X < 0) ui.X = 0;
+        if (ui.Y < 0) ui.Y = 0;
+        m_startCursorUi = ui;
+    }
 }
 
 // ============================================================
@@ -182,11 +202,13 @@ void LineEditor::SyncCursor(int deltaY, bool toLineStart) const {
 
 // 当前期望光标：与 SyncCursor 的计算一致（行首 + 光标前显示宽度，折行算 Y）
 COORD LineEditor::GetCurrentUiCursor() const {
-    const int screenW = ConsoleState::Instance().GetBufferSize().X;
-    int posWidth = m_startCursor.X + DisplayWidth(m_line, 0, m_cursor);
+    // 基准与折行宽度都取目的地空间（VirtualConsoleState）：结果要作为 CursorPosition
+    // 发给 ConPTY，用 ConHost 缓冲绝对行号会把回显写到错行（见 BeginSession 注释）。
+    const int screenW = VirtualConsoleState::Instance().GetBufferSize().X;
+    int posWidth = m_startCursorUi.X + DisplayWidth(m_line, 0, m_cursor);
     COORD c;
     c.X = static_cast<SHORT>(posWidth % screenW);
-    c.Y = static_cast<SHORT>(m_startCursor.Y + posWidth / screenW);
+    c.Y = static_cast<SHORT>(m_startCursorUi.Y + posWidth / screenW);
     return c;
 }
 

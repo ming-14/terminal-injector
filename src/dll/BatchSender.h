@@ -56,6 +56,16 @@ public:
     // 返回 true 入队成功；transport 未连接返回 false（调用方走 pass-through）
     bool EnqueueVtOutput(const void* data, size_t len, bool recordReplay = true);
 
+    // 立即把已入队的 VtOutput 全部发出去（同步，内部自带锁；空缓冲为 no-op）。
+    //
+    // 用途：控制消息（CursorSync 等）走的是"即时发送、不攒批"路径，
+    // 若不先 flush，控制消息会**越过还压在批里的内容** —— 把"后面才该出现的
+    // 定位"提前应用到"前面那批内容"上。实测（2026-09-24，run.py 菜单）：
+    // 为菜单条目行算出的 CursorSync(30;1) 抢在仍压批的"查询探测"行之前送达，
+    // 那行被画到第 30 行，第 4–29 行成了可见空行。
+    // 故 SendToMediator 发控制消息前先调用本函数，保证字节顺序 = 产生顺序。
+    void Flush();
+
 private:
     BatchSender() = default;
     ~BatchSender() = default;

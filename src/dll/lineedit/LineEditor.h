@@ -80,6 +80,12 @@ private:
     // 操作后新光标 = (m_startCursor.X + 行内显示偏移, m_startCursor.Y + deltaY)
     COORD m_startCursor{0, 0};
 
+    // ---- 行首光标（**目的地空间**，回显定位用）----
+    // 与 m_startCursor 的区别与理由见 LineEditor.cpp 的 BeginSession 注释：
+    // 简言之 m_startCursor 是 ConHost 缓冲绝对行号（同步 ConsoleState 用），
+    // 回显发给 ConPTY/WT 必须用目的地空间的 VirtualConsoleState。
+    COORD m_startCursorUi{0, 0};
+
     // ---- 历史导航 ----
     std::vector<std::wstring> m_history;  // 历史命令列表
     int m_historyIdx;  // 历史导航索引，-1 表示不在历史导航中

@@ -147,6 +147,11 @@ void BatchSender::FlushLoop() {
     LOG_INFO("BatchSender flush thread exit");
 }
 
+void BatchSender::Flush() {
+    // FlushLocked 自带锁、空缓冲 no-op，这里直接转调
+    FlushLocked();
+}
+
 void BatchSender::FlushLocked() {
     std::string pkt;
     {

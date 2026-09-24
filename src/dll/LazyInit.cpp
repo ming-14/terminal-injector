@@ -38,6 +38,7 @@
 
 #include <windows.h>
 #include <cstring>
+#include <cwchar>
 #include <memory>
 #include <vector>
 
@@ -232,6 +233,39 @@ bool ConnectToMediatorWithSnapshot(const StateSnapshot& snap,
     return true;
 }
 
+// 控制台是否由 ConPTY 托管（即目标进程本身跑在某个终端模拟器里，如 WT 里的 pwsh/cmd）。
+//
+// 为什么需要这个探测：
+//   LazyInit 用 bufMatchesWin（缓冲尺寸 == 窗口尺寸）区分"行编辑 shell"与"全屏 TUI"，
+//   这条代理的依据是"全屏 TUI 用 alt buffer ⇒ 缓冲==窗口"。它只在**经典 ConHost**
+//   上成立：经典 ConHost 主缓冲带滚动历史（实测 120x9001 vs 窗口 120x30），只有切到
+//   alt buffer 才变成窗口尺寸。而 ConPTY 是视口模型，**主缓冲就等于窗口尺寸**，
+//   于是任何程序都被判成 TUI —— 普通 shell 走 TUI 分支后会：发 ?1049h 切备用屏、
+//   又因"尺寸不匹配"跳过屏幕重放、最后把光标停在左下角；而 shell 收到 resize 不会
+//   整屏重绘，结果目标 WT 上永久一片空白（2026-09-24 用户报告：把正常 WT 里的 pwsh
+//   注入到另一个 WT，画面全空、光标停在左下角）。
+//
+// 判据（实测，见 tests/_probe/console_buffer_shape_probe.py 的六形态对照）：
+//   ConPTY 托管的控制台窗口类名恒为 "PseudoConsoleWindow"，
+//   经典 ConHost 恒为 "ConsoleWindowClass"。
+//   其余候选信号实测都不区分：SetConsoleScreenBufferSize 能否加高（ConPTY 同样接受）、
+//   窗口可见性、窗口宿主进程、GetLargestConsoleWindowSize、input_mode（六种都是 0x1f7）。
+//
+// 必须走 CallRealGetConsoleWindow：GetConsoleWindow 已被 ProtectionHooks 换成返回 NULL。
+bool IsConPtyHosted() {
+    const HWND hCon = hooks::CallRealGetConsoleWindow();
+    if (hCon == nullptr) {
+        return false;
+    }
+    wchar_t cls[64] = {0};
+    const int n = GetClassNameW(hCon, cls,
+                                static_cast<int>(sizeof(cls) / sizeof(cls[0])));
+    if (n <= 0) {
+        return false;
+    }
+    return std::wcscmp(cls, L"PseudoConsoleWindow") == 0;
+}
+
 } // namespace
 
 void EnsureLazyInitialized() {
@@ -411,9 +445,10 @@ void EnsureLazyInitialized() {
         const SHORT winH = static_cast<SHORT>(
             snap.screenBufferInfo.srWindow.Bottom - snap.screenBufferInfo.srWindow.Top + 1);
         const bool echoInput = (snap.inputMode & ENABLE_ECHO_INPUT) != 0;
+        const bool lineInputOn = (snap.inputMode & ENABLE_LINE_INPUT) != 0;
         const bool bufMatchesWin = snap.screenBufferInfo.dwSize.X == winW &&
                                    snap.screenBufferInfo.dwSize.Y == winH;
-        // 行编辑/流式 shell 判据（2026-08-30 修复）：
+        // 行编辑/流式 shell 判据（2026-08-30 修复 + 2026-09-24 ConPTY 修正）：
         // 核心信号是"有滚动历史"（buffer 高于窗口，bufMatchesWin=false）——
         // alt buffer 全屏 TUI（vim/ncurses/Textual）缓冲==窗口，无历史。
         // 此前要求 echoInput 为必要条件，但 msvcrt.getwch() 类程序（python
@@ -422,16 +457,30 @@ void EnsureLazyInitialized() {
         // 重放 → 注入后之前的画面/历史全部丢失（smartagent_tui 报告）。
         // 修正：不再要求 echoInput，有滚动历史即按流式 shell 重放（scrollback
         // 是其设计特性）；echoInput 仅用于日志参考。
-        const bool isLineShell = !bufMatchesWin;
+        //
+        // 2026-09-24：bufMatchesWin 只在**经典 ConHost** 上是"是否处于 alt buffer"
+        // 的有效代理；ConPTY 托管下该代理失效（机制与实测见 IsConPtyHosted 注释），
+        // 故对 ConPTY 托管一律按流式 shell 处理 —— 源端本就没有可保留的滚动历史，
+        // 且**误判代价不对称**：
+        //   判成 shell（本分支）：普通 shell 正确重放（修复空白屏）；真 TUI 自己
+        //   重绘会覆盖我们画的帧，最坏是它 ED 2J 时把目标视口推进 scrollback
+        //   （偶发一次滚动条，观感代价）。
+        //   判成 TUI（旧行为）：普通 shell 永久空白 —— 致命。
+        // 不用 inputMode 作依据：实测同一 pwsh 在注入瞬间的 mode 会随 PSReadLine
+        // 是否处于 raw 读循环而变（真实 WT 里抓到 0x1f7=新控制台默认值，
+        // ConPTY 里抓到 0x1e4=raw 读态），依赖它会得到"有时修好有时还空"的抽风行为。
+        const bool conptyHosted = bufMatchesWin && IsConPtyHosted();
+        const bool isLineShell = !bufMatchesWin || conptyHosted;
 
         // 卸载分流基准（BUG-009）：把注入瞬间的进程类别记录到 VirtualConsoleState。
         // 全屏 TUI（isLineShell=false）卸载时不做会话 VT 重放（其 VT 流是 WT
         // 视口相对坐标，ConHost 冻结快照的坐标原点不同，重放必错位），只恢复
         // 注入几何；行编辑 shell 保持重放（scrollback 语义）。
         VirtualConsoleState::Instance().SetInjectionLineShell(isLineShell);
-        LOG_INFO("LazyInit: injection lineShell=%d (echoInput=%d bufMatchesWin=%d "
-                 "buf=%dx%d win=%dx%d)",
-                 isLineShell ? 1 : 0, echoInput ? 1 : 0, bufMatchesWin ? 1 : 0,
+        LOG_INFO("LazyInit: injection lineShell=%d (echoInput=%d lineInput=%d "
+                 "bufMatchesWin=%d conptyHosted=%d buf=%dx%d win=%dx%d)",
+                 isLineShell ? 1 : 0, echoInput ? 1 : 0, lineInputOn ? 1 : 0,
+                 bufMatchesWin ? 1 : 0, conptyHosted ? 1 : 0,
                  snap.screenBufferInfo.dwSize.X, snap.screenBufferInfo.dwSize.Y,
                  winW, winH);
 
@@ -644,7 +693,16 @@ void EnsureLazyInitialized() {
         // 补充信号：alt buffer 无滚动历史 ⇒ 缓冲区尺寸 == 窗口尺寸；
         // 行编辑 shell (cmd/pwsh) 的缓冲区远高于窗口（9001 行滚动），不受影响。
         // （echoInput / bufMatchesWin / isLineShell 已在重放分流处提前计算，复用）
-        if (isLineShell) {
+        //
+        // 是否做"行首覆盖"（把光标拉到 prompt 行首，等 shell 重印 prompt 盖掉旧行）。
+        // 前提是"被 KickStart 唤醒后 shell 会立刻重印一行 prompt" —— 经典 ConHost 的
+        // cmd 成立、ConPTY 托管的目标不成立：实测注入后的 pwsh 一次都没重印自己的
+        // prompt（"PS " 只出现 1 次，StatePoller 连续报 `cursor diff ConHost(19,0)
+        // cache(0,0)`）。此时 CUP 到行首会悬空 —— 光标停在行首，而源光标本就在
+        // prompt 末尾（用户报告"光标位置不对"）。故 ConPTY 托管时不做覆盖，保持
+        // 重放后已同步的源光标位置（源画面本来就是正确的，照抄即可）。
+        const bool promptOverwrite = isLineShell && !conptyHosted;
+        if (promptOverwrite) {
             // 行编辑 shell：ConsoleState 光标设行首，覆盖补发的旧 prompt
             COORD lineStart{0, cursor.Y};
             ConsoleState::Instance().SetCursorPosition(lineStart);
@@ -672,17 +730,23 @@ void EnsureLazyInitialized() {
                 LOG_INFO("LazyInit: ConPTY cursor pulled to line start (shell prompt overwrite)");
             }
         } else {
-            // 全屏 TUI：不执行行首覆盖，光标停留在上面已同步的真实位置
+            // 不做行首覆盖，光标停留在上面已同步的真实位置
             // (termCursorY+1, termCursorX+1)。ConsoleState/Virtual 状态保持
             // 快照光标 (=应用自身光标)，保证 GetConsoleScreenBufferInfo 返回一致。
-            // 注意：TUI 分支不要求"无 ECHO_INPUT"——未改输入模式的 VT 全屏程序
-            // (如 python VT 探针 inputMode=0x1f7) 也可能含 ECHO_INPUT，
-            // 判别依据是 bufMatchesWin（alt buffer 缓冲==窗口，见上注释）。
-            LOG_INFO("LazyInit: fullscreen TUI (inputMode=0x%lx, buf=%dx%d win=%dx%d, "
-                     "isLineShell=false): cursor kept at (%d,%d), skip prompt overwrite",
-                     snap.inputMode,
+            //
+            // 走到这里有两条路，日志里区分开：
+            //   1) 全屏 TUI（isLineShell=false）：TUI 分支不要求"无 ECHO_INPUT"
+            //      ——未改输入模式的 VT 全屏程序(如 python VT 探针 inputMode=0x1f7)
+            //      也可能含 ECHO_INPUT，判别依据是 bufMatchesWin（alt buffer
+            //      缓冲==窗口，见上注释），且仅对经典 ConHost 成立。
+            //   2) ConPTY 托管的普通 shell（promptOverwrite=false）：判定它是 shell
+            //      所以照常重放屏幕，但不做行首覆盖（见下方 promptOverwrite 注释）。
+            LOG_INFO("LazyInit: cursor kept at source (%d,%d): skip prompt overwrite "
+                     "(isLineShell=%d conptyHosted=%d inputMode=0x%lx buf=%dx%d win=%dx%d)",
+                     termCursorX, termCursorY,
+                     isLineShell ? 1 : 0, conptyHosted ? 1 : 0, snap.inputMode,
                      snap.screenBufferInfo.dwSize.X, snap.screenBufferInfo.dwSize.Y,
-                     winW, winH, termCursorX, termCursorY);
+                     winW, winH);
         }
         } else {
             // 子进程：不重放屏幕，用 HelloAck 回传的 WT 真实光标对齐缓存

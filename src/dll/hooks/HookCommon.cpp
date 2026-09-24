@@ -35,7 +35,10 @@ bool SendToMediator(const void* data, size_t len, protocol::MessageType type,
         return BatchSender::Instance().EnqueueVtOutput(data, len, recordReplay);
     }
 
-    // 控制消息走原路径（即时发送，不攒批）
+    // 控制消息走原路径（即时发送，不攒批），但必须**先** flush 已入队的 VtOutput，
+    // 否则会越过还压在批里的内容（理由与实测见 BatchSender::Flush 注释）。
+    BatchSender::Instance().Flush();
+
     ITransport* transport = GetMediatorTransport();
     bool connected = (transport != nullptr && transport->IsConnected());
 

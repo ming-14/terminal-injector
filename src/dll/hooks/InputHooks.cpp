@@ -605,6 +605,20 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
         lineOut.clear();
         vtOut.clear();
 
+        // Phase 21 修正（2026-09-24）：回显定位基准必须在 ProcessKey **之前**取。
+        // vtOut 里的回显字节是从**键前**位置开始画的：行尾直接输出该字符、行中输出
+        // 从插入点起的尾串再 CSI D 退回、方向键只发相对移动。所以先补发的
+        // CursorPosition 必须指向键前位置。此前在 ProcessKey 之后取 —— 那时 m_cursor
+        // 已被前移，取到的是"本次回显结束后的位置" ⇒ 补发定位偏右一格，字符整体
+        // 右移（实测 ` 选择 > 2` 变成 ` 选择 >  2`）；会移动光标的键（左/右/Home/End）
+        // 同理：键前位置 + 相对移动才等于正确终点。
+        COORD preKeyUi{0, 0};
+        if (!IsTargetProcess()) {
+            preKeyUi = editor.GetCurrentUiCursor();
+            if (preKeyUi.X < 0) preKeyUi.X = 0;
+            if (preKeyUi.Y < 0) preKeyUi.Y = 0;
+        }
+
         // 交给 LineEditor 处理按键
         bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
 
@@ -620,10 +634,7 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
             // 补发用独立消息类型 CursorSync 即时发送（不经 BatchSender），
             // 保证回显内容消息字节原样（modes 测试精确断言 hex）。
             if (!IsTargetProcess()) {
-                COORD cur = editor.GetCurrentUiCursor();
-                if (cur.X < 0) cur.X = 0;
-                if (cur.Y < 0) cur.Y = 0;
-                std::string sync = vt::CursorPosition(cur.Y + 1, cur.X + 1);
+                std::string sync = vt::CursorPosition(preKeyUi.Y + 1, preKeyUi.X + 1);
                 SendToMediator(sync.data(), sync.size(),
                                protocol::MessageType::CursorSync);
             }
@@ -755,6 +766,14 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
 
         lineOut.clear();
         vtOut.clear();
+
+        // 同 ReadConsoleW 路径：回显定位基准取**键前**位置（见该处注释）
+        COORD preKeyUi{0, 0};
+        if (!IsTargetProcess()) {
+            preKeyUi = editor.GetCurrentUiCursor();
+            if (preKeyUi.X < 0) preKeyUi.X = 0;
+            if (preKeyUi.Y < 0) preKeyUi.Y = 0;
+        }
         bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
 
         // VT 回显发送给 mediator
@@ -762,10 +781,7 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
             // Phase 21：子进程行编辑回显前补发 CursorPosition（同 ReadConsoleW 路径）
             // 独立消息类型 CursorSync 即时发送，内容消息字节保持原样
             if (!IsTargetProcess()) {
-                COORD cur = editor.GetCurrentUiCursor();
-                if (cur.X < 0) cur.X = 0;
-                if (cur.Y < 0) cur.Y = 0;
-                std::string sync = vt::CursorPosition(cur.Y + 1, cur.X + 1);
+                std::string sync = vt::CursorPosition(preKeyUi.Y + 1, preKeyUi.X + 1);
                 SendToMediator(sync.data(), sync.size(),
                                protocol::MessageType::CursorSync);
             }
