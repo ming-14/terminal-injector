@@ -127,3 +127,16 @@ _run_build*
 build_dll_temp*
 diag_*.cdb
 _pypty/
+
+# === 32 位构建目录 ===
+build32/
+
+# === 第三方依赖（pywezterm 等，含二进制 .pyd；按需取用，不入库） ===
+reference/
+
+# === 本项目工作记忆（非工程资产） ===
+.workbuddy/
+
+# === tests/_probe/ 下的运行时产物（探针脚本本身入库） ===
+tests/_probe/_*/
+tests/_probe/probe32/
