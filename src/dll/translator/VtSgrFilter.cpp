@@ -24,16 +24,43 @@ void VtSgrFilter::Reset() {
     m_state = State::Ground;
     m_csi.clear();
     m_oscEsc = false;
+    m_lastWasCr = false;
+}
+
+// Ground 态字节出口：归一化裸 LF → CRLF（ConHost 换行语义，见头文件说明）。
+//
+// 为什么只在 Ground 态做：OSC/DCS(APC/PM) 载荷内的 0x0A 是数据（如窗口标题、
+// 六帧图），ISO 6429 的 OSC 结束符只有 BEL/ST，载荷必须逐字节原样转发，
+// 改写会破坏载荷。GFX 序列的载荷同理，由各状态自行输出、不进本函数。
+//
+// m_lastWasCr 跨 Process() 分片保持：ConHost 侧 CR 与 LF 分两次写入时同样
+// 只补一次 CR（回吐实测 AAA\r + \nBBB → "AAA\r\nBBB"，非 \r\r\n）。
+void VtSgrFilter::EmitGround(unsigned char b, std::string& out) {
+    if (b == 0x0A) {
+        if (!m_lastWasCr) {
+            out.push_back('\r');   // 裸 LF：补 CR（裸 LF 与 CRLF 在 ConHost 等价）
+        }
+        out.push_back('\n');
+        m_lastWasCr = false;       // 换行已完成
+        return;
+    }
+    out.push_back(static_cast<char>(b));
+    m_lastWasCr = (b == 0x0D);     // 裸 CR 原样输出（ConHost 与 WT 均为"回列 0 不
+                                   // 下移"，无需改写）；仅记录标记，供紧随的 LF 判重
 }
 
 void VtSgrFilter::ProcessByte(unsigned char b, std::string& out) {
     switch (m_state) {
         case State::Ground:
             if (b == 0x1B) {
+                // 进入序列：打断"裸 CR 与 LF 相邻"前提（CR 与 LF 之间夹序列时，
+                // ConHost 的 CR 归入 LF 不再成立）。所有分支共用此重置点，
+                // 避免在 OSC/DCS/CharsetSel 各出口重复重置而漏掉特例。
+                m_lastWasCr = false;
                 m_csi.assign(1, static_cast<char>(0x1B));
                 m_state = State::EscPending;
             } else {
-                out.push_back(static_cast<char>(b));
+                EmitGround(b, out);
             }
             break;
 
@@ -92,7 +119,7 @@ void VtSgrFilter::ProcessByte(unsigned char b, std::string& out) {
                 // 防御：其余字节（C0/0x80+）中止本 CSI
                 out += m_csi;
                 m_csi.clear();
-                out.push_back(static_cast<char>(b));
+                EmitGround(b, out);    // 该字节本身可能是 LF，仍需归一
                 m_state = State::Ground;
             }
             break;
@@ -100,7 +127,9 @@ void VtSgrFilter::ProcessByte(unsigned char b, std::string& out) {
         case State::Osc:
         case State::Dcs:
             // 原样透传（头部已在进入状态时输出）：
-            // BEL 或 ST（ESC \）终止，其余字节直接输出
+            // BEL 或 ST（ESC \）终止，其余字节直接输出。
+            // 载荷不做 LF 归一：OSC/DCS 内容（标题、六帧图）的 0x0A 是数据，
+            // 只有 BEL/ST 才终止序列，改写载荷会破坏它。
             out.push_back(static_cast<char>(b));
             if (b == 0x07) {
                 // BEL 终止

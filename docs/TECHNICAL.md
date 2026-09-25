@@ -139,7 +139,7 @@ injected_dll（运行时独立编译注入）
 | `VtToInputRecord` | VT 输入序列 → `INPUT_RECORD`（含鼠标 `\x1b[<...M/m`、修饰键、组合键） |
 | `VtInputParser` | VT 输入字节流解析状态机（CSI/SS2/SS3/OSC/转义序列分类） |
 | `VtEscape` | VT 转义序列常量与构造工具 |
-| `VtSgrFilter` | VT 输出直通路径上的 SGR 过滤器：剥离 ConHost 无法表达的删除线（SGR 9/29）；重建时**保留 `;` / `:` 分隔符语义**（冒号组空参数是颜色空间保留位，分号组空参数是真实缺省值），避免 `38:2::r:g:b` 被拍平破坏（2026-09-25 修复） |
+| `VtSgrFilter` | VT 输出直通路径上的**规范化出口**（同时喂 `VtCursorTracker` 与 `SendToMediator`），职责有二：<br>① **剥离删除线**（SGR 9/29，ConHost 无该属性位）——重建时**保留 `;` / `:` 分隔符语义**（冒号组空参数是颜色空间保留位，分号组空参数是真实缺省值），避免 `38:2::r:g:b` 被拍平破坏（2026-09-25 修复）<br>② **裸 LF → CRLF 归一**（Ground 态；ConHost 把裸 LF 当 CR+LF，WT 只当纯 LF 会保持列号 → 右移错位、空行视觉丢失）；OSC/DCS 载荷内的 `0x0A` 是数据，原样保留（2026-09-25 修复） |
 | `VtCursorTracker` | 维护虚拟光标状态，从目标输出序列推断坐标并同步给 DLL 侧（Phase 19） |
 | 字符宽度 | wcwidth 集成：CJK/Emoji 双宽字符正确推进光标（Phase 17） |
 
