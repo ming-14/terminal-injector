@@ -35,10 +35,9 @@
 | `suspended32_probe.py` | 挂起的 WOW64 进程能否枚举出 32 位模块表 |
 | `mapping_base_probe.py` | 用 `VirtualQueryEx`+`GetMappedFileNameW` 取挂起进程内 DLL 基址（不依赖 KnownDLL 同址） |
 | `t_sgr_colon_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 端到端验证（真 ConPTY 承载 mediator + `pywezterm.Terminal` 解析对照）—— 冒号空保留位 bug 的回归证据 |
-| `t_conhost_newline_probe.py` | 测定 ConHost 对 LF / CR / CRLF 的规范化回吐（`AAA\nBBB` → 回吐 `AAA\r\nBBB`），确立"裸 LF 补 CR"归一规则 —— 空行丢失 bug 的判据依据 |
-| `t_conhost_norm_probe.py` | ConHost 对各类 VT 序列的"消化/改写/丢弃"清单（哪些序列被 Consume、哪些被重写），为"直通流 == ConHost 处理后流"划定边界 |
-| `t_conhost_csi_norm_probe.py` | ConHost「屏幕副作用」序列（`\r`/EL/ED/CUP/BS/HT/DECSC/自动换行/滚屏）在直通链路下是否需额外归一的对照测定。**结论：0 差异**（除裸 LF 外 ConHost 与直通语义等价） |
-| `t_cr_erase_min.py` | 最小对照：同一段 `\r ESC[2K` 字节分别喂【裸 ConPTY】与【注入链路】，比对行结构 —— 端到端复现/验收空行问题的探针 |
+| `t_readfile_gt2.py` / `t_echo_rules.py` | 测定 ConHost 下 `ReadFile(stdin)`（LINE+ECHO）的按键回显与返回字节规则：Enter → `\r\n`（空行也补）、Ctrl+C → `b""`（成功非 EOF）—— 2026-09-25 行编辑回显修复的判据 |
+| `child_echo_position_probe.py`（见上表） | 行编辑回显落在屏幕第几行第几列，验证 `EmitLineEcho` 是否推进 `VtCursorTracker` |
+| `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针 |
 | `pywezterm_smoke.py` | pywezterm 库自检：`Pty` 起进程 + `Terminal` 还原屏幕 + 断言标记，用于确认测试环境可用 |
 | `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
 
@@ -46,8 +45,3 @@
 
 渲染终端字节用 `pyte`（`pip install pyte`）；承载真 ConPTY 用 `pywezterm`
 （可选，未安装时相关探针会提示并跳过）。
-
-> **承载 ConPTY 的探针必须显式 `SetConsoleOutputCP(65001)`**。python 在 ConPTY 里
-> 默认走本地代码页（GBK），UTF-8 中文会被 ConHost 按 GBK 误解码 → 宽字符列宽
-> 算错、屏幕缓冲错乱，会伪造出大量假"不一致"（`t_conhost_csi_norm_probe.py`
-> 曾因此误判）。

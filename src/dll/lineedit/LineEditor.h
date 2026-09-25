@@ -37,6 +37,14 @@ class TabCompleter;
 
 class LineEditor {
 public:
+    // 行结束原因（ProcessKey 返回 true 时有效）。
+    // 调用方据此决定 buf 内容是否补 "\r\n"：
+    //   - Enter：read 返回 lineOut + "\r\n"（**空行也补**，ConHost 实测 Enter
+    //     在空行上仍返回 b"\r\n"，见 ReadFile_Detour 注释）
+    //   - CtrlC：read 返回 ""（0 字节；ConHost 实测 b''）
+    //   - CtrlZ：read 返回 lineOut（截断行，不补 \r\n；后续读得 EOF）
+    enum class LineEnd { None = 0, Enter, CtrlC, CtrlZ };
+
     static LineEditor& Instance();
 
     // 开始新的行编辑会话（每次 ReadConsoleW 调用时调用）
@@ -47,10 +55,12 @@ public:
     // echoEnabled: 是否回显（ENABLE_ECHO_INPUT）
     // lineOut: 行完成时输出行内容（不含 \r\n）
     // vtOut: 输出 VT 序列（回显/重绘/Enter 换行）
-    // 返回 true: 行完成（Enter 按下）
+    // endReason: 可选输出，行结束原因（Enter/CtrlC/CtrlZ），未结束时为 None
+    // 返回 true: 行完成（Enter / Ctrl+C / Ctrl+Z 按下）
     // 返回 false: 继续编辑
     bool ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
-                    std::wstring& lineOut, std::string& vtOut);
+                    std::wstring& lineOut, std::string& vtOut,
+                    LineEnd* endReason = nullptr);
 
     // 当前行内容（诊断用）
     const std::wstring& GetLine() const { return m_line; }

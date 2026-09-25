@@ -21,6 +21,9 @@
 #include "../state/ConsoleState.h"
 #include "../state/InputQueue.h"
 #include "../state/PromptTracker.h"
+#include "../state/VirtualConsoleState.h"
+#include "../translator/VtCursorTracker.h"
+#include "../translator/VtSgrFilter.h"
 #include "../LazyInit.h"
 #include "../Unloader.h"
 #include "../lineedit/LineEditor.h"
@@ -167,6 +170,38 @@ static void ConvertRecordsFromAnsi(INPUT_RECORD* records, DWORD count) {
             records[i].Event.KeyEvent.uChar.UnicodeChar = wch;
         }
     }
+}
+
+// ============================================================
+// 行编辑回显发送（ReadFile / ReadConsoleW / ReadConsoleA 共用）
+// ============================================================
+// LineEditor 生成的回显 VT 字节最终由 WT 渲染，会真实推进显示光标。若只
+// SendToMediator 而不喂 VtCursorTracker，追踪器的显示光标会停在回显前的位置，
+// 后续子进程输出（OutputHooks 的 SyncChildVtCursorBeforeWrite 用追踪器补发
+// CursorPosition）就会定位到错行 —— 典型现象：Enter 回显的换行"吃掉"了
+// 本该出现的空行，后续行整体上移一行（termtest 16 色段问句与 [SKIP] 行之间
+// 的空行消失，2026-09-25 用户报告）。
+//
+// 因此回显必须与 OutputHooks 的输出路径走同一套处理：
+//   1) VtSgrFilter 归一化（与真实输出一致的最终字节）
+//   2) VtCursorTracker::Feed 推进显示语义光标
+//   3) SendToMediator 发到 mediator → WT
+// 另外子进程回显前需补发 CursorPosition（父 cmd 启动回显会回卷共享 ConPTY
+// 光标，相对定位从错位位置开始），用 CursorSync 即时发送（不经 BatchSender，
+// 保证回显内容消息字节原样）。
+static void EmitLineEcho(const std::string& vtOut, COORD preKeyUi, bool isTarget) {
+    if (vtOut.empty()) {
+        return;
+    }
+    std::string filtered;
+    vt::VtSgrFilter::Instance().Process(vtOut.data(), vtOut.size(), filtered);
+    if (!isTarget) {
+        std::string sync = vt::CursorPosition(preKeyUi.Y + 1, preKeyUi.X + 1);
+        SendToMediator(sync.data(), sync.size(),
+                       protocol::MessageType::CursorSync);
+    }
+    VtCursorTracker::Instance().Feed(filtered.data(), filtered.size());
+    SendToMediator(filtered.data(), filtered.size());
 }
 
 
@@ -620,29 +655,20 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
         }
 
         // 交给 LineEditor 处理按键
-        bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
+        LineEditor::LineEnd endReason = LineEditor::LineEnd::None;
+        bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut,
+                                      &endReason);
 
-        LOG_INFO("ReadConsoleW_Detour: ProcessKey done=%d vtLen=%zu lineLen=%zu",
-                 done, vtOut.size(), lineOut.size());
+        LOG_INFO("ReadConsoleW_Detour: ProcessKey done=%d vtLen=%zu lineLen=%zu end=%d",
+                 done, vtOut.size(), lineOut.size(), static_cast<int>(endReason));
 
         // 发送 VT 回显（按键回显、行重绘、\r\n 等）给 mediator → WT 渲染
-        if (!vtOut.empty()) {
-            // Phase 21：子进程行编辑回显前补发 CursorPosition
-            // 父 cmd 启动回显会偏移共享 ConPTY 光标，行编辑相对定位（\r/CSI D）
-            // 从错位位置开始，回车后光标多一行（long_line_enter 失败）。
-            // 仅子进程：目标进程 cmd 的行编辑回显已与 ConPTY 对齐。
-            // 补发用独立消息类型 CursorSync 即时发送（不经 BatchSender），
-            // 保证回显内容消息字节原样（modes 测试精确断言 hex）。
-            if (!IsTargetProcess()) {
-                std::string sync = vt::CursorPosition(preKeyUi.Y + 1, preKeyUi.X + 1);
-                SendToMediator(sync.data(), sync.size(),
-                               protocol::MessageType::CursorSync);
-            }
-            SendToMediator(vtOut.data(), vtOut.size());
-        }
+        // Phase 21：子进程回显前补发 CursorPosition + 推进显示光标追踪器，
+        // 详见 EmitLineEcho 注释（回显吃空行的根因即追踪器未随回显推进）。
+        EmitLineEcho(vtOut, preKeyUi, IsTargetProcess());
 
         if (done) {
-            // 行完成（Enter 或 Ctrl+C）：复制行内容到 buf，追加 \r\n
+            // 行完成：复制行内容到 buf，Enter 时追加 \r\n
             DWORD lineLen = static_cast<DWORD>(lineOut.size());
             // 缓冲区不足时截断（ReadConsoleW 语义）
             DWORD copyLen = (lineLen < len) ? lineLen : len;
@@ -651,9 +677,12 @@ BOOL WINAPI ReadConsoleW_Detour(HANDLE h, LPVOID buf, DWORD len,
             }
             DWORD collected = copyLen;
 
-            // 行非空且 buf 还有 2 字节空间：补 \r\n（ReadConsoleW 语义）
-            // Ctrl+C 时 lineOut 为空（vtOut 已含 ^C\r\n），不补 \r\n
-            if (copyLen > 0 && collected + 2 <= len) {
+            // Enter：补 \r\n（ReadConsoleW 语义，**空行也补** —— ConHost 实测空行
+            //   按 Enter 返回 "\r\n" 2 字符）。此前只按 copyLen>0 补，空行会漏掉
+            //   换行，调用方读到的行缺 "\r\n"。
+            // Ctrl+C：lineOut 为空且 vtOut 已含 ^C\r\n，不补 \r\n（实测 0 字符）。
+            // Ctrl+Z：截断行，不补 \r\n。
+            if (endReason == LineEditor::LineEnd::Enter && collected + 2 <= len) {
                 wbuf[collected++] = L'\r';
                 wbuf[collected++] = L'\n';
             }
@@ -774,26 +803,20 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
             if (preKeyUi.X < 0) preKeyUi.X = 0;
             if (preKeyUi.Y < 0) preKeyUi.Y = 0;
         }
-        bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut);
+        LineEditor::LineEnd endReason = LineEditor::LineEnd::None;
+        bool done = editor.ProcessKey(rec.Event.KeyEvent, echoEnabled, lineOut, vtOut,
+                                      &endReason);
 
-        // VT 回显发送给 mediator
-        if (!vtOut.empty()) {
-            // Phase 21：子进程行编辑回显前补发 CursorPosition（同 ReadConsoleW 路径）
-            // 独立消息类型 CursorSync 即时发送，内容消息字节保持原样
-            if (!IsTargetProcess()) {
-                std::string sync = vt::CursorPosition(preKeyUi.Y + 1, preKeyUi.X + 1);
-                SendToMediator(sync.data(), sync.size(),
-                               protocol::MessageType::CursorSync);
-            }
-            SendToMediator(vtOut.data(), vtOut.size());
-        }
+        // VT 回显发送给 mediator（子进程补发 CursorPosition + 推进追踪器）
+        EmitLineEcho(vtOut, preKeyUi, IsTargetProcess());
 
         if (done) {
-            // 行完成：先构造 wchar_t 行（含 \r\n），再转 ANSI
+            // 行完成：先构造 wchar_t 行（Enter 时含 \r\n），再转 ANSI
             std::wstring wline = lineOut;
-            // 行非空且空间足够：补 \r\n（同 ReadConsoleW 语义）
-            // Ctrl+C 时 lineOut 为空（vtOut 已含 ^C\r\n），不补
-            if (!lineOut.empty()) {
+            // Enter：补 \r\n（ReadConsoleA 语义，**空行也补** —— 同 ReadConsoleW）
+            // Ctrl+C：lineOut 为空且 vtOut 已含 ^C\r\n，不补
+            // Ctrl+Z：截断行，不补
+            if (endReason == LineEditor::LineEnd::Enter) {
                 wline.push_back(L'\r');
                 wline.push_back(L'\n');
             }
@@ -807,7 +830,8 @@ BOOL WINAPI ReadConsoleA_Detour(HANDLE h, LPVOID buf, DWORD len,
                 nullptr, nullptr);
             *read = static_cast<DWORD>(converted > 0 ? converted : 0);
             LOG_DEBUG("ReadConsoleA_Detour: return %lu chars", *read);
-            return *read > 0 ? TRUE : FALSE;
+            // 行已完成，即使 0 字节（Ctrl+C）也必须返回 TRUE（同 ReadFile 路径）
+            return TRUE;
         }
     }
 }
@@ -866,6 +890,126 @@ BOOL WINAPI ReadFile_Detour(HANDLE h, LPVOID buf, DWORD len,
     // 检查是否透传模式
     auto& state = ConsoleState::Instance();
     DWORD inMode = state.GetInputMode();
+
+    // ---- 行编辑模式（LINE_INPUT + ECHO_INPUT）：与 ReadConsoleA/W 同语义 ----
+    // ConHost 在 ENABLE_LINE_INPUT 下把 ReadFile(stdin) 当 ReadConsoleA 处理：
+    //   逐键回显；行缓冲到 Enter；已完成的行按"本次请求长度"分次返回。
+    //   ConHost 实测（tests/_probe/t_readfile_gt2.py + t_echo_rules.py）：
+    //     喂 "ab\r"  → 回显 `ab` 再 `\r\n`；os.read(0,256) 一次得 b"ab\r\n"
+    //     只按 Enter（空行）→ 返回 b"\r\n"（2 字节，**空行也带换行**）
+    //     Ctrl+C     → 返回 b""（0 字节，成功而非 EOF），回显 ^C\r\n
+    // 此前本分支直接按记录队列逐字节返回且不回显，导致 termtest 等
+    // "默认控制台模式 + os.read(stdin)" 的程序出现两处不一致：
+    //   1) 按键无回显 —— 最典型的现象是问句后按 Enter 该出现的空行消失
+    //   2) 空行按 Enter 返回 0 字节 —— 被 os.read 当成 EOF，程序误判输入结束
+    // 修复：复用 LineEditor（与 ReadConsoleW/ReadConsoleA 同一实现，含回显、
+    // 行缓冲、历史、Tab 补全）；按行结束原因（Enter/CtrlC/CtrlZ）构造返回字节，
+    // 入 raw 队列后按本次请求长度 DequeueRaw（与 ConHost 分片语义一致）。
+    // 仅当 LINE_INPUT+ECHO_INPUT 都开时进入；否则（TUI 关行输入/关回显）
+    // 仍走后面的逐字节分支，保持原有行为。
+    if ((inMode & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0 &&
+        (inMode & ENABLE_LINE_INPUT) != 0 &&
+        (inMode & ENABLE_ECHO_INPUT) != 0) {
+        if (log) LOG_INFO("ReadFile_Detour: #%d line-edit mode (inMode=0x%x), using LineEditor", callId, inMode);
+
+        auto& editor = LineEditor::Instance();
+        editor.BeginSession();
+
+        // PromptTracker：同 ReadConsoleW_Detour（行编辑读活动 + prompt 候选）
+        PromptTracker::LineReadScope promptScope(true);
+
+        // 行编辑临时变量（提升到函数作用域避免 TLS 基址缓存栈布局冲突，见 ReadConsoleW_Detour 注释）
+        std::wstring lineOut;
+        std::string vtOut;
+
+        auto& queue = InputQueue::Instance();
+        while (true) {
+            INPUT_RECORD rec;
+            size_t n;
+            while (true) {
+                n = queue.DequeueRecords(&rec, 1);
+                if (n > 0) break;
+                if (!IsTransportConnected() || Unloader::IsUnloading()) {
+                    if (log) LOG_INFO("ReadFile_Detour: #%d line-edit transport disconnected/unloading, pass-through to orig", callId);
+                    return ReadFile_orig(h, buf, len, read, ov);
+                }
+                WaitForSingleObject(queue.GetWaitHandle(), 100);
+            }
+
+            if (rec.EventType != KEY_EVENT || !rec.Event.KeyEvent.bKeyDown) {
+                continue;
+            }
+
+            lineOut.clear();
+            vtOut.clear();
+
+            // 回显定位基准取**键前**位置（见 ReadConsoleW_Detour 处注释）
+            COORD preKeyUi{0, 0};
+            if (!IsTargetProcess()) {
+                preKeyUi = editor.GetCurrentUiCursor();
+                if (preKeyUi.X < 0) preKeyUi.X = 0;
+                if (preKeyUi.Y < 0) preKeyUi.Y = 0;
+            }
+
+            LineEditor::LineEnd endReason = LineEditor::LineEnd::None;
+            bool done = editor.ProcessKey(rec.Event.KeyEvent, true, lineOut, vtOut,
+                                          &endReason);
+
+            if (log) LOG_INFO("ReadFile_Detour: #%d ProcessKey done=%d vtLen=%zu lineLen=%zu end=%d",
+                              callId, done, vtOut.size(), lineOut.size(),
+                              static_cast<int>(endReason));
+
+            // 发送 VT 回显给 mediator → WT 渲染（同时推进显示光标追踪器）
+            EmitLineEcho(vtOut, preKeyUi, IsTargetProcess());
+
+            if (done) {
+                // 行完成：按行结束原因构造返回字节（ConHost 实测语义，见函数头
+                // 「ReadFile(stdin) 行编辑」注释）：
+                //   Enter  → lineOut + "\r\n"（**空行也补**：实测空行按 Enter 返回
+                //            b"\r\n" 2 字节；此前只按 !lineOut.empty() 补会漏掉空行，
+                //            ReadFile 退化成 0 字节 → Python os.read 视为 EOF →
+                //            termlib 抛 QuitTest，正是"问句后空行消失"的另一面）
+                //   Ctrl+C → ""（0 字节，实测 b''）
+                //   Ctrl+Z → lineOut（截断行，不补 \r\n）
+                // 编码用缓存的控制台输入 CP（SetConsoleCP 已 Hook，termlib 会切
+                // 65001），拿不到才退回 ACP —— 硬编码 CP_ACP 会把 UTF-8 中文行编错。
+                std::wstring wline = lineOut;
+                if (endReason == LineEditor::LineEnd::Enter) {
+                    wline.push_back(L'\r');
+                    wline.push_back(L'\n');
+                }
+                UINT cp = state.GetInputCp();
+                if (cp == 0) {
+                    cp = CP_ACP;
+                }
+                if (!wline.empty()) {
+                    int need = WideCharToMultiByte(cp, 0, wline.data(),
+                                                   static_cast<int>(wline.size()),
+                                                   nullptr, 0, nullptr, nullptr);
+                    if (need > 0) {
+                        std::string bytes(static_cast<size_t>(need), '\0');
+                        WideCharToMultiByte(cp, 0, wline.data(),
+                                            static_cast<int>(wline.size()),
+                                            &bytes[0], need, nullptr, nullptr);
+                        queue.EnqueueRaw(reinterpret_cast<const uint8_t*>(bytes.data()),
+                                         bytes.size());
+                    }
+                }
+                if (log) LOG_INFO("ReadFile_Detour: #%d line completed, %zu bytes queued (cp=%u)",
+                                  callId, queue.RawCount(), cp);
+                // 按本次请求长度返回（ConHost 语义：多出的字节留给下次读）
+                size_t got = queue.DequeueRaw(static_cast<uint8_t*>(buf),
+                                              static_cast<size_t>(len));
+                *read = static_cast<DWORD>(got);
+                if (log) LOG_INFO("ReadFile_Detour: #%d line-edit return %zu bytes", callId, got);
+                // 关键：行已成功完成时，即使本次 0 字节（Ctrl+C）也必须返回 TRUE。
+                // 返回 FALSE 会被 os.read 当成 EOF/错误。ConHost 实测 Ctrl+C 返回
+                // b'' 且成功（非 EOF）。
+                return TRUE;
+            }
+        }
+    }
+
     if ((inMode & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0) {
         // 非透传模式：从记录队列消费 KEY_EVENT，提取 UnicodeChar 转换为字节返回
         // Textual 等 TUI 应用通过 ReadFile(stdin) 读输入，不走 ReadConsoleInput，

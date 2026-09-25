@@ -330,6 +330,63 @@ BOOL WINAPI ReadFile_Detour_ForInput(HANDLE h, LPVOID buf, DWORD len,
 
 `InputQueue` 增加 `m_rawQueue`（字节队列）与 `m_recordQueue`（结构体队列），根据 mode 选择。或更简单：DLL 收到 VtInput 时根据当前 mode 决定入哪个队列。
 
+### 4.6b `ReadFile(stdin)` 行编辑 + 按键回显（2026-09-25 修复）
+
+**背景**：ConHost 在 `ENABLE_LINE_INPUT + ENABLE_ECHO_INPUT` 下把 `ReadFile(stdin)`
+当 `ReadConsoleA` 处理——**逐键回显到屏幕**，行缓冲到 Enter，已完成的行分次返回。
+注入链原本让 `ReadFile(stdin)` 的 LINE 分支**直接按记录队列逐字节返回且不回显**，
+导致两类不一致：
+
+1. **按键无回显**：最典型的现象是「问句行」后按 Enter 本该出现的**空行消失**
+   （termtest 16 色段：`是否都能正确区分?` 与 `[SKIP]` 之间没有空行）。
+2. **空行按 Enter 返回 0 字节**：被 `os.read` 当成 EOF，程序误判输入结束
+   （termlib 抛 `QuitTest`）。
+
+**第二层根因（光标追踪器漂移）**：即使补了回显，若回显字节只
+`SendToMediator`、未喂 `VtCursorTracker`，追踪器的**显示语义光标**会停在回显前
+位置；随后子进程输出（`OutputHooks.SyncChildVtCursorBeforeWrite` 用追踪器补发
+`CursorPosition` = `ESC[row;1H`）就落到回显同一行，把刚出现的空行**覆盖掉**。
+
+**ConHost 实测基准**（`tests/_probe/t_readfile_gt2.py`、`t_echo_rules.py`）：
+
+| 输入 | `ReadFile(stdin)` 返回 | 回显 |
+|------|----------------------|------|
+| `ab` + Enter | `b"ab\r\n"` | `ab` 再 `\r\n` |
+| 空行 + Enter | `b"\r\n"`（2 字节，**空行也带换行**） | `\r\n` |
+| Ctrl+C | `b""`（0 字节，**成功非 EOF**） | `^C\r\n` |
+| Ctrl+Z | 截断行 + 后续 EOF | `^Z` |
+
+**修复**：`ReadFile_Detour` 新增行编辑分支（复用 `LineEditor`，与
+`ReadConsoleW/A` 同一实现），完成后按 `LineEnd` 原因构造返回字节：
+
+```cpp
+if ((inMode & ENABLE_VIRTUAL_TERMINAL_INPUT) == 0 &&
+    (inMode & ENABLE_LINE_INPUT) != 0 &&
+    (inMode & ENABLE_ECHO_INPUT) != 0) {
+    // 逐键 ProcessKey → EmitLineEcho（回显）→ 行完成入 raw 队列
+    // Enter → lineOut + "\r\n"（空行也补）；Ctrl+C → ""；Ctrl+Z → 截断行
+    // 结束后按本次请求长度 DequeueRaw，且始终 return TRUE（Ctrl+C 0 字节非 EOF）
+}
+```
+
+回显经 **`EmitLineEcho`** 统一出口（与真实输出同一套处理）：
+
+```cpp
+// VtSgrFilter 归一化 → VtCursorTracker::Feed 推进显示光标 → SendToMediator
+// 子进程额外补发 CursorSync（键前位置），父 cmd 目标进程不用
+```
+
+**语义要点**（`LineEditor::LineEnd` 枚举）：
+- `Enter`：`read` 返回 `lineOut + "\r\n"`——**空行也补**（旧实现按 `!lineOut.empty()`
+  判空漏掉空行，退化成 0 字节 → EOF）。
+- `CtrlC`：`read` 返回 `""`（0 字节），但 **`return TRUE`**（非 EOF）。
+- `CtrlZ`：返回截断行，不补 `\r\n`；后续读到 EOF。
+- 编码用 `state.GetInputCp()`（`SetConsoleCP` 已 Hook，termlib 会切 65001），
+  拿不到才退回 `CP_ACP`（硬编码 ACP 会把 UTF-8 中文行编错）。
+
+回归测试：`tests/e2e/line_editor/test_readfile_line_echo.py`
+（断言 `ab`+Enter → `61 62 0d 0a`、空行+Enter → `0d 0a`）。
+
 ### 4.7 `FlushConsoleInputBuffer`
 
 ```cpp

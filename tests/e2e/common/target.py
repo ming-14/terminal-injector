@@ -158,10 +158,20 @@ _k.WriteConsoleA.restype = wintypes.BOOL
 _k.ReadConsoleW.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
                             ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
 _k.ReadConsoleW.restype = wintypes.BOOL
-_k.ReadConsoleInputW.argtypes = [wintypes.HANDLE, ctypes.POINTER(INPUT_RECORD),
+# 第 2 参（记录缓冲区）用 LPVOID 而非 POINTER(INPUT_RECORD)：
+# ctypes 的 argtypes 是「进程级」生效的（挂在 ctypes.windll.kernel32 的函数对象上）。
+# 本前导给 PeekConsoleInputW 钉死 POINTER(本模块的 INPUT_RECORD) 后，会污染同进程内
+# 其他模块的调用——被注入的目标里 termlib 有自己的 INPUT_RECORD 类，它传的是
+# (自己的 INPUT_RECORD * N) 数组，与这里的 POINTER(本模块 INPUT_RECORD) 类型不同，
+# ctypes 直接抛 ArgumentError: expected LP_INPUT_RECORD instance instead of
+# INPUT_RECORD_Array_128，使 termtest 交互段崩溃（原生 ConHost 下因
+# GetNumberOfConsoleInputEvents 先返回 0、走不到 Peek 而掩盖）。
+# LPVOID 对数组 / 指针 / None 都接受，既满足本前导自己的 read_input_records()，
+# 也不再污染 termlib 等外部调用方（与 Windows 原型 INPUT_RECORD* buf 语义一致）。
+_k.ReadConsoleInputW.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
                                  wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 _k.ReadConsoleInputW.restype = wintypes.BOOL
-_k.PeekConsoleInputW.argtypes = [wintypes.HANDLE, ctypes.POINTER(INPUT_RECORD),
+_k.PeekConsoleInputW.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
                                  wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 _k.PeekConsoleInputW.restype = wintypes.BOOL
 _k.GetConsoleScreenBufferInfo.argtypes = [wintypes.HANDLE,

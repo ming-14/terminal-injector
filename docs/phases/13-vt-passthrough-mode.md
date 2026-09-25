@@ -70,26 +70,10 @@ src/
 │   │   ├── InputQueue.cpp           # 实现：原始字节入队/出队
 │   │   └── ConsoleState.h           # 扩展：IsVTInputMode() 接口
 │   └── translator/
-│       ├── VtToInputRecord.h        # 标注：仅在行编辑模式调用
-│       ├── VtSgrFilter.h/.cpp       # 直通出口规范化：剥离 SGR 9/29 + 裸 LF→CRLF
-│       └── VtCursorTracker.h/.cpp   # 直通流同步喂入，维护 ConPTY 语义光标
+│       └── VtToInputRecord.h        # 标注：仅在行编辑模式调用
 └── mediator/
     ├── Mediator.cpp                 # 扩展：根据 ModeSwitchNotify 切换输入翻译策略
     └── VtPassThrough.cpp            # 新增：VT 模式下字节流透传
-```
-
-测试与探针：
-
-```
-tests/
-├── unit/test_vt_sgr_filter.cpp                       # VtSgrFilter 隔离自测（SGR 语义 + 换行归一）
-├── e2e/vt_passthrough/test_newline_normalize.py      # 换行归一 e2e（ChildVtOutput 精确字节）
-├── e2e/vt_passthrough/test_processed_output.py       # PROCESSED_OUTPUT 下 61 0D 0A 62
-└── _probe/
-    ├── t_conhost_newline_probe.py                    # ConHost LF/CR/CRLF 规范化实测
-    ├── t_conhost_norm_probe.py                       # ConHost 序列消化清单
-    ├── t_conhost_csi_norm_probe.py                   # 屏幕副作用序列对照（0 差异）
-    └── t_cr_erase_min.py                             # 裸 ConPTY vs 注入链路最小对照
 ```
 
 ---
@@ -286,39 +270,6 @@ BOOL WINAPI WriteFile_Detour(HANDLE h, LPCVOID buf, DWORD len,
 - 必须判断 `h == GetCachedStdout()`，避免拦截文件写、管道写（transport Recv 用 ReadFile，transport Send 用 WriteFile 写管道，会递归）
 - 用 `HookReentryGuard` 防 `SendToMediator` 内部 `WriteFile` 重入
 - 仅在 `ENABLE_VIRTUAL_TERMINAL_PROCESSING` 开启时直通，避免误拦截 cmd 的 raw 输出
-
-### 4.5b 直通出口的规范化（`VtSgrFilter`）
-
-**原则**：发往 WT 的流必须 **== ConHost 处理后的流**。直通本身不翻译、不推进
-虚拟状态（4.5 的设计取舍），但 ConHost 对若干字节的处置与 WT **语义不同**，
-必须在唯一出口处归一，否则镜像与目标控制台显示分叉。
-
-出口位置：三条直通分支（`WriteConsoleW` / `WriteFile` / OVERLAPPED）统一经
-`VtSgrFilter::Process` → 输出**同时**喂 `VtCursorTracker::Feed` 与
-`SendToMediator`，保证追踪器所见字节与线上字节一致。
-
-两条归一规则：
-
-| 规则 | 动机 | 判据来源 |
-|---|---|---|
-| 剥离 SGR 9/29（删除线） | ConHost 16 位属性字无删除线位，实测完全忽略；WT 会渲染 → vim 欢迎页标题变横线（2026-08-17） | 见 `VtSgrFilter.h` 头注 |
-| 裸 LF(0x0A) → CRLF | ConHost 把裸 LF 当 **CR+LF**（回列 0 + 下移）；WT/wezterm 只当 **纯 LF**（保持列号）→ 直通裸 LF 时新行接在上一行末尾，列号逐行累加、触发自动换行多吃一行，**空行视觉丢失**（2026-09-25，termtest 256 色段） | `tests/_probe/t_conhost_newline_probe.py` |
-
-**归一规则的边界**（均由探针实测确立）：
-
-- 裸 LF（前一字节非 CR）→ 补 CR；**仅 Ground 态**。OSC/DCS 载荷内的 `0x0A`
-  是数据（窗口标题、六帧图），序列只由 BEL/ST 终止，改写会破坏载荷。
-- `CRLF` → 原样，**不得**变 `\r\r\n`（否则 WT 侧多空一行）。
-- 裸 `CR` → 原样，不补 LF（ConHost 中它不回行首，语义并入后续 LF）。
-- `m_lastWasCr` 跨 `Process()` 分片保持；任何 CSI/ESC 序列会打断它
-  （CR 与 LF 之间夹序列时，ConHost 的"CR 归入 LF"前提失效）。
-- 归一后 `VtCursorTracker` 语义不变：其 `PutCodepoint` 本就把 LF 当 CR+LF
-  （`case 0x0A` 已置 `X=0`），喂 `\r\n` 与喂裸 `\n` 状态等价。
-
-**为何只归这一条**：`tests/_probe/t_conhost_csi_norm_probe.py` 对 `\r`、EL(0/1/2K)、
-ED(0/1/2J)、CUP、BS、HT、DECSC/DECRC、自动换行、滚屏做了逐项对照（对照基准
-已经过换行归一），**10/10 用例零差异** → 除裸 LF 外，ConHost 与直通链路语义
-等价，无需再为其他序列做归一。
 
 ### 4.6 mediator 模式切换处理
 

@@ -242,7 +242,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 5：行编辑模式（4 文件，`line_editor/`）
+# Phase 5：行编辑模式（5 文件，`line_editor/`）
 
 目标：cmd 等行编辑程序在劫持下的行为与原生 ConHost 一致（LineEditor，Phase 13）。
 
@@ -253,9 +253,10 @@ if __name__ == "__main__":
 | 48 | `test_tab_completion.py` | cmd Tab 补全 | 输入 `pi` + Tab → 补全为文件/命令（结果文件记录补全结果） |
 | 49 | `test_read_console_modes.py` | ReadConsoleW line/raw、ReadConsole 各形态 | line 模式回车才返回；raw 模式按键即返回；返回内容正确 |
 | 50 | `test_long_line_enter.py` | 长命令软换行后回车的光标定位（回归，2026-08-02 修复） | 回车后光标 Y = aligned.Y + 1 + 折行数（ChildExitSync 上报验证，基线取 DLL 日志 child cursor aligned 值） |
+| 51 | `test_readfile_line_echo.py` | `ReadFile(stdin)` 行编辑回显（回归，2026-09-25 修复） | LINE+ECHO 下 `ab`+Enter → `os.read` 得 `61 62 0d 0a`；空行+Enter → `0d 0a`（空行也补换行，非 EOF） |
 
 ## 验证标准
-- [x] 4 个文件全部 PASS（46-49 全过）
+- [x] 5 个文件全部 PASS（46-49、51 全过）
 - [x] 46：`echo hello` 输出 `hello`，结果文件含输出内容
 - [x] 50（回归）：修复 `LineEditor::SyncCursor` 未计软换行行数的 bug——长命令折行后回车，ConsoleState 光标少一行，cmd 新 prompt 的 CursorPosition 定位错行（覆盖命令续行）；修复后 `ChildExitSync sent cursor=(0,7)`（aligned (0,5) + 1 + wrap=1）；基线取 python DLL 日志 `child cursor aligned to WT` 值（ConsoleState 实际起点），不取目标自检 START（GetConsoleScreenBufferInfo 返回 VirtualConsoleState，与 ConsoleState 存在时序差，偶发读到滞后值）
 - 备注：49 的 LINE 断言按真实 ReadConsoleW 语义为 `ok=1 n=4 ab`（返回行含尾部 `\r\n`，InputHooks.cpp:434）；RAW 断言需用新缓冲区（ReadConsoleW 不清残留）；50 的目标自检 `GetConsoleScreenBufferInfo` 在 python 进程走 ConHost pass-through（读不到 DLL 缓存），故用 mediator ChildExitSync 上报值断言

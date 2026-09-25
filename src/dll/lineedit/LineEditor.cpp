@@ -385,9 +385,11 @@ void LineEditor::HandleTab(bool shift, std::string& vtOut) {
 // 处理按键事件
 // ============================================================
 bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
-                             std::wstring& lineOut, std::string& vtOut) {
+                             std::wstring& lineOut, std::string& vtOut,
+                             LineEnd* endReason) {
     vtOut.clear();
     lineOut.clear();
+    if (endReason) *endReason = LineEnd::None;
 
     WORD vk = ker.wVirtualKeyCode;
     wchar_t ch = ker.uChar.UnicodeChar;
@@ -405,6 +407,7 @@ bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
         lineOut.clear();
         // 光标移到下一行行首（^C\r\n 后）
         SyncCursor(1, true);
+        if (endReason) *endReason = LineEnd::CtrlC;
         return true;
     }
 
@@ -427,6 +430,7 @@ bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
 
         // 返回截断后的行内容（不含 ^Z）
         lineOut = m_line;
+        if (endReason) *endReason = LineEnd::CtrlZ;
         return true;
     }
 
@@ -452,6 +456,7 @@ bool LineEditor::ProcessKey(const KEY_EVENT_RECORD& ker, bool echoEnabled,
 
         // 返回行内容（不含 \r\n）
         lineOut = m_line;
+        if (endReason) *endReason = LineEnd::Enter;
         return true;
     }
 
