@@ -58,7 +58,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe dual-mode entry point
 ├── tests/
-│   ├── e2e/                    # end-to-end test suite (run_all.py + 14 categories, 109 test files)
+│   ├── e2e/                    # end-to-end test suite (run_all.py + 14 categories, 116 test files)
 │   │   ├── common/             # test infrastructure (injector / input_sim / vt_capture / paths)
 │   │   ├── _targets/           # self-check scripts running inside target processes
 │   │   └── docs/PHASES.md      # test suite design doc
@@ -84,6 +84,11 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 # Rebuild DLL only (fast iteration after hook changes)
 ./build_dll.ps1
 ```
+
+> If MSBuild fails with `MSB6001` / "关键字:'PATH' 所添加的关键字:'Path'" (a host
+> process leaking case-variant `PATH`/`Path`/`path` keys into the environment),
+> use `./build_clean.ps1 [-Project injected|all] [-Rebuild]`: it launches a fresh
+> shell with a clean environment, then runs the same build.
 
 Artifacts: `build/bin/Release/terminal_injector.exe`, `build/bin/Release/injected.dll`,
 plus `relay32.dll` and `relay32inject.exe` (32-bit relay for cross-bitness child chains,
@@ -124,7 +129,7 @@ After the WT tab is closed: pipe disconnects → the DLL automatically removes a
 
 ### Testing
 
-e2e suite (109 test files across 14 categories), requires the `build/bin/Release` artifacts + Python 3.8+ / pywin32 / psutil:
+e2e suite (116 test files across 14 categories), requires the `build/bin/Release` artifacts + Python 3.8+ / pywin32 / psutil:
 
 ```powershell
 cd tests/e2e
@@ -209,7 +214,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe 双模式入口
 ├── tests/
-│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 109 个测试文件）
+│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 116 个测试文件）
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
@@ -275,7 +280,7 @@ terminal_injector.exe --list-targets [--json] [--all]
 
 ## 测试
 
-e2e 套件（114 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（116 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e

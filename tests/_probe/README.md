@@ -34,7 +34,8 @@
 | `relay_e2e.py` | 32 位中继 DLL 方案端到端（钩 `CreateProcessW` / 冻结 / 注入 / ack 四环节 + 铁证） |
 | `suspended32_probe.py` | 挂起的 WOW64 进程能否枚举出 32 位模块表 |
 | `mapping_base_probe.py` | 用 `VirtualQueryEx`+`GetMappedFileNameW` 取挂起进程内 DLL 基址（不依赖 KnownDLL 同址） |
-| `sgr_colon_filter_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 在 DLL SGR 过滤器下的字节变化（现场错色 bug） |
+| `t_sgr_colon_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 端到端验证（真 ConPTY 承载 mediator + `pywezterm.Terminal` 解析对照）—— 冒号空保留位 bug 的回归证据 |
+| `pywezterm_smoke.py` | pywezterm 库自检：`Pty` 起进程 + `Terminal` 还原屏幕 + 断言标记，用于确认测试环境可用 |
 | `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
 
 `timing.py` / `slack.py` 依赖同目录的微型目标 `hello.py` / `firstout.py`。

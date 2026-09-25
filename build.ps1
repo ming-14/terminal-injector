@@ -13,7 +13,17 @@ $vsDevCmd = Join-Path $vsInstallDir 'Common7\Tools\VsDevCmd.bat'
 $msbuild = Join-Path $vsInstallDir 'MSBuild\Current\Bin\MSBuild.exe'
 
 # Initialize VS environment
-& cmd /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 & set" | ForEach-Object {
+# 注意：Windows 环境块里 PATH/Path 大小写变体可能并存，而 SetEnvironmentVariable
+# 的键在首字符之后大小写不敏感 → 直接回灌会抛 "已添加项。字典中的关键字:'PATH'
+# 所添加的关键字:'Path'"（MSB6001）。故先删掉除规范名 PATH 外的所有大小写变体，
+# 再回灌 vcvars 输出；PATH 本身必须保留，否则后续找不到 cmd.exe。
+$vsEnv = & cmd /c "`"$vsDevCmd`" -arch=x64 -host_arch=x64 & set"
+[System.Environment]::GetEnvironmentVariables().Keys | ForEach-Object {
+    if ($_ -match '^(?i)path$' -and $_ -cne 'PATH') {
+        [System.Environment]::SetEnvironmentVariable($_, $null)
+    }
+}
+$vsEnv | ForEach-Object {
     if ($_ -match '^([^=]+)=(.*)') {
         [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
     }

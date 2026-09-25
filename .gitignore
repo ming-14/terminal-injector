@@ -99,6 +99,7 @@ ehthumbs.db
 
 # === Agent 工具 ===
 .agents/
+.arts/
 
 # === 文档产物 ===
 docs/*_result.txt
