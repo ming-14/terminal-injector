@@ -120,6 +120,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Terminal-Injector_${{ github.ref_name }}
+          # 正文自动生成：GitHub 按 前一个 tag..当前 tag 列出新增提交
+          generate_release_notes: true
           files: |
             terminal-injector-x64.zip
             dist/terminal-injector-gui.exe
