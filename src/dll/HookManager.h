@@ -51,11 +51,15 @@ public:
     static bool InstallAll();
 
     // 卸载全部 Hook（MH_DisableHook + MH_RemoveHook）
-    static void UninstallAll();
+    // ★ 返回 false 表示有 Hook 未能恢复原字节 / 未能释放 trampoline ——
+    //   此时目标函数里可能残留指向本 DLL 的 JMP，**禁止 FreeLibrary**（否则目标
+    //   下次调用该 API 即跳进已释放内存 → 0xc0000005，模块名 injected.dll_unloaded）。
+    static bool UninstallAll();
 
     // 仅禁用 Hook（保留 trampoline），供 Unloader::DoUnload 使用
     // 避免 ReadDetour 线程仍在执行 trampoline 时 MH_RemoveHook 释放内存导致 AV
-    static void DisableAll();
+    // ★ 返回 false 同上：有 Hook 未恢复原字节，此时同样禁止卸载。
+    static bool DisableAll();
 
     // 状态查询
     static bool IsInstalled() { return s_installed; }

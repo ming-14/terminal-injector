@@ -172,7 +172,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
             if (!terminjector::Unloader::IsUnloading()) {
                 // 卸载 Hook（恢复原 API）
                 if (terminjector::HookManager::IsInstalled()) {
-                    terminjector::HookManager::UninstallAll();
+                    if (!terminjector::HookManager::UninstallAll()) {
+                        // 有 Hook 未恢复原字节：目标函数里可能残留指向本 DLL 的 JMP。
+                        // 走到这里说明 FreeLibrary 已经发生（DETACH），无法回退；
+                        // 至少要留下明确日志，便于定位「injected.dll_unloaded」崩溃。
+                        LOG_ERROR("DllMain(DETACH): UninstallAll 未能摘除全部 Hook —— "
+                                  "目标若再调用相关 API 可能跳入已释放内存（0xc0000005）");
+                    }
                 }
                 MH_Uninitialize();
             }

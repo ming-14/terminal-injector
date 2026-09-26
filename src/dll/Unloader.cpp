@@ -183,7 +183,17 @@ void Unloader::DoUnload() {
     //    用 DisableAll 而非 UninstallAll：MH_RemoveHook 会释放 trampoline
     //    内存，若 ReadDetour 线程尚未完全退出，后续调用 *_orig 会 AV 崩溃
     //    （0xC0000005）。DLL_PROCESS_DETACH 中 UninstallAll 做最终清理。
-    HookManager::DisableAll();
+    //
+    //    ★ 失败必须中止卸载（2026-09-26 修复：卸载后目标崩溃 0xc0000005，
+    //      事件日志报错模块为 `injected.dll_unloaded`）。若某条 Hook 未恢复原
+    //      字节，目标函数里就残留指向本 DLL 的 JMP；远程 FreeLibrary 后目标
+    //      一旦调用该 API 即跳进已释放内存。此时宁可让 DLL 留在目标进程里
+    //      （泄漏几百 KB），也绝不能继续卸载。
+    if (!HookManager::DisableAll()) {
+        LOG_ERROR("Unload: DisableAll 失败，有 Hook 未恢复原字节 —— 中止卸载，"
+                  "保持 DLL 加载以免目标 FreeLibrary 后跳入已释放内存（会 0xc0000005）");
+        return;
+    }
 
     // 4.5 先恢复 ConHost 画面（Phase 22 VT 重放），再唤醒 cmd 读取线程。
     //     竞态修复：若先唤醒 cmd（KickStart 回车）让它在重放前直接写新 prompt
