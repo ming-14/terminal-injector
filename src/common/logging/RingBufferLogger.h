@@ -45,6 +45,14 @@ namespace terminjector {
 //   - 生产者：load tail (acquire) → 写数据 → store head (release)
 //   - 消费者：load head (acquire) → 读数据 → store tail (release)
 //   - acquire/release 配对保证数据可见性
+//
+// C4324（structure padded due to alignment specifier）豁免：
+//   成员上的 alignas(64) 会让本结构体按 64 字节对齐、并为对齐填充字节 ——
+//   这正是设计目的（head / tail / data 各占一条缓存行，写读两端不假共享），
+//   填充无法也不应消除。该警告只是这条设计的必然提示，故只在本类型范围内
+//   关闭；对齐保持不动，也不全局禁用 4324，以免盖掉别处的意外填充。
+#pragma warning(push)
+#pragma warning(disable : 4324)   // C4324: 结构体因对齐说明符而被填充
 class ThreadLogBuffer {
 public:
     static constexpr size_t kEntrySize = 2048;   // 单条日志最大字节数（含 \n\0）
@@ -68,6 +76,7 @@ private:
     alignas(64) std::atomic<size_t> m_tail{0};  // 读位置（消费者写，生产者读）
     alignas(64) char m_data[kEntryCount * kEntrySize];
 };
+#pragma warning(pop)
 
 // ============================================================
 // ThreadRegistry：线程注册表，管理所有活跃的 ThreadLogBuffer
