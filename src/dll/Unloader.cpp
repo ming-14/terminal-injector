@@ -391,6 +391,54 @@ void Unloader::DoUnload() {
     ExitThread(0);
 }
 
+// 从重放字节流中剔除「鼠标上报」DECSET/DECRST 序列（CSI ? <n>[;<n>...] h|l，
+// 其中 n ∈ {1000,1002,1003,1006,1015}）。
+//
+// 背景（2026-09-26 修复：卸载后旧 WT 的 shell 崩溃 0xc0000005）
+//   VtReplayBuffer 记录的是**面向 WT 的**原始 VT 输出，其中包含应用（如 Textual）
+//   发送的鼠标上报使能序列。卸载重放把它写进 ConHost 后，**旧 WT 会照单执行**：
+//   于是即便目标 shell 从未请求鼠标（inputMode 无 ENABLE_MOUSE_INPUT），
+//   旧 WT 也开始上报鼠标 → 目标 shell 收到意外鼠标输入 → ACCESS_VIOLATION。
+//   实测：注入后跑 Textual TUI 再卸载，旧 WT 的 pwsh 敲任意命令即崩；不跑 TUI 则不崩
+//   （不跑 TUI 时这些序列从未产生）。全屏 TUI 子进程被误判为 lineShell=1 时会走
+//   全量重放，把整个会话 VT（含鼠标序列）写进**共享 ConHost**，故必须在重放侧兜底。
+//   这些序列只服务 WT 侧输入语义，与 ConHost 画面恢复无关，剔除不影响画面。
+//
+// 保守策略：一个序列里只要含任一鼠标模式，整条剔除（多模式合并写法极少见，
+// 宁可少设一个无关模式，也不能漏掉鼠标上报）。
+static void StripMouseReportSequences(const char* in, size_t len, std::string& out) {
+    auto isMouseMode = [](int v) {
+        return v == 1000 || v == 1002 || v == 1003 || v == 1006 || v == 1015;
+    };
+    out.clear();
+    out.reserve(len);
+    size_t i = 0;
+    while (i < len) {
+        if (in[i] == '\x1b' && i + 3 < len && in[i + 1] == '[' && in[i + 2] == '?') {
+            size_t j = i + 3;
+            bool hasMouse = false;
+            bool wellFormed = true;
+            while (true) {
+                if (j >= len || in[j] < '0' || in[j] > '9') { wellFormed = false; break; }
+                int val = 0;
+                while (j < len && in[j] >= '0' && in[j] <= '9') {
+                    if (val < 1000000) val = val * 10 + (in[j] - '0');
+                    ++j;
+                }
+                if (isMouseMode(val)) hasMouse = true;
+                if (j < len && in[j] == ';') { ++j; continue; }
+                break;
+            }
+            if (wellFormed && hasMouse && j < len && (in[j] == 'h' || in[j] == 'l')) {
+                i = j + 1;   // 整条剔除
+                continue;
+            }
+        }
+        out.push_back(in[i]);
+        ++i;
+    }
+}
+
 // 恢复 ConHost 画面为 WT 会话画面（Phase 22）
 // 详见 docs/phases/22-conhost-replay.md
 //
@@ -610,19 +658,27 @@ void Unloader::ReplaySessionToConHost() {
     }
 
     // 4.2 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
+    //     先剔除鼠标上报序列：它们面向 WT，写进 ConHost 会被旧 WT 执行，
+    //     导致目标 shell 收到未请求的鼠标输入（见 StripMouseReportSequences 注释）
+    std::string replayBytes;
+    StripMouseReportSequences(vt.data(), replayEnd, replayBytes);
+    const size_t strippedBytes = replayEnd - replayBytes.size();
+
     constexpr DWORD kChunkBytes = 64 * 1024;
     size_t offset = 0;
-    while (offset < replayEnd) {
+    while (offset < replayBytes.size()) {
         DWORD n = static_cast<DWORD>(
-            (kChunkBytes < replayEnd - offset) ? kChunkBytes : (replayEnd - offset));
+            (kChunkBytes < replayBytes.size() - offset) ? kChunkBytes
+                                                        : (replayBytes.size() - offset));
         DWORD written = 0;
-        if (!WriteFile(hOut, vt.data() + offset, n, &written, nullptr) || written == 0) {
+        if (!WriteFile(hOut, replayBytes.data() + offset, n, &written, nullptr) || written == 0) {
             LOG_WARN("Replay: WriteFile failed err=%lu at offset=%zu", GetLastError(), offset);
             break;
         }
         offset += written;
     }
-    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost", offset, replayEnd);
+    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost (stripped %zu mouse-report bytes)",
+             offset, replayBytes.size(), strippedBytes);
 
     // 5. 恢复 ConHost 输出模式（含 VT 位原状）
     SetConsoleMode(hOut, origMode);

@@ -49,6 +49,30 @@ ConHost，cmd 被 KickStart 回车唤醒后又自绘一个新 prompt → 每次�
    - 已截断 + 惰性重放（重放前后光标未动 = 空会话无可视内容）：光标抬到
      擦除行上一行（`(0, injCur.Y - 1)`，下限 0）。
 
+## 3.1 重放必须剔除「鼠标上报」序列（2026-09-26 修复）
+
+**现象**：开 WT → 劫持到新 WT → 运行 Textual TUI（taskboard.py）→ 卸载 → 回旧 WT 输入任意
+内容回车 → **旧 WT 的 pwsh 崩溃 `0xc0000005`（ACCESS_VIOLATION）**；不跑 TUI 直接卸载则不崩。
+
+**根因**：`VtReplayBuffer` 记录的是**面向 WT 的原始 VT 输出**（含应用发送的鼠标上报使能序列
+`?1000h ?1003h ?1015h ?1006h`）。全屏 TUI 子进程可能被判为 `lineShell=1`（判定基于**注入瞬间**
+的 ConsoleState，而子进程继承了父 shell 的行编辑模式，启动后才变成 TUI）→ 卸载时走全量重放，
+把整个会话 VT（实测 85029 字节）`WriteFile` 进 **hOut = 共享 ConHost**（子进程与目标 shell 共用
+同一 ConHost）→ **旧 WT 收到鼠标使能序列并照单执行**。目标 shell 的 inputMode 不含
+`ENABLE_MOUSE_INPUT`，本不该收到鼠标输入，却收到 WT 上报的鼠标字节 → PSReadLine 处理异常输入
+→ `0xc0000005`。
+
+**修复**：`Unloader.cpp` 新增 `StripMouseReportSequences()`，在写 ConHost 前剔除
+`CSI ? <n>[;<n>...] h|l`（n ∈ {1000,1002,1003,1006,1015}；一条序列含任一鼠标模式即整条剔除）。
+这些序列只服务 **WT 侧输入语义**，与 ConHost 画面恢复无关，剔除不影响画面。
+
+**验证**：DLL 日志 `Replay: replayed 84997/84997 VT bytes to ConHost (stripped 32 mouse-report bytes)`；
+探针 `tests/_probe/t_unload_tui_crash.py` 断言「卸载后目标终端不再收到鼠标序列」
+（修复前轨道 B 收到 `\x1b[?1015h`，修复后为空）。
+
+**同类隐患（未改）**：`VtEscape.h` 的 `kDisableMouse` 全仓零调用（死代码）；
+`LazyInit.cpp` 的 `kEnableMouse` 未传 `recordReplay=false`（其余 LazyInit 控制序列都显式传了 false）。
+
 ## 4. 实测教训（2026-08-08 / 2026-08-10）
 
 截断机制初版验证暴露两个设计误判，均已在第 3 节实现中修正；2026-08-10

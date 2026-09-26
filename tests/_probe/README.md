@@ -42,6 +42,7 @@
 | `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针（需 `TI_TERMTEST_DIR` 指向 termlib 目录） |
 | `pywezterm_smoke.py` | pywezterm 库自检：`Pty` 起进程 + `Terminal` 还原屏幕 + 断言标记，用于确认测试环境可用 |
 | `t_textual_asyncio_freeze.py` | ★ 注入后跑 Textual TUI（需 `TI_TUI_TARGET` 指定脚本，如 taskboard.py）双轨对照：断言**画面仍在更新**且**鼠标生效**。2026-09-26「Detour 污染 `GetLastError` 致 asyncio 事件循环死亡、画面定格」修复的端到端判据 |
+| `t_unload_tui_crash.py` | ★ 双轨（不跑 TUI / 跑过 TUI）跑完即卸载，断言**卸载后目标终端不再收到鼠标上报序列**且 shell 存活。2026-09-26「卸载重放把面向 WT 的鼠标序列写进共享 ConHost，致旧 WT 开启鼠标上报、目标 shell `0xc0000005`」修复的端到端判据（需 `TI_TUI_TARGET`） |
 | `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
 
 `timing.py` / `slack.py` 依赖同目录的微型目标 `hello.py` / `firstout.py`。
