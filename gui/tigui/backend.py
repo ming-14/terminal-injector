@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 
 from .discover import (SEARCH_MAX_DEPTH, SEARCH_TIMEOUT, DiscoveryResult,
-                       find_binaries)
+                       SearchRound, describe_limits, find_binaries)
 from .i18n import _t
 from .paths import DLL_NAME, EXE_NAME, resolve_base_dir
 from .winapi import decode_output, find_dll_base
@@ -60,6 +60,12 @@ class InjectorBackend:
                  timeout=SEARCH_TIMEOUT) -> DiscoveryResult:
         """递归搜索缺失的 exe/dll 并回填 self.exe_path / self.dll_path
 
+        两轮:
+          第一轮  在 root(默认程序自身目录)下按深度/超时搜索;
+          第二轮  仍缺失则上探一层到第一轮根的父目录,排除第一轮根的整棵
+                  子树,超时预算独立(同样用 timeout),只补仍缺失的名字。
+        两轮统计合并返回,第二轮记在 parent_round(discover.SearchRound)。
+
         **阻塞**,只在工作线程跑(GUI 侧走 tasks.run_readonly)。
         只补缺失项,已就位的路径绝不覆盖;全部就位时直接返回,不扫描。
         搜索根默认是程序自身目录(paths.resolve_program_dir),与
@@ -71,12 +77,47 @@ class InjectorBackend:
             return DiscoveryResult({}, Path(self.exe_dir))
         res = find_binaries(missing, root=root, max_depth=max_depth,
                             timeout=timeout)
-        for name, path in res.found.items():
+        self._fill_paths(res.found)
+        left = self.missing_binaries()
+        if not left or res.error:
+            return res                      # 第一轮就齐了 / 根本没搜成
+        return self._search_upper(res, left, max_depth, timeout)
+
+    def _fill_paths(self, found):
+        """把命中的『原始文件名 -> 绝对路径』回填到 exe_path / dll_path"""
+        for name, path in found.items():
             if name == EXE_NAME:
                 self.exe_path = path
             elif name == DLL_NAME:
                 self.dll_path = path
-        return res
+
+    def _search_upper(self, res, names, max_depth, timeout) -> DiscoveryResult:
+        """第二轮:上探一层到 res.root 的父目录,排除 res.root 子树(**阻塞**)
+
+        父目录不存在、或 res.root 已经是根(盘符根的 parent 是它自己)时
+        不搜,原样返回且不记 parent_round。
+        """
+        parent = res.root.parent
+        if parent == res.root or not parent.is_dir():
+            self.log(_t("disc_up_skip").format(res.root), "err")
+            return res
+        self.log(_t("disc_up_start").format(
+            parent, res.root, describe_limits(max_depth, timeout)), "info")
+        r2 = find_binaries(names, root=parent, max_depth=max_depth,
+                           timeout=timeout, exclude=res.root)
+        if r2.error:
+            # 第二轮自身失败(父目录在调用瞬间消失等)只单独报一条,
+            # 不并进 error:否则会连带吞掉第一轮已找到的结果与刷新
+            self.log(_t("disc_error").format(r2.error), "err")
+        self._fill_paths(r2.found)
+        return res._replace(
+            found=dict(res.found, **r2.found),   # 名字来自 left,不会重叠
+            elapsed=res.elapsed + r2.elapsed,
+            scanned=res.scanned + r2.scanned,
+            timed_out=res.timed_out or r2.timed_out,
+            parent_round=SearchRound(r2.root, r2.scanned, r2.timed_out,
+                                     r2.elapsed),
+        )
 
     # ---------- 列表 ----------
 

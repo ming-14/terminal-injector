@@ -113,7 +113,8 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
             return DiscoveryResult({}, current_root(), error=str(exc))
 
     def _on_discovered(self, res):
-        """探测完成:逐个报出新找到的文件,仍有缺失则报原因,否则刷新"""
+        """探测完成:逐个报出新找到的文件,仍有缺失则报原因(上探过就把
+        两个搜索根都写进报告),否则刷新"""
         self._discovering = False
         if res.error:
             self.log(_t("disc_error").format(res.error), "err")
@@ -123,12 +124,19 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
 
         left = self.backend.missing_binaries()
         if left:
-            if res.timed_out:
+            limits = describe_limits()
+            missing = ", ".join(left)
+            if res.parent_round:
+                # 上探过:报两个搜索根,扫描数是两轮之和
+                key = "disc_timeout_2" if res.timed_out else "disc_not_found_2"
+                self.log(_t(key).format(res.root, res.parent_round.root,
+                                        limits, res.scanned, missing), "err")
+            elif res.timed_out:
                 self.log(_t("disc_timeout").format(
-                    describe_limits(), res.scanned, ", ".join(left)), "err")
+                    limits, res.scanned, missing), "err")
             else:
                 self.log(_t("disc_not_found").format(
-                    describe_limits(), res.scanned, ", ".join(left)), "err")
+                    limits, res.scanned, missing), "err")
             return
         # 已齐:补上的可能有 exe,版本号与列表都要重取
         if self.backend.exe_path.exists():

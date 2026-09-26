@@ -42,6 +42,11 @@ _STR = {
         "disc_found": "找到 {}: {}",
         "disc_timeout": "搜索超时({}),已扫描 {} 项,仍缺少: {}",
         "disc_not_found": "搜索结束({}),已扫描 {} 项,未找到: {}",
+        # 上探第二轮(仍缺失 -> 搜父目录,排除第一轮根;见 backend.discover)
+        "disc_up_start": "第一轮未找全,上探父目录 {}(排除 {} — {})",
+        "disc_up_skip": "无法继续上探: {} 没有可用的上层目录",
+        "disc_timeout_2": "搜索超时:根 {} 与上层 {}(各 {}),已扫描 {} 项,仍缺少: {}",
+        "disc_not_found_2": "搜索结束:根 {} 与上层 {}(各 {}),已扫描 {} 项,未找到: {}",
         "disc_error": "搜索失败: {}",
         "disc_bad_root": "搜索根目录不存在或不是目录: {}",
         # 菜单
@@ -163,6 +168,12 @@ _STR = {
         "disc_found": "Found {}: {}",
         "disc_timeout": "Search timed out ({}), {} entries scanned, still missing: {}",
         "disc_not_found": "Search finished ({}), {} entries scanned, not found: {}",
+        # Upper-level round (still missing -> search parent, excluding the
+        # first-round root; see backend.discover)
+        "disc_up_start": "Round 1 incomplete; searching parent {} (excluding {} — {})",
+        "disc_up_skip": "Cannot search further up: no parent above {}",
+        "disc_timeout_2": "Search timed out: root {} and parent {} (each {}), {} entries scanned, still missing: {}",
+        "disc_not_found_2": "Search finished: root {} and parent {} (each {}), {} entries scanned, not found: {}",
         "disc_error": "Search failed: {}",
         "disc_bad_root": "Search root missing or not a directory: {}",
         "m_file": "File", "m_exit": "Exit",

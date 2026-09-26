@@ -25,7 +25,7 @@ from tigui import discover                      # noqa: E402
 from tigui import i18n                          # noqa: E402
 from tigui.app import InjectorGui               # noqa: E402
 from tigui.backend import InjectorBackend       # noqa: E402
-from tigui.discover import DiscoveryResult      # noqa: E402
+from tigui.discover import DiscoveryResult, SearchRound   # noqa: E402
 from tigui.paths import resolve_program_dir     # noqa: E402
 from tigui.tasks import TaskRunner              # noqa: E402
 
@@ -175,6 +175,23 @@ class RediscoverTest(unittest.TestCase):
         self.assertTrue(any("未找到" in t for t in self.app.lines("err")))
         self.assertEqual(self.app.refresh_calls, 0, "没找到就不该刷新")
         self.assertEqual(self.app.backend.missing_binaries(), [EXE, DLL])
+
+    def test_upper_round_report_mentions_both_roots(self):
+        # 上探过的失败报告:两个搜索根都要写明,扫描数为两轮之和
+        upper = Path("/tmp/upper")
+        self.app._discovery_job = lambda: DiscoveryResult(
+            {}, discover.current_root(), 0.5, 42, False, "",
+            SearchRound(upper, 7, False, 0.2))
+        InjectorGui.rediscover(self.app)
+        self.pump()
+        errs = self.app.lines("err")
+        line = next((t for t in errs if "上层" in t), None)
+        self.assertIsNotNone(line, str(self.app.logs))
+        self.assertIn("未找到", line)
+        self.assertIn(str(discover.current_root()), line)
+        self.assertIn(str(upper), line)
+        self.assertIn("42", line, "扫描数应为两轮之和")
+        self.assertEqual(self.app.refresh_calls, 0)
 
     def test_exception_folds_to_error(self):
         def boom(**_kw):

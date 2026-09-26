@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tigui import backend as backend_mod        # noqa: E402
 from tigui import discover                      # noqa: E402
 from tigui import i18n                          # noqa: E402
 from tigui.backend import InjectorBackend       # noqa: E402
@@ -197,6 +198,41 @@ class JunctionTest(unittest.TestCase):
             shutil.rmtree(outside, ignore_errors=True)
 
 
+class ExcludeTest(unittest.TestCase):
+    """exclude:跳过指定目录及其整棵子树(上探第二轮排除第一轮根)"""
+
+    NAME = "up_marker.bin"
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="tigui_ex_"))
+        (self.base / "first").mkdir()
+        (self.base / "first" / self.NAME).write_bytes(b"x")
+        (self.base / "second" / "deep").mkdir(parents=True)
+        (self.base / "second" / "deep" / self.NAME).write_bytes(b"x")
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_without_exclude_shallow_copy_wins(self):
+        # 不排除时两份都在搜索范围:广度优先,first(深度 1)先于 deep(深度 2)
+        res = find_binaries([self.NAME], root=self.base, timeout=20)
+        self.assertEqual(res.found.get(self.NAME),
+                         self.base / "first" / self.NAME)
+
+    def test_exclude_skips_whole_subtree(self):
+        res = find_binaries([self.NAME], root=self.base, timeout=20,
+                            exclude=self.base / "first")
+        self.assertEqual(res.found.get(self.NAME),
+                         self.base / "second" / "deep" / self.NAME)
+
+    def test_exclude_root_scans_nothing(self):
+        # root 恰等于 exclude:一个条目都不该看
+        res = find_binaries([self.NAME], root=self.base / "first",
+                            exclude=self.base / "first")
+        self.assertEqual(res.found, {})
+        self.assertEqual(res.scanned, 0)
+
+
 class _DummyRoot:
     """TaskRunner.poll 用到的 after;本测试只派发不轮询"""
 
@@ -287,6 +323,109 @@ class BackendDiscoverTest(unittest.TestCase):
         self.assertEqual(be.discover(timeout=20).found, {})
         self.assertEqual(be.exe_path, keep_exe)
         self.assertEqual(be.dll_path, keep_dll)
+
+
+class BackendUpperSearchTest(unittest.TestCase):
+    """第一轮仍缺失 -> 上探一层(父目录),排除第一轮根,超时独立"""
+
+    FILLERS = 50        # 第一轮根里的无关文件数,用来验证第二轮没重扫它
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="tigui_up_"))
+        self.first = self.base / "first"     # 第一轮根
+        self.second = self.base / "second"   # 只有上探才能看到的兄弟目录
+        self.first.mkdir()
+        self.second.mkdir()
+        for i in range(self.FILLERS):
+            (self.first / ("filler%d.txt" % i)).write_bytes(b"x")
+        (self.second / EXE).write_bytes(b"x")
+        (self.second / DLL).write_bytes(b"x")
+        self.patcher = mock.patch.object(discover, "SEARCH_ROOT", self.first)
+        self.patcher.start()
+        self.logs = []                       # backend 日志留痕
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def _backend(self, exe=None, dll=None):
+        be = InjectorBackend()
+        be.exe_path = exe or self.first / "gone" / EXE
+        be.dll_path = dll or self.first / "gone" / DLL
+        be.set_log_sink(lambda text, tag="info": self.logs.append((tag, text)))
+        return be
+
+    def test_upper_round_finds_and_reports(self):
+        be = self._backend()
+        res = be.discover(timeout=20)
+        self.assertEqual(set(res.found), {EXE, DLL})
+        self.assertEqual(be.exe_path, self.second / EXE)
+        self.assertEqual(be.dll_path, self.second / DLL)
+        self.assertEqual(be.missing_binaries(), [])
+        self.assertIsNotNone(res.parent_round, "缺失时应记上探那一轮")
+        self.assertEqual(res.parent_round.root, self.base)
+        self.assertFalse(res.parent_round.timed_out)
+        # 上探开工要留痕:带上层根、第一轮根与限制说明
+        start = [t for _, t in self.logs if "上探父目录" in t]
+        self.assertEqual(len(start), 1, str(self.logs))
+        self.assertIn(str(self.base), start[0])
+        self.assertIn(str(self.first), start[0])
+
+    def test_upper_round_does_not_rescan_first_root(self):
+        res = self._backend().discover(timeout=20)
+        # 排除生效时第二轮只看 base(2 条)+ second(2 条);
+        # 若没排除 first,那 50 个 filler 会被数进去(~54)
+        self.assertLess(res.parent_round.scanned, 20,
+                        "上探不得重复扫描第一轮根子树")
+
+    def test_partial_find_still_goes_up(self):
+        (self.first / EXE).write_bytes(b"x")     # 第一轮能补上 exe
+        be = self._backend()
+        res = be.discover(timeout=20)
+        self.assertEqual(set(res.found), {EXE, DLL})
+        self.assertEqual(be.exe_path, self.first / EXE, "已命中的不被覆盖")
+        self.assertEqual(be.dll_path, self.second / DLL)
+        self.assertIsNotNone(res.parent_round, "只缺一样也要上探")
+
+    def test_upper_round_error_keeps_first_round_result(self):
+        (self.first / EXE).write_bytes(b"x")     # 第一轮就能找到 exe
+        real = backend_mod.find_binaries
+        calls = []
+
+        def flaky(names, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                return real(names, **kw)         # 第一轮用真搜索
+            return DiscoveryResult({}, kw["root"], error="父目录刚消失")
+
+        with mock.patch.object(backend_mod, "find_binaries", flaky):
+            be = self._backend()
+            res = be.discover(timeout=20)
+        self.assertEqual(len(calls), 2, "仍缺失 -> 应确实起第二轮")
+        self.assertEqual(res.error, "", "第二轮的 error 不并进总结果")
+        self.assertEqual(set(res.found), {EXE}, "第一轮的结果要保住")
+        self.assertEqual(be.exe_path, self.first / EXE)
+        self.assertEqual(be.missing_binaries(), [DLL])
+        self.assertIsNotNone(res.parent_round)
+        self.assertTrue(any("父目录刚消失" in t for _, t in self.logs),
+                        str(self.logs))
+
+    def test_no_upper_round_when_all_present(self):
+        be = self._backend(self.second / EXE, self.second / DLL)
+        res = be.discover(timeout=20)
+        self.assertEqual(res.found, {})
+        self.assertIsNone(res.parent_round)
+        self.assertEqual(self.logs, [], "不缺失就不该有搜索动作")
+
+    def test_skip_when_root_is_drive_root(self):
+        res = DiscoveryResult({}, Path(Path(self.base).anchor))  # 如 C:\
+        out = self._backend()._search_upper(res, [EXE], 30, 20)
+        self.assertIsNone(out.parent_round, "已是根目录,不该上探")
+
+    def test_skip_when_parent_missing(self):
+        res = DiscoveryResult({}, self.base / "no_such" / "leaf")
+        out = self._backend()._search_upper(res, [EXE], 30, 20)
+        self.assertIsNone(out.parent_round, "父目录不存在时原样返回")
 
 
 if __name__ == "__main__":

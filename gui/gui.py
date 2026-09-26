@@ -3,7 +3,8 @@
 # 实现位于同目录 tigui/ 包:
 #   i18n.py     界面文本(按系统 UI 语言中英自动切换)
 #   paths.py    exe/dll 定位(terminal_injector.exe 与 injected.dll 须与本文件同目录)
-#   discover.py 缺失时在后台线程按深度/超时限制递归搜索 exe/dll(常量可配)
+#   discover.py 缺失时在后台线程按深度/超时限制递归搜索 exe/dll(常量可配),
+#               仍缺失则再上探一层到父目录(排除已搜过的第一轮根)
 #   winapi.py   ctypes:查 injected.dll 基址 / 解码子进程输出
 #   backend.py  terminal_injector.exe 调用层(无 tkinter 依赖,可单独测试)
 #   tasks.py    后台任务(线程 + 队列 + busy)

@@ -2,7 +2,8 @@
 #
 # 为什么需要它:布局约定要求 exe/dll 与 gui.py(或打包后的 exe)同目录,
 # 但实际部署经常把它们塞进子目录。缺失时从程序自身目录出发做一次受限
-# 递归搜索,找到即由 backend 回填路径,免去手工摆放或报错。
+# 递归搜索,找到即由 backend 回填路径,免去手工摆放或报错;第一轮仍缺失
+# 时,backend 再上探一层到父目录搜一遍(排除第一轮根,见 backend.discover)。
 #
 # 三条硬约束:
 #   1. 限制深度   —— SEARCH_MAX_DEPTH,防深链/超长路径把扫描拖死
@@ -13,14 +14,15 @@
 #                    (见 app.AppGui.rediscover),绝不在主线程里跑。
 #
 # 可配置项就是本文件顶部的常量(直接改);find_binaries 的同名参数可按次
-# 覆盖,便于测试时传小深度/短超时。
+# 覆盖,便于测试时传小深度/短超时。exclude 参数跳过指定目录及其整棵子树,
+# 供「第一轮仍缺失就上探一层」的第二轮排除第一轮根(见 backend.discover)。
 
 import fnmatch
 import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, NamedTuple
+from typing import Dict, NamedTuple, Optional
 
 from .i18n import _t
 from .paths import resolve_program_dir
@@ -75,15 +77,28 @@ EXCLUDED_PATTERNS = (
 FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 
+class SearchRound(NamedTuple):
+    """上探那一轮(父目录)的统计;第一轮的统计就在 DiscoveryResult 自身"""
+
+    root: Path
+    scanned: int = 0
+    timed_out: bool = False
+    elapsed: float = 0.0
+
+
 class DiscoveryResult(NamedTuple):
-    """一次探测的结果;found 为本次新找到的『原始文件名 -> 绝对路径』"""
+    """一次探测的结果;found 为本次新找到的『原始文件名 -> 绝对路径』
+
+    parent_round 非 None = 仍缺失,又向上探了一轮(见 backend.discover)。
+    """
 
     found: Dict[str, Path]   # 类体注解会被求值,用 typing.Dict 保持 3.6+ 兼容
     root: Path
     elapsed: float = 0.0
-    scanned: int = 0          # 访问过的条目数(文件+目录)
-    timed_out: bool = False   # True = 到点收工,可能还有目录没走完
+    scanned: int = 0          # 访问过的条目数(文件+目录);上探时为两轮之和
+    timed_out: bool = False   # True = 到点收工(任一轮),可能还有目录没走完
     error: str = ""           # 非空 = 根本没法开始(根目录不存在等)
+    parent_round: Optional[SearchRound] = None  # None = 没有上探
 
 
 def _is_excluded(name: str) -> bool:
@@ -108,6 +123,15 @@ def _is_reparse(entry) -> bool:
     return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
 
 
+def _norm(path) -> str:
+    """路径归一(统一分隔符 + 小写):只做字符串比较,不解析符号链接
+
+    exclude 的比较两侧都走这里 —— 一侧来自调用方的 root,一侧来自 scandir
+    拼出的子路径,大小写/分隔符必须先抹平才比得上。
+    """
+    return os.path.normcase(os.path.normpath(os.fspath(path)))
+
+
 def current_root() -> Path:
     """本次探测实际会用的搜索根:SEARCH_ROOT 覆盖优先,否则程序自身目录
 
@@ -128,16 +152,21 @@ def describe_limits(max_depth: int = SEARCH_MAX_DEPTH,
 
 
 def find_binaries(names, root=None, max_depth: int = SEARCH_MAX_DEPTH,
-                  timeout: float = SEARCH_TIMEOUT) -> DiscoveryResult:
+                  timeout: float = SEARCH_TIMEOUT,
+                  exclude=None) -> DiscoveryResult:
     """在 root 下广度优先递归搜索 names 中的文件名(**阻塞**)
 
     广度优先保证先命中浅层 —— 程序目录自身的副本优先于深层子目录;
     全部 names 命中即提前返回。超时(或深度走完)时返回已扫到的部分并置
     timed_out,由调用方决定怎么提示。
 
+    exclude: 该目录本身及其整棵子树一律不进(上探第二轮用它排除第一轮已
+    搜过的根),传 Path/str;root 恰等于 exclude 时等于什么都不扫。
+
     只允许在工作线程调用,见模块头「后台线程」约束。
     """
     root_path = Path(root) if root is not None else current_root()
+    exclude_key = _norm(exclude) if exclude is not None else None
     started = time.monotonic()
     deadline = started + timeout if timeout and timeout > 0 else None
 
@@ -160,6 +189,8 @@ def find_binaries(names, root=None, max_depth: int = SEARCH_MAX_DEPTH,
             timed_out = True
             break
         dirpath, depth = queue.popleft()
+        if exclude_key is not None and _norm(dirpath) == exclude_key:
+            continue                      # 出队处判:连 root 自身也能排除
         try:
             it = os.scandir(dirpath)
         except OSError:
