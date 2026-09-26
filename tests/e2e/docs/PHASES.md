@@ -91,7 +91,7 @@ if __name__ == "__main__":
 
 - `helpers/injector.py` 的 `PROJECT_ROOT`：优先读环境变量 `TI_PROJECT_ROOT`，默认按 e2e 目录相对解析（与 common/paths.py 一致，不硬编码机器路径）
 - 构建产物：`<TI_PROJECT_ROOT>\build\bin\Release\`
-- 目标脚本内嵌在测试文件里（字符串），运行时写入 `_targets/`，避免 103 份 target 散落
+- 目标脚本内嵌在测试文件里（字符串），运行时写入 `_targets/`；该目录的 `*.py` 快照入库便于审阅，测试运行时会按测试正文覆盖重写，避免 103 份 target 手工维护散落
 - 测试期间禁止手动操作 WT 窗口（SendInput 干扰）
 
 ---
@@ -114,8 +114,9 @@ if __name__ == "__main__":
 | `common/reporter.py` | `Reporter` 类：PASS/FAIL/UNSUPPORTED/SKIP 计数、按类汇总、退出码 |
 | `common/runner_base.py` | 测试文件基类：setup（启动 cmd+WT+握手）/teardown（清理）、统一打印格式 |
 | `run_all.py` | 参数：`--list` / `--phase N` / `--cat <名>` / `<文件路径>` / 全量；扫描 `*/test_*.py`，逐文件独立进程运行，汇总报告（含 UNSUPPORTED） |
-| `_targets/`、`results/` | 运行时目录（.gitignore） |
-| `.gitignore` | `_targets/`、`results/`、`__pycache__/`、`*.pyc` |
+| `_targets/` | 目标脚本目录：`*.py` 为 `write_target()` 生成的快照（入库，勿手改，测试运行时重写）；`tabcomplete_marker.txt` 手工维护 |
+| `results/` | 运行时结果文件（.gitignore） |
+| `.gitignore` | `results/`、`__pycache__/`、`*.pyc` |
 | 冒烟测试 `vt_output/test_sgr_basic_colors.py` | 首个真实特性测试，验证整条链路 |
 
 ## 冒烟测试内容（提前做，验证基建）

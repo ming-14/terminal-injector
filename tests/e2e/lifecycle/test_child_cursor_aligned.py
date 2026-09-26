@@ -30,13 +30,41 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.session import TestSession
 from common import result as result_mod
-from common import paths
+from common import target as target_mod
 from common.childlog import injected_log_glob
 
 NAME = "child_cursor_aligned"
 
 TARGET_BODY = '''
 rec("READY", "PASS")
+done()
+'''
+
+# exp_mouse_move 目标正文：作为 python 子进程运行，进入 any-event 鼠标模式后收事件，
+# 用于触发子进程 LazyInit 的光标对齐路径（原先散落在 _targets/ 的孤儿快照，已内嵌）。
+MOUSE_BODY = r'''
+rec("READY", "PASS")
+time.sleep(2.0)
+h_in = get_std_in()
+set_mode(h_in, ENABLE_MOUSE_INPUT)
+h_out = get_std_out()
+write_bytes(h_out, b"\x1b[?1003h\x1b[?1006h")  # any-event 模式
+rec("READY2", "1")
+deadline = time.time() + 15.0
+evs = []
+while time.time() < deadline:
+    n = wintypes.DWORD(0)
+    _k.GetNumberOfConsoleInputEvents(h_in, ctypes.byref(n))
+    if n.value > 0:
+        rs = read_input_records(h_in, 16)
+        for r in rs:
+            if r.EventType == MOUSE_EVENT:
+                m = r.MouseEvent
+                evs.append("%x/%x" % (m.dwButtonState, m.dwEventFlags))
+                rec("EV" + str(len(evs)),
+                    "%08x,%04x" % (m.dwButtonState, m.dwEventFlags))
+    time.sleep(0.1)
+rec("COUNT", str(len(evs)))
 done()
 '''
 
@@ -50,8 +78,8 @@ def run() -> int:
             time.sleep(0.5)
 
             # 在 cmd 中执行一条超长命令（折行），生成 python 子进程
-            target_script = os.path.join(paths.TARGETS_DIR, "exp_mouse_move.py")
-            result_file = os.path.join(paths.RESULTS_DIR, "exp_mouse_move.txt")
+            target_script = target_mod.write_target("exp_mouse_move", MOUSE_BODY)
+            result_file = result_mod.result_file("exp_mouse_move")
             long_cmd = 'python "{}" "{}"'.format(target_script, result_file)
             s.type_text(long_cmd)
             time.sleep(0.3)

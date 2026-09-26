@@ -33,7 +33,7 @@ CHILD_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes, os as _os
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 k32.WriteConsoleW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
                               ctypes.c_uint, ctypes.POINTER(ctypes.c_ulong),
                               ctypes.c_void_p]

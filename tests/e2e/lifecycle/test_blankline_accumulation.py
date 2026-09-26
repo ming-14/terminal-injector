@@ -51,7 +51,7 @@ class _CSI(ctypes.Structure):
                 ("dwMaximumWindowSize", _COORD)]
 
 
-_k = ctypes.windll.kernel32
+_k = ctypes.WinDLL("kernel32")
 _k.GetConsoleScreenBufferInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_CSI)]
 _k.GetConsoleScreenBufferInfo.restype = wintypes.BOOL
 _k.ReadConsoleOutputCharacterW.argtypes = [wintypes.HANDLE, ctypes.c_wchar_p,

@@ -43,7 +43,7 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 k32.WriteConsoleW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
                               ctypes.c_uint, ctypes.POINTER(ctypes.c_ulong),
                               ctypes.c_void_p]
@@ -68,7 +68,7 @@ def _py_launcher_bitness():
     if not os.path.exists(path):
         return None
     bt = ctypes.c_ulong(0)
-    ok = ctypes.windll.kernel32.GetBinaryTypeW(
+    ok = ctypes.WinDLL("kernel32").GetBinaryTypeW(
         ctypes.c_wchar_p(path), ctypes.byref(bt))
     if not ok:
         return None

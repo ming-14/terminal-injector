@@ -25,7 +25,7 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 class CSI(ctypes.Structure):
     _fields_ = [("dwSize", ctypes.c_short * 2),
                 ("dwCursorPosition", ctypes.c_short * 2),

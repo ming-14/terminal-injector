@@ -24,7 +24,7 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 k32.SetConsoleOutputCP(65001)
 h_out = get_std_out()
 buf = "中文UTF8".encode("utf-8")

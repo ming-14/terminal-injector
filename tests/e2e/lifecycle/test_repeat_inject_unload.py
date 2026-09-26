@@ -41,7 +41,7 @@ class MODULEENTRY32(ctypes.Structure):
 
 
 def has_module(pid: int, name: str) -> bool:
-    k32 = ctypes.windll.kernel32
+    k32 = ctypes.WinDLL("kernel32")
     h = k32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
     if h in (INVALID_HANDLE_VALUE, 0):
         return False
@@ -86,7 +86,7 @@ class _CSI(ctypes.Structure):
                 ("dwMaximumWindowSize", _COORD)]
 
 
-_k = ctypes.windll.kernel32
+_k = ctypes.WinDLL("kernel32")
 _k.GetConsoleScreenBufferInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_CSI)]
 _k.GetConsoleScreenBufferInfo.restype = wintypes.BOOL
 _k.ReadConsoleOutputCharacterW.argtypes = [wintypes.HANDLE, ctypes.c_wchar_p,

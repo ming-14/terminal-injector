@@ -27,7 +27,7 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 k32.AllocConsole.argtypes = []
 k32.AllocConsole.restype = ctypes.c_int
 k32.FreeConsole.argtypes = []

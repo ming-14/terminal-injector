@@ -89,7 +89,7 @@ e2e/
 ├── common/               # 测试基建：session / result / target / paths / reporter
 ├── helpers/              # 复用 helpers：injector.py / input_sim.py / vt_capture.py
 ├── docs/PHASES.md        # 阶段实施计划、特性矩阵、已知问题清单（BUG/LIM 记录）
-├── _targets/             # 运行时生成的目标脚本（勿手改，被测试文件正文覆盖）
+├── _targets/             # 生成的目标脚本快照（入库，勿手改；测试运行时按测试正文覆盖重写）
 ├── results/              # 运行时结果文件 + summary.json（勿提交）
 └── <类别>/               # vt_output / console_api / cursor_buffer / keyboard /
                           # line_editor / modes / vt_passthrough / mouse /

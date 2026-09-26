@@ -53,7 +53,7 @@ def _read_clipboard() -> str:
             try:
                 h = user32.GetClipboardData(13)  # CF_UNICODETEXT
                 if h:
-                    ptr = ctypes.windll.kernel32.GlobalLock(h)
+                    ptr = ctypes.WinDLL("kernel32").GlobalLock(h)
                     if ptr:
                         try:
                             text = ctypes.wstring_at(ptr)

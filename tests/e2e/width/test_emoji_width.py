@@ -27,7 +27,7 @@ TARGET_BODY = '''
 rec("READY", "PASS")
 time.sleep(2.0)  # 等 DLL 注入/LazyInit（避免启动竞态）
 import ctypes
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32")
 h_out = get_std_out()
 text = "\U0001F600"  # 😀 代理对
 wbuf = ctypes.create_unicode_buffer(text)

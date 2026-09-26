@@ -41,7 +41,7 @@ class MODULEENTRY32(ctypes.Structure):
 
 
 def has_module(pid: int, name: str) -> bool:
-    k32 = ctypes.windll.kernel32
+    k32 = ctypes.WinDLL("kernel32")
     h = k32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
     if h in (INVALID_HANDLE_VALUE, 0):
         return False
