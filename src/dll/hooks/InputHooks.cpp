@@ -124,7 +124,12 @@ static HANDLE GetCachedStdin() {
 // （详见 HookCommon.h IsInputHandle 注释中的历史教训：模式位判断不可行）
 //
 // Hook 未安装时（GetNumberOfConsoleInputEvents_orig == nullptr）退化为直接调系统 API
+//
+// 用 LastErrorGuard 保证对调用方透明：对非控制台句柄（CPython 锁句柄、asyncio 内部句柄、
+// socket 等）调用会失败并置 ERROR_INVALID_HANDLE(6)，而本函数在 WaitForSingleObject /
+// ReadFile 等 Detour 内被高频调用，污染 last-error 会破坏应用行为（详见 HookCommon.h）。
 bool IsInputHandleSlow(HANDLE h) {
+    LastErrorGuard guard;
     DWORD cnt = 0;
     if (GetNumberOfConsoleInputEvents_orig != nullptr) {
         return GetNumberOfConsoleInputEvents_orig(h, &cnt);

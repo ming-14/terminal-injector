@@ -24,11 +24,45 @@ namespace terminjector::hooks {
     using name##_t = sig;          \
     static name##_t* name##_orig = nullptr
 
+// ============================================================
+// LastErrorGuard：Detour 内探测调用的 last-error 透明守卫
+// ============================================================
+//
+// 背景（2026-09-26 修复，Textual/asyncio 注入后画面定格）：
+//   为判断句柄类型，IsConsoleHandle / IsInputHandleSlow 会对**任意句柄**调
+//   GetFileType / GetNumberOfConsoleInputEvents。对不匹配的句柄这些调用会失败，
+//   并把**当前线程的 GetLastError 置为 ERROR_INVALID_HANDLE(6)**。
+//   而它们的调用点在 WriteFile / ReadFile / WaitForSingleObject(Ex) 等 Detour 内，
+//   这些 API 被应用高频调用（Python 的文件 IO、CPython 线程锁、asyncio 内部）→
+//   应用线程随后读自己的 last-error 时读到我们留下的 6，行为被破坏
+//   （实测：asyncio 在 IocpProactor._poll 抛 OSError [WinError 6] → 事件循环死亡
+//    → TUI 画面定格）。
+//
+//   Detour 必须对调用方透明 —— 凡在 Detour 路径上做探测性 Win32 调用，都用本守卫包住。
+//   用法：函数内第一行 `LastErrorGuard guard;`，析构时自动还原。
+//
+// 注意：仅用于"探测/判定"这类调用；Detour 主逻辑本应返回给调用方的错误码不受影响
+//       （守卫只覆盖自身作用域，返回前已还原为进入时的值）。
+class LastErrorGuard {
+public:
+    LastErrorGuard() noexcept : m_savedError(GetLastError()) {}
+    ~LastErrorGuard() noexcept { SetLastError(m_savedError); }
+
+    LastErrorGuard(const LastErrorGuard&) = delete;
+    LastErrorGuard& operator=(const LastErrorGuard&) = delete;
+    LastErrorGuard(LastErrorGuard&&) = delete;
+    LastErrorGuard& operator=(LastErrorGuard&&) = delete;
+
+private:
+    DWORD m_savedError;
+};
+
 // 判断句柄是否为 Console 句柄（CONOUT$/CONIN$）
 // Console 是 char device，GetFileType 返回 FILE_TYPE_CHAR
 // 日志文件句柄是 FILE_TYPE_DISK，会被排除
 inline bool IsConsoleHandle(HANDLE h) {
     if (h == nullptr || h == INVALID_HANDLE_VALUE) return false;
+    LastErrorGuard guard;   // 探测调用不得污染调用方的 last-error（见上方 LastErrorGuard 注释）
     return GetFileType(h) == FILE_TYPE_CHAR;
 }
 

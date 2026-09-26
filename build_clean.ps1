@@ -65,4 +65,9 @@ $p = Start-Process -FilePath 'powershell.exe' `
 Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 
 Write-Host "[clean-build] exit=$($p.ExitCode)"
-exit $p.ExitCode
+
+# 成功时不调用 exit：脚本内的 exit 会拆断上游管道（如 `.\build_clean.ps1 ... 2>&1 |
+# Select-Object -Last N`），调用方会把"管道被中断"误判为非零退出 —— 实测同一份构建
+# 加管道调用报 exit=1、不加管道报 exit=0，且输出量越大（真实编译）越容易触发。
+# 脚本正常结束即为 0，故成功路径直接返回；失败路径仍 exit 以保证错误码传递。
+if ($p.ExitCode -ne 0) { exit $p.ExitCode }

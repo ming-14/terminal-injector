@@ -119,6 +119,26 @@ injected_dll（运行时独立编译注入）
 | `FontHooks` | SetConsoleFont 等字体相关 |
 | `HookWhitelist` | 受保护 API 白名单（防止对自身/关键函数误 hook） |
 
+### 5.1 Detour 透明性约束（新增 Hook 必读）
+
+Detour 是"透明代理"：除被 Hook 的那个 API 的返回值/出参外，**不得改变调用方线程的可见状态**。
+已知最容易踩的是 `GetLastError`：
+
+- `IsConsoleHandle`（用 `GetFileType`）与 `IsInputHandleSlow`（用 `GetNumberOfConsoleInputEvents`）
+  为判定句柄类型，会对**任意句柄**调用这两个 API。对非控制台句柄（文件/事件/管道/socket、
+  CPython 锁句柄等）调用会失败，并把**当前线程的 last-error 置为 `ERROR_INVALID_HANDLE(6)`**。
+- 这两个判定在 `WriteFile` / `ReadFile` / `WaitForSingleObject(Ex)` 等 Detour 内被调用，
+  而这些 API 被应用高频调用（Python 文件 IO、CPython 线程锁、asyncio 内部）→
+  应用随后读自己的 last-error 时读到 `6`。
+- **实际症状（2026-09-26）**：注入后运行 Textual 应用 → `asyncio` 在 `IocpProactor._poll`
+  抛 `OSError [WinError 6]` → 事件循环死亡 → **TUI 画面定格**（鼠标与定时器全部失效）。
+- **修复**：`HookCommon.h` 的 `LastErrorGuard`（RAII 保存/恢复 last-error），
+  `IsConsoleHandle` / `IsInputHandleSlow` 各自加守卫。回归：
+  `tests/e2e/console_api/test_detour_lasterror_transparency.py`。
+
+**新增 Detour 时**：凡在 Detour 路径上做探测性 Win32 调用（判断句柄类型、探测能力等），
+一律用 `LastErrorGuard` 包住。
+
 ## 6. 状态管理（`src/dll/state`）
 
 | 组件 | 职责 |

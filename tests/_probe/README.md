@@ -39,6 +39,7 @@
 | `child_echo_position_probe.py`（见上表） | 行编辑回显落在屏幕第几行第几列，验证 `EmitLineEcho` 是否推进 `VtCursorTracker` |
 | `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针 |
 | `pywezterm_smoke.py` | pywezterm 库自检：`Pty` 起进程 + `Terminal` 还原屏幕 + 断言标记，用于确认测试环境可用 |
+| `t_textual_asyncio_freeze.py` | ★ 注入后跑 Textual TUI（需 `TI_TUI_TARGET` 指定脚本，如 taskboard.py）双轨对照：断言**画面仍在更新**且**鼠标生效**。2026-09-26「Detour 污染 `GetLastError` 致 asyncio 事件循环死亡、画面定格」修复的端到端判据 |
 | `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
 
 `timing.py` / `slack.py` 依赖同目录的微型目标 `hello.py` / `firstout.py`。
