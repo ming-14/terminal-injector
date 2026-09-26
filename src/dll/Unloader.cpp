@@ -401,46 +401,91 @@ void Unloader::DoUnload() {
     ExitThread(0);
 }
 
-// 从重放字节流中剔除「鼠标上报」DECSET/DECRST 序列（CSI ? <n>[;<n>...] h|l，
-// 其中 n ∈ {1000,1002,1003,1006,1015}）。
+// 从重放字节流中剔除「面向 WT 的终端模式 / 键盘协议」序列。
 //
 // 背景（2026-09-26 修复：卸载后旧 WT 的 shell 崩溃 0xc0000005）
-//   VtReplayBuffer 记录的是**面向 WT 的**原始 VT 输出，其中包含应用（如 Textual）
-//   发送的鼠标上报使能序列。卸载重放把它写进 ConHost 后，**旧 WT 会照单执行**：
-//   于是即便目标 shell 从未请求鼠标（inputMode 无 ENABLE_MOUSE_INPUT），
-//   旧 WT 也开始上报鼠标 → 目标 shell 收到意外鼠标输入 → ACCESS_VIOLATION。
-//   实测：注入后跑 Textual TUI 再卸载，旧 WT 的 pwsh 敲任意命令即崩；不跑 TUI 则不崩
-//   （不跑 TUI 时这些序列从未产生）。全屏 TUI 子进程被误判为 lineShell=1 时会走
-//   全量重放，把整个会话 VT（含鼠标序列）写进**共享 ConHost**，故必须在重放侧兜底。
-//   这些序列只服务 WT 侧输入语义，与 ConHost 画面恢复无关，剔除不影响画面。
+//   VtReplayBuffer 记录的是**面向 WT 的**原始 VT 输出。会话期应用（如 Textual）
+//   会发出成组的终端模式序列，实测启动输出即：
+//       ?1049h ?1000h ?1003h ?1015h ?1006h ?25l ?1004h >1u ?2004h
+//   卸载重放把这些原样写进目标 ConHost 后，**旧 WT 会照单执行**，于是：
+//     - `>1u`（Kitty 键盘协议）→ **WT 改用 Kitty 编码所有按键**，目标 shell 收到的
+//       不再是普通按键 → PSReadLine/.NET 解析异常输入 → ACCESS_VIOLATION
+//       （这正是"只有真 WT 才崩、ConPTY 不崩"的原因：ConPTY 不支持 `>1u`）
+//     - `?1049h`（备用屏）/ `?2004h`（括号粘贴）/ `?1004h`（焦点上报）等
+//       同样会改变旧 WT 的输入编码与缓冲状态
+//     - 鼠标上报 `?1000h ?1003h ?1015h ?1006h` 让旧 WT 上报目标从未请求的鼠标
+//   这些序列只服务 **WT 侧输入语义**，与 ConHost 画面恢复无关，必须剔除。
 //
-// 保守策略：一个序列里只要含任一鼠标模式，整条剔除（多模式合并写法极少见，
-// 宁可少设一个无关模式，也不能漏掉鼠标上报）。
-static void StripMouseReportSequences(const char* in, size_t len, std::string& out) {
-    auto isMouseMode = [](int v) {
-        return v == 1000 || v == 1002 || v == 1003 || v == 1006 || v == 1015;
+// 剔除范围：
+//   1. `CSI ? <n>[;<n>...] h|l`，n ∈ 终端模式白名单（鼠标/焦点/备用屏/括号粘贴/光标）
+//   2. `CSI > <n>[;<n>...] u`（Kitty 键盘协议 push）、`CSI = <n> u`（set）
+//   3. `CSI < u`（Kitty pop）
+//
+// 保守策略：一条序列里只要含任一目标模式，整条剔除（多模式合并写法极少见，
+// 宁可少设一个无关模式，也不能漏掉输入编码类序列）。
+static void StripTerminalModeSequences(const char* in, size_t len, std::string& out) {
+    // 会改变「终端侧输入语义 / 显示缓冲」的 DEC 私有模式
+    auto isInputMode = [](int v) {
+        switch (v) {
+            case 25:     // 光标显示（DECTCEM）——显示态由 ConHost 自身决定
+            case 1000:   // 鼠标：VT200
+            case 1002:   // 鼠标：按钮事件
+            case 1003:   // 鼠标：任意事件
+            case 1004:   // 焦点上报
+            case 1005:   // 鼠标：UTF-8 扩展
+            case 1006:   // 鼠标：SGR 格式
+            case 1015:   // 鼠标：urxvt 高亮
+            case 1016:   // 鼠标：SGR 像素
+            case 1049:   // 备用屏（含光标保存/恢复）
+            case 2004:   // 括号粘贴
+            case 2026:   // 同步输出
+                return true;
+            default:
+                return false;
+        }
     };
+
     out.clear();
     out.reserve(len);
     size_t i = 0;
     while (i < len) {
-        if (in[i] == '\x1b' && i + 3 < len && in[i + 1] == '[' && in[i + 2] == '?') {
-            size_t j = i + 3;
-            bool hasMouse = false;
-            bool wellFormed = true;
-            while (true) {
-                if (j >= len || in[j] < '0' || in[j] > '9') { wellFormed = false; break; }
-                int val = 0;
-                while (j < len && in[j] >= '0' && in[j] <= '9') {
-                    if (val < 1000000) val = val * 10 + (in[j] - '0');
-                    ++j;
+        if (in[i] == '\x1b' && i + 2 < len && in[i + 1] == '[') {
+            const char kind = in[i + 2];
+
+            // ---- 形态 1：CSI ? <n>[;<n>...] h|l ----
+            if (kind == '?') {
+                size_t j = i + 3;
+                bool hit = false;
+                bool wellFormed = true;
+                while (true) {
+                    if (j >= len || in[j] < '0' || in[j] > '9') { wellFormed = false; break; }
+                    int val = 0;
+                    while (j < len && in[j] >= '0' && in[j] <= '9') {
+                        if (val < 1000000) val = val * 10 + (in[j] - '0');
+                        ++j;
+                    }
+                    if (isInputMode(val)) hit = true;
+                    if (j < len && in[j] == ';') { ++j; continue; }
+                    break;
                 }
-                if (isMouseMode(val)) hasMouse = true;
-                if (j < len && in[j] == ';') { ++j; continue; }
-                break;
+                if (wellFormed && hit && j < len && (in[j] == 'h' || in[j] == 'l')) {
+                    i = j + 1;   // 整条剔除
+                    continue;
+                }
             }
-            if (wellFormed && hasMouse && j < len && (in[j] == 'h' || in[j] == 'l')) {
-                i = j + 1;   // 整条剔除
+            // ---- 形态 2：CSI > <n>[;<n>...] u（Kitty push）/ CSI = <n> u（set）----
+            else if (kind == '>' || kind == '=') {
+                size_t j = i + 3;
+                bool wellFormed = false;
+                while (j < len && in[j] >= '0' && in[j] <= '9') { wellFormed = true; ++j; }
+                if (wellFormed && j < len && in[j] == 'u') {
+                    i = j + 1;
+                    continue;
+                }
+            }
+            // ---- 形态 3：CSI < u（Kitty pop）----
+            else if (kind == '<' && i + 3 < len && in[i + 3] == 'u') {
+                i = i + 4;
                 continue;
             }
         }
@@ -668,10 +713,12 @@ void Unloader::ReplaySessionToConHost() {
     }
 
     // 4.2 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
-    //     先剔除鼠标上报序列：它们面向 WT，写进 ConHost 会被旧 WT 执行，
-    //     导致目标 shell 收到未请求的鼠标输入（见 StripMouseReportSequences 注释）
+    //     先剔除「面向 WT 的终端模式 / 键盘协议」序列（鼠标上报、Kitty 键盘
+    //     `>1u`、备用屏 `?1049h`、括号粘贴 `?2004h` 等）——它们会被旧 WT 照单
+    //     执行，改变其输入编码，导致目标 shell 收到异常输入而崩溃。
+    //     见 StripTerminalModeSequences 注释。
     std::string replayBytes;
-    StripMouseReportSequences(vt.data(), replayEnd, replayBytes);
+    StripTerminalModeSequences(vt.data(), replayEnd, replayBytes);
     const size_t strippedBytes = replayEnd - replayBytes.size();
 
     constexpr DWORD kChunkBytes = 64 * 1024;
@@ -687,7 +734,7 @@ void Unloader::ReplaySessionToConHost() {
         }
         offset += written;
     }
-    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost (stripped %zu mouse-report bytes)",
+    LOG_INFO("Replay: replayed %zu/%zu VT bytes to ConHost (stripped %zu terminal-mode bytes)",
              offset, replayBytes.size(), strippedBytes);
 
     // 5. 恢复 ConHost 输出模式（含 VT 位原状）

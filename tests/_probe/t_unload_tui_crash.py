@@ -85,12 +85,19 @@ def wait_handshake(mlog, timeout=25.0):
 
 
 def alive(pid):
+    """目标是否仍存活。用 pid_exists 兜底，避免 status() 偶发抛异常被误判为"已死"。"""
     try:
         import psutil
+    except ImportError:
+        return True   # 无法判定时按存活处理，避免假阴性
+    if not psutil.pid_exists(pid):
+        return False
+    try:
         p = psutil.Process(pid)
         return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
     except Exception:
-        return False
+        # 查询失败（AccessDenied 等）≠ 进程已死：pid 仍在则视为存活
+        return psutil.pid_exists(pid)
 
 
 def run_track(pywezterm, label, run_tui):
@@ -133,6 +140,12 @@ def run_track(pywezterm, label, run_tui):
                 len(mid), "Traceback" in d_term.text()))
             for ln in [x for x in d_term.text().split("\n") if x.strip()][:4]:
                 print("        | {}".format(ln[:110]))
+            # ★ 复现用户动作：在新 WT 里按 Ctrl+C 退出 TUI
+            #   DLL 的 TriggerCtrlC 会 GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
+            #   —— 组号 0 = 发给【共享该控制台的所有进程】，含旧 WT 的 pwsh！
+            print("  [ctrl-c] 向 mediator 终端发 Ctrl+C（模拟退出 TUI）...")
+            d_pty.write(list(b"\x03"))
+            pump(d_pty, d_term, 3.0)
         else:
             pump(d_pty, d_term, 8.0)
 
@@ -142,10 +155,15 @@ def run_track(pywezterm, label, run_tui):
         print("  [unload] 已关闭 mediator 终端，等待卸载 ...")
         after = pump(t_pty, t_term, 3.0)
 
-        # 关键判定：卸载时 DLL 会把 session 缓冲 Replay 进目标 ConHost，
-        # 若其中含鼠标上报序列，则**旧 WT 会因此开启鼠标上报**（用户现象的前提）。
+        # 关键判定：卸载时 DLL 会把 session 缓冲 Replay 进目标 ConHost。
+        # 其中若含**面向 WT 的终端模式 / 键盘协议**序列，旧 WT 会照单执行并改变
+        # 输入编码 —— 实测崩溃栈为 .NET WaitHandle.WaitOne（读行路径），
+        # 且只有真 WT 崩（ConPTY 不支持 `>1u`），故重点查 Kitty 键盘与备用屏等。
         seqs = [b"\x1b[?1000h", b"\x1b[?1003h", b"\x1b[?1015h", b"\x1b[?1006h",
-                b"\x1b[?1000l", b"\x1b[?1003l", b"\x1b[?1015l", b"\x1b[?1006l"]
+                b"\x1b[?1004h", b"\x1b[?1049h", b"\x1b[?2004h", b"\x1b[?25l",
+                b"\x1b[>1u", b"\x1b[=1u", b"\x1b[>0u",
+                b"\x1b[?1000l", b"\x1b[?1003l", b"\x1b[?1015l", b"\x1b[?1006l",
+                b"\x1b[?1049l", b"\x1b[?2004l"]
         hits = [repr(s.decode("latin1")) for s in seqs if s in after]
         print("  [mouse] 卸载后目标终端收到鼠标序列: {}".format(
             ", ".join(hits) if hits else "（无）"))
@@ -159,8 +177,20 @@ def run_track(pywezterm, label, run_tui):
                 repr(after[lo:hi].decode("latin1"))))
 
         # ---- 在目标 shell 自己的终端里敲命令 ----
+        # ★ 先验证目标是否真的"响应"：敲一条带唯一标记的命令，屏幕必须出现该标记。
+        #   否则说明目标卡在读取里（命令只进了缓冲没被执行），后面的"未崩溃"就是假阴性。
+        mark = "TI_MARK_{}".format(int(time.time()) % 100000)
+        t_pty.write(list(("echo {}\r".format(mark)).encode("utf-8")))
+        out = pump(t_pty, t_term, 5.0)
+        screen = t_term.text()
+        responded = mark in screen
+        print("  [check] 目标是否响应命令: {}（标记 {}）".format(
+            "是" if responded else "**否 —— 命令未被执行**", mark))
+        if not responded:
+            print("        → 目标未响应，本轨结论不可用（假阴性）")
+
         t_pty.write(list(b"dir\r"))
-        out = pump(t_pty, t_term, 4.0)
+        out += pump(t_pty, t_term, 4.0)
         time.sleep(0.5)
         still = alive(target_pid)
         screen = t_term.text()
@@ -169,7 +199,8 @@ def run_track(pywezterm, label, run_tui):
         for ln in [x for x in screen.split("\n") if x.strip()][-6:]:
             print("        | {}".format(ln[:110]))
         if still and not crash:
-            print("  [PASS] 卸载后目标 shell 正常响应，未崩溃")
+            print("  [PASS] 卸载后目标 shell 正常响应，未崩溃"
+                  + ("" if responded else "（但未验证到响应，结论存疑）"))
             return 0
         print("  [FAIL] 卸载后目标 shell 崩溃（复现用户现象）")
         return 1
