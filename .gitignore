@@ -137,8 +137,8 @@ reference/
 
 # === 本项目工作记忆（非工程资产） ===
 .workbuddy/
+.workbuddy-ai/
 
 # === tests/_probe/ 下的运行时产物（探针脚本本身入库） ===
-tests/_probe/_*/
-tests/_probe/_t0.txt
+tests/_probe/_*
 tests/_probe/probe32/

@@ -343,9 +343,25 @@ void Mediator::BridgeLoop() {
     // Phase 10+ 处理 Ping / Shutdown 等控制流
     LOG_INFO("BridgeLoop starting (stdin<->pipe, pipe<->stdout, sizeWatcher, childSession)");
 
-    // Phase 14：设置 VtParser DSR CPR 回调
-    // 当 WT 响应 DSR 查询时，发送 WtStateReport(type=1) 给 DLL 更新 VirtualConsoleState
-    m_vtParser.SetCursorReportCallback([this](int col, int row) {
+    // Phase 14/15：WT 的 DSR/DA 应答只属于"当前前台"。
+    // 有活跃子进程时，该应答是子进程查询的（原始字节也会路由给子进程），
+    // 不能再回灌父进程 —— 否则子进程 TUI 的状态会覆盖父进程：
+    // TUI 全屏重绘时光标常在左上角，WT 于是应答 (1,1)，父进程 VCS 被改成 (0,0)，
+    // 子进程退出后父进程就把新 prompt 写到第 0 行（真机现象：输入回显落在 banner 行）。
+    auto hasActiveChild = [this]() {
+        std::lock_guard<std::mutex> lock(m_childMutex);
+        for (const auto& s : m_childSessions) {
+            if (s->IsActive()) return true;
+        }
+        return false;
+    };
+
+    // Phase 14：WT 响应 DSR 查询时，发 WtStateReport(type=1) 更新父进程 VirtualConsoleState
+    m_vtParser.SetCursorReportCallback([this, hasActiveChild](int col, int row) {
+        if (hasActiveChild()) {
+            LOG_INFO("WtStateReport cursor skipped (child active): VT col=%d row=%d", col, row);
+            return;
+        }
         protocol::WtStateReportPayload wt{};
         wt.type = 1;  // cursor_report
         wt.cols = col;
@@ -356,9 +372,12 @@ void Mediator::BridgeLoop() {
                  col, row, sent, pkt.size());
     });
 
-    // Phase 15：设置 VtParser DA 报告回调
-    // 当 WT 响应 DA 查询时，发送 WtStateReport(type=2) 给 DLL 存储终端能力
-    m_vtParser.SetDaReportCallback([this](int caps) {
+    // Phase 15：WT 响应 DA 查询时，发 WtStateReport(type=2) 存储父进程终端能力
+    m_vtParser.SetDaReportCallback([this, hasActiveChild](int caps) {
+        if (hasActiveChild()) {
+            LOG_INFO("WtStateReport DA skipped (child active): caps=%d", caps);
+            return;
+        }
         protocol::WtStateReportPayload wt{};
         wt.type = 2;  // da_report
         wt.cols = caps;

@@ -30,10 +30,25 @@ hooks::SendToMediator(vt::kDaPrimaryQuery, strlen(vt::kDaPrimaryQuery),
 
 ### 2.2 Mediator VtParser 解析
 
+WT 的 DSR/DA 应答只属于**当前前台**：有活跃子进程时，该应答是子进程查询的
+（原始字节同样路由给子进程），不能再回灌父进程 —— 否则子进程 TUI 的状态会覆盖父进程。
+典型故障：TUI 全屏重绘时光标在左上角，WT 应答 `(1,1)`，父进程 VCS 被改成 `(0,0)`，
+子进程退出后父进程把新 prompt 写到第 0 行（表现为注入后输入回显落在 banner 行）。
+
 ```cpp
 // Mediator.cpp BridgeLoop
+// 有活跃子进程 = 应答属于子进程，跳过对父进程的回灌
+auto hasActiveChild = [this]() {
+    std::lock_guard<std::mutex> lock(m_childMutex);
+    for (const auto& s : m_childSessions) {
+        if (s->IsActive()) return true;
+    }
+    return false;
+};
+
 // Phase 14：设置 VtParser DSR CPR 回调
-m_vtParser.SetCursorReportCallback([this](int col, int row) {
+m_vtParser.SetCursorReportCallback([this, hasActiveChild](int col, int row) {
+    if (hasActiveChild()) return;
     protocol::WtStateReportPayload wt{};
     wt.type = 1;  // cursor_report
     wt.cols = col;
@@ -43,7 +58,8 @@ m_vtParser.SetCursorReportCallback([this](int col, int row) {
 });
 
 // Phase 15：设置 VtParser DA 报告回调
-m_vtParser.SetDaReportCallback([this](int caps) {
+m_vtParser.SetDaReportCallback([this, hasActiveChild](int caps) {
+    if (hasActiveChild()) return;
     protocol::WtStateReportPayload wt{};
     wt.type = 2;  // da_report
     wt.cols = caps;

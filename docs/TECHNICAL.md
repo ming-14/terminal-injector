@@ -96,7 +96,8 @@ injected_dll（运行时独立编译注入）
 4. 中继**不接管 Console**（启动器本身不产出终端内容）；"32 位程序本体被接管"记为 `TODO(32bit-target)`。
 5. 中继的接收循环必须用 `PeekNamedPipe` 轮询而非阻塞 `RecvPacket` —— 同步管道句柄上挂起的 `ReadFile` 会堵住同句柄的 `WriteFile`，使上报帧永远发不出去（详见 §8 与 `tests/_probe/pipe_io_serialize_probe.py`）。
 
-**KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则 ENTER 残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。
+**KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`/`ReadConsoleInputW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则唤醒键残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。
+唤醒事件按目标当前读模式选择：熟模式（`ENABLE_LINE_INPUT`，如 cmd 的 `ReadConsoleW`）只在收到 `\r` 时返回，必须写回车（shell 会当成一次空回车，经典 ConHost 下由 LazyInit 行首覆盖处理）；原始模式（如 PSReadLine 的 `ReadConsoleInputW`）任意事件即返回，改用无字符的 F24 键（按下+抬起），shell 忽略它、不产生空命令行回显（否则注入后凭空多出一行 prompt）。
 
 ## 5. Hook 体系
 

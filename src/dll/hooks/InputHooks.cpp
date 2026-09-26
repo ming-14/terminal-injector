@@ -1143,14 +1143,14 @@ void RegisterInputHooks() {
 }
 
 // ============================================================
-// KickStartBlockedReaders：唤醒阻塞在原 ReadConsoleW 的线程
+// KickStartBlockedReaders：唤醒阻塞在原读 API 的线程
 // ============================================================
 // 背景：MinHook 是 inline hook（修改函数入口字节），
-//   若目标线程在 Hook 安装前已进入 ReadConsoleW 阻塞，
-//   Hook 对它无效——它永远卡在原 ReadConsoleW 等 ConHost 返回。
+//   若目标线程在 Hook 安装前已进入 ReadConsoleW/ReadConsoleInputW 阻塞，
+//   Hook 对它无效——它永远卡在原 API 等 ConHost 返回。
 //
-// 方案：向 ConHost 写一个回车键事件（用 orig 绕过 Hook），
-//   让原 ReadConsoleW 返回（空行），目标程序下次调用走 Detour。
+// 方案：向 ConHost 写一个唤醒按键事件（用 orig 绕过 Hook），让原读调用返回，
+//   目标程序下次调用走 Detour。事件类型按目标读模式选择，见下方 lineInput 判断。
 //
 // 注意：
 //   - 必须在 Hook 已 InstallAll 后调用（orig 已被 MinHook 填充）
@@ -1180,21 +1180,31 @@ void KickStartBlockedReaders() {
         return;
     }
 
-    // 构造回车键事件（按下 + 释放）
-    // ReadConsoleW 在 ENABLE_LINE_INPUT 模式下收到 \r 才返回
+    // 唤醒事件按目标当前的读模式选择：
+    //   · 熟模式（ENABLE_LINE_INPUT，如 cmd 的 ReadConsoleW）只在收到 '\r' 时返回，
+    //     必须写一个回车键事件；shell 会把它当成一次空回车，多打印一行 prompt
+    //     （经典 ConHost 下由 LazyInit 的行首覆盖处理掉）。
+    //   · 原始模式（如 PSReadLine 用 ReadConsoleInputW 逐键读）任意事件即返回；
+    //     改用无字符的 F24 键（按下 + 抬起）唤醒，shell 会忽略它，不产生空命令行
+    //     回显 —— 否则注入后凭空多出一行 prompt，后续命令行整体下移一行。
+    // 读模式未知时按熟模式处理：写回车总能唤醒，是历史行为，不会让目标卡住。
+    DWORD conMode = 0;
+    const bool lineInput = !GetConsoleMode(hStdin, &conMode) ||
+                           (conMode & ENABLE_LINE_INPUT) != 0;
+
+    const WORD wakeVk = lineInput ? VK_RETURN : VK_F24;
+
     INPUT_RECORD recs[2];
     ZeroMemory(recs, sizeof(recs));
 
-    // 回车按下
     recs[0].EventType = KEY_EVENT;
     recs[0].Event.KeyEvent.bKeyDown = TRUE;
     recs[0].Event.KeyEvent.wRepeatCount = 1;
-    recs[0].Event.KeyEvent.wVirtualKeyCode = VK_RETURN;
-    recs[0].Event.KeyEvent.wVirtualScanCode = static_cast<WORD>(MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC));
-    recs[0].Event.KeyEvent.uChar.UnicodeChar = L'\r';
+    recs[0].Event.KeyEvent.wVirtualKeyCode = wakeVk;
+    recs[0].Event.KeyEvent.wVirtualScanCode = static_cast<WORD>(MapVirtualKeyW(wakeVk, MAPVK_VK_TO_VSC));
+    recs[0].Event.KeyEvent.uChar.UnicodeChar = lineInput ? L'\r' : 0;
     recs[0].Event.KeyEvent.dwControlKeyState = 0;
 
-    // 回车释放
     recs[1] = recs[0];
     recs[1].Event.KeyEvent.bKeyDown = FALSE;
 
@@ -1202,8 +1212,8 @@ void KickStartBlockedReaders() {
     // 用 orig 调用，绕过 Hook（避免写到 InputQueue）
     BOOL ok = WriteConsoleInputW_orig(hStdin, recs, 2, &written);
     DWORD err = ok ? 0 : GetLastError();
-    LOG_INFO("KickStart: wrote ENTER to ConHost, ok=%d written=%lu err=%lu h=%p%s",
-             ok, written, err, hStdin,
+    LOG_INFO("KickStart: wrote wake key (lineInput=%d vk=0x%02X) ok=%d written=%lu err=%lu h=%p%s",
+             lineInput ? 1 : 0, wakeVk, ok, written, err, hStdin,
              (hConIn != INVALID_HANDLE_VALUE && hConIn != nullptr) ? " (via CONIN$)" : "");
 
     // 关闭自己打开的 CONIN$ 句柄（GetStdHandle 路径的不关）
