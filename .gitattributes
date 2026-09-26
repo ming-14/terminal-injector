@@ -1,1 +1,3 @@
-* text=auto
+# Windows 工程:仓库内统一归一化为 LF,检出到工作区统一写 CRLF,
+# 免得脚本/编辑器写出 LF 后 git 长期报 "LF will be replaced by CRLF" 并标 M
+* text=auto eol=crlf
