@@ -53,7 +53,6 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
         self.app_start = datetime.now().replace(microsecond=0)
         self._discovering = False   # 后台探测进行中(见 rediscover)
 
-        self._check_binaries()
         self._build_ui()
         self.after(100, self.tasks.poll)
         self.after(3000, self._auto_refresh_loop)
@@ -64,21 +63,15 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
         self.refresh()
 
     def _auto_refresh_loop(self):
-        """自动刷新轮询:开启且空闲时每 3 秒刷新一次列表"""
-        if self.auto_refresh_var.get() and not self.tasks.busy:
+        """自动刷新轮询:开启且空闲时每 3 秒刷新一次列表
+
+        exe 缺失时静默跳过:refresh() 会记一条 error,这里每轮都调就成了
+        每 3 秒刷一条同类日志;且缺 exe 时列表本就刷不出来。
+        """
+        if self.auto_refresh_var.get() and not self.tasks.busy \
+                and self.backend.exe_path.exists():
             self.refresh()
         self.after(3000, self._auto_refresh_loop)
-
-    # ---------- 初始化 ----------
-
-    def _check_binaries(self):
-        """启动校验 exe/dll 是否就位,缺失则提示但允许启动(仅刷新会失败)"""
-        missing = self.backend.missing_binaries()
-        if missing:
-            messagebox.showwarning(
-                _t("missing_files"),
-                _t("missing_files_msg").format(
-                    ", ".join(missing), EXE_NAME, DLL_NAME))
 
     # ---------- exe/dll 自动探测 ----------
 
@@ -137,6 +130,12 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
             else:
                 self.log(_t("disc_not_found").format(
                     limits, res.scanned, missing), "err")
+            # 本目录 + 上探父目录两轮(或第一轮就扫完)仍缺失才弹窗;
+            # res.error 分支在上面已 return,不在此列
+            messagebox.showwarning(
+                _t("missing_files"),
+                _t("missing_files_msg").format(
+                    missing, EXE_NAME, DLL_NAME))
             return
         # 已齐:补上的可能有 exe,版本号与列表都要重取
         if self.backend.exe_path.exists():
@@ -205,7 +204,16 @@ class InjectorGui(MenuMixin, ToolbarMixin, TableMixin, LogMixin,
     # ---------- 列表 ----------
 
     def refresh(self):
-        """刷新进程列表(后台执行 --list-targets --json),只读、不锁 UI"""
+        """刷新进程列表(后台执行 --list-targets --json),只读、不锁 UI
+
+        exe 缺失时不派发子进程:subprocess 必抛 FileNotFoundError,一路走
+        refresh_err 回到 _on_task_error 弹 showerror —— 启动 + 3 秒自动
+        刷新会连环弹窗。改为只记一条 error(用户决策:不弹窗,日志即可);
+        路径补齐后由 _on_discovered 回填并刷新。
+        """
+        if not self.backend.exe_path.exists():
+            self.log(_t("refresh_no_exe").format(EXE_NAME), "err")
+            return
         self.tasks.run_readonly(self.backend.list_targets,
                                 self._on_targets)
 

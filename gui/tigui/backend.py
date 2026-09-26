@@ -40,7 +40,7 @@ class InjectorBackend:
             self._log_sink(text, tag)
 
     def missing_binaries(self):
-        """启动校验:返回缺失的二进制名(缺失仅提示,不阻塞启动)"""
+        """返回缺失的二进制名(为空=都就位;缺失不阻塞启动,由 rediscover 兜)"""
         return [p.name for p in (self.exe_path, self.dll_path)
                 if not p.exists()]
 

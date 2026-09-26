@@ -19,7 +19,9 @@
 #     支持过滤与自动刷新
 #   - 一键注入选中进程(--inject,可选管道名),远程卸载(--unload-remote)
 #   - 卸载所需的 injected.dll 基址用 ctypes 查询目标进程模块,无需手工输入
-#   - 缺失 exe/dll 时自动在后台递归探测(深度/超时/排除目录见 tigui/discover.py)
+#   - 缺失 exe/dll 时自动在后台递归探测(深度/超时/排除目录见 tigui/discover.py),
+#     本目录 + 上探父目录两轮都缺失才弹警告窗;刷新(启动/3 秒自动/手动)在 exe
+#     缺失时只记一条 error 不起子进程,避免连环弹窗
 #   - 窗口探测准星(Spy++ 风格):拖到任意窗口,自动标记其全部关联进程
 #   - 行着色:进程名色(cmd 黑 / pwsh 蓝 / bash 橙 / python 黄 / 其余蓝,
 #     不可注入为灰字) + 状态底色(工具自身紫:GUI 与 terminal_injector.exe,

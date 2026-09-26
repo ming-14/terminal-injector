@@ -28,7 +28,7 @@ _STR = {
         "task_running": "已有任务进行中,忽略新请求",
         "fail": "失败: {}",
         "op_failed": "操作失败",
-        # 启动校验
+        # 缺失文件提示(两轮探测后仍缺失才弹,见 app._on_discovered)
         "missing_files": "缺少文件",
         "missing_files_msg": "未找到: {}\n请确保 {} 与 {} 与 gui.py 同目录。",
         # 自动探测 (discover.py)
@@ -80,6 +80,7 @@ _STR = {
         # 列表
         "fetch_err": "--list-targets 退出码 {}: {}",
         "targets_refreshed": "进程列表已刷新: 共 {} 项",
+        "refresh_no_exe": "跳过刷新:未找到 {},先用「重新探测 exe/dll」或放回同目录",
         # 注入
         "injecting": "注入: pid={pid}",
         "inject_failed": "注入失败(退出码 {}): {}",
@@ -201,6 +202,7 @@ _STR = {
         "log_label": "Log",
         "fetch_err": "--list-targets exit code {}: {}",
         "targets_refreshed": "Process list refreshed: {} entries",
+        "refresh_no_exe": "Refresh skipped: {} not found; run \"Re-detect exe/dll\" or put it back in this directory",
         "injecting": "Injecting: pid={pid}",
         "inject_failed": "Injection failed (exit code {}): {}",
         "inject_ok": "Injection succeeded: pid={pid}\n{out}",
