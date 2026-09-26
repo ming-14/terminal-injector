@@ -15,6 +15,14 @@
   B. 注入链（TestSession + WT）
 各自喂 `\\r`(只读 1 字节时会话立即完成)，把回吐/渲染按行对齐，检查
 「问句行」与「[SKIP] 行」之间是否存在空行，且两路一致。
+
+用法
+----
+    set TI_TERMTEST_DIR=<termlib 所在目录>          # 必填（termtest 的 termlib 包目录）
+    python tests/_probe/t_enterecho_consistency.py
+
+环境变量：
+    TI_TERMTEST_DIR   termlib 包所在目录（**必填**；未设置则 SKIP —— 按探针约定不内置个人路径）
 """
 import os, re, sys, time
 
@@ -25,10 +33,21 @@ sys.path.insert(0, os.path.join(ROOT, "tests", "e2e"))
 import pywezterm
 from common.session import TestSession
 
+# termlib 目录经环境变量传入：探针不内置个人路径（见 tests/_probe/README.md 约定）。
+# 该变量会被 TAIL 目标脚本读取（A 裸 ConHost / B 注入链两路都继承本进程环境）。
+TERMTEST_DIR = os.environ.get("TI_TERMTEST_DIR", "")
+if not TERMTEST_DIR or not os.path.isdir(TERMTEST_DIR):
+    print("[SKIP] 未设置 TI_TERMTEST_DIR（termlib 所在目录）: {!r}".format(TERMTEST_DIR))
+    print("\nSUMMARY: UNSUPPORTED (请用 TI_TERMTEST_DIR 指定 termlib 目录)")
+    sys.exit(0)
+
 TAIL = r'''
 # -*- coding: utf-8 -*-
+import os
 import sys
-sys.path.insert(0, r"C:\Users\rikka\Desktop\测试集\集成\termtest")
+_tt = os.environ.get("TI_TERMTEST_DIR")
+if _tt:
+    sys.path.insert(0, _tt)
 import termlib as T
 
 def _cue(text):

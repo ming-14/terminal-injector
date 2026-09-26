@@ -7,10 +7,12 @@
 
 - 探针**只读**、不改工程源码；只在必要时临时加诊断日志，跑完必须撤掉。
 - 每个探针自带说明：背景、复现方法、判据（期望值/对照值）。
-- **不内置个人路径**：需要外部路径的地方一律用环境变量，例如
+- **不内置个人路径**：需要外部路径的地方一律用环境变量，未设置时探针应 SKIP 并给出提示，例如
   - `TI_PROJECT_ROOT`：项目根（多数探针会按文件位置自行推导）
   - `PWTERM_DIR` / `TI_PWTERM_SCRIPTS`：pywezterm 包/脚本目录
   - `TI_RUNPY`：要复现的交互脚本路径（`runpy_repro_probe.py` 用）
+  - `TI_TUI_TARGET`：要复现的 TUI 目标（`t_textual_asyncio_freeze.py` / `t_shell_child_exit.py` 用）
+  - `TI_TERMTEST_DIR`：termlib 包所在目录（`t_enterecho_consistency.py` 用）
 
 ## 常用探针
 
@@ -37,7 +39,7 @@
 | `t_sgr_colon_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 端到端验证（真 ConPTY 承载 mediator + `pywezterm.Terminal` 解析对照）—— 冒号空保留位 bug 的回归证据 |
 | `t_readfile_gt2.py` / `t_echo_rules.py` | 测定 ConHost 下 `ReadFile(stdin)`（LINE+ECHO）的按键回显与返回字节规则：Enter → `\r\n`（空行也补）、Ctrl+C → `b""`（成功非 EOF）—— 2026-09-25 行编辑回显修复的判据 |
 | `child_echo_position_probe.py`（见上表） | 行编辑回显落在屏幕第几行第几列，验证 `EmitLineEcho` 是否推进 `VtCursorTracker` |
-| `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针 |
+| `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针（需 `TI_TERMTEST_DIR` 指向 termlib 目录） |
 | `pywezterm_smoke.py` | pywezterm 库自检：`Pty` 起进程 + `Terminal` 还原屏幕 + 断言标记，用于确认测试环境可用 |
 | `t_textual_asyncio_freeze.py` | ★ 注入后跑 Textual TUI（需 `TI_TUI_TARGET` 指定脚本，如 taskboard.py）双轨对照：断言**画面仍在更新**且**鼠标生效**。2026-09-26「Detour 污染 `GetLastError` 致 asyncio 事件循环死亡、画面定格」修复的端到端判据 |
 | `timing.py` / `slack.py` | 注入窗口/时序测量（`py.exe`→`python.exe` 时间窗、首行输出 slack） |
