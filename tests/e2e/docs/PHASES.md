@@ -431,7 +431,7 @@ if __name__ == "__main__":
 
 ---
 
-# Phase 13：注入生命周期（11 文件，`lifecycle/`）
+# Phase 13：注入生命周期（13 文件，`lifecycle/`）
 
 | # | 文件 | 特性 | 预期 |
 |---|------|------|------|
@@ -447,6 +447,7 @@ if __name__ == "__main__":
 | 104 | `test_tui_resize_scrollback.py` | 注入后 resize WT 无 scrollback（Bug B 回归，2026-08-18 新增） | vim 注入后 UIA 读 TermControl 基线非空白行数；SetWindowPos 缩窄 0.75 后非空白行增长 ≤ 2（修复前 +28：主 buffer ED 2J 推 scrollback；修复后 0~1：LazyInit 补发 ?1049h 后 ED 2J 在 alt buffer 不推） |
 | 105 | `test_tui_unload_restore.py` | 卸载恢复注入几何与画面（BUG-009 回归，2026-08-18 新增） | 100x36 全屏 TUI 注入 → WT 0.6x → 关闭卸载 → ConHost buffer==(100,36)、window==(0,0,99,35)、画面逐行==注入前（旧 DLL FAIL：window 缩到 68x29） |
 | 106 | `test_resize_overlay_clean.py` | 注入后 resize 无叠画（BUG-012 回归，2026-08-19 新增） | 自包含 TARGET 按 GCSBI 尺寸整屏画确定性矩阵（行中部与行尾 '|'）；0.6x/1.4x/1.4x 后 UIA 断言每行 '|' ≤2（修复前 3~4 叠画）+ LAYOUT 键 ≥3 |
+| 107 | `test_adopt_console_process.py` | 接管同控制台上注入前已存在的后代（BUG-018 回归，2026-09-27 新增） | cmd /k 计时器 python（后代在注入**前**已在运行）→ 注入 cmd；目标终端须持续收到后代**新**标记（不能只看"有标记"：重放帧自带旧标记）+ DLL 日志恰好 1 条 `Adopt: pid=... depth=... injected=1` 且非 shell 自身 + mediator 建子会话。未装 pywezterm 记 UNSUPPORTED |
 
 ## 验证标准
 - [x] 97：关闭 WT 后 10s 内 injected.dll 从模块列表消失
@@ -461,6 +462,7 @@ if __name__ == "__main__":
   - 102 `pipe_security`：随机管道名每会话不同；DLL 日志 `server identity verified`；旧固定管道名伪服务器不抢占
   - 103 `list_targets`：默认输出全部为 injectable；`--all` 含非 injectable 行且带原因；`--json` 合法且全部 injectable=true；当前测试进程在列表
   - 104 `tui_resize_scrollback`：vim（TI_VIM_EXE 或常见路径）注入握手成功；resize 后 UIA 非空白行数增长 ≤2（修复前 28→56）；无 vim 环境 UNSUPPORTED
+  - 107 `adopt_console_process`：注入前源终端已见 3+ 标记；注入后目标终端收到 3+ 个**值更大**的新标记（重放帧自带的旧标记不算）；DLL 日志 `Adopt: console has 2 process(es), 1 descendant(s)` + 唯一 `Adopt: pid=<子进程> depth=1 injected=1`；mediator 日志 `OnChildProcessNotify` + `ChildSession started`
 - 备注（测试经验）：
   - cmd（主进程）输出走 VtPassThrough `pipe→stdout: VtOutput`；子进程（python）输出走 `ChildVtOutput`——断言方向要区分
   - 字节断言必须限定日志来源行（输入转发日志 stdin→router 与输出 VtOutput hex 都含文本字节，只搜字节会误匹配）
@@ -572,6 +574,7 @@ if __name__ == "__main__":
 | BUG-016 | 注入子进程时**控制消息越过批量内容**，导致输出被画到错误行（用户报告：run.py 菜单里 `查询探测` 行前多出 26 行空行、首条分栏线被推到极右）。根因：`SendToMediator` 中 `VtOutput` 走 `BatchSender`（每 16ms 或满 16KB 才 flush），其余类型（含 `CursorSync`）**立即发送** ⇒ 批里有积压时 `CursorSync` 会**越过它本该排在后面的内容**：为菜单条目行算出的 `CursorSync(30;1)` 抢在仍压批的 `查询探测` 行之前送达，那行被画到第 30 行 ⇒ 第 4–29 行成为可见空行。**判据**：DLL 日志（按发出顺序）里该行同步=4（正确），而目标终端字节流里是 `ESC[30;1H`（条目行那一刻的值）—— 日志与字节流的矛盾正是乱序的直接证据；孤立构造复现不出（没有积压批），这解释了为何逐构造测 tracker 全部正确 | `runpy_repro_probe.py`：该窗口 CUP 序列修前 `(6,1)(4,1)(30,1)` → 修后 `(6,1)(4,1)` 与原生**逐字节一致**；`查询探测` 行从第 30 行回到第 4 行（紧邻 `窗口` 行） | 无专用用例；既有覆盖 = modes / vt_output / vt_passthrough 等按消息字节断言的用例 | **已修复**（2026-09-24）：`BatchSender` 新增公开 `Flush()`（转调 `FlushLocked`，自带锁、空缓冲 no-op）；`HookCommon.cpp: SendToMediator` 在发控制消息前先 flush，保证**字节顺序 = 产生顺序**（不只 CursorSync，所有控制消息都该守这条纪律）。回归 `modes line_editor vt_output vt_passthrough console_api mouse lifecycle` 共 68 项：**67 PASS / 1 FAIL**（仍是既有的 `test_resize_overlay_clean`） |
 | BUG-017 | Ctrl+C 未产生 SIGINT、目标不退出（`test_ctrl_c_signal`，2 条断言失败）。**既存失败、非本次改动引起**：2026-09-24 修好 `tests/e2e/keyboard/__init__.py`（目录被同名第三方库顶掉导致 9 个用例在导入期即死）之后才真正跑起来并暴露；已做 A/B 验证：临时撤掉 BUG-014 的输入模式镜像后该用例**照样失败**，与本次改动无关 | `test_ctrl_c_signal.py`：`[FAIL] SIGINT: 超时未收到 SIGINT`、`[FAIL] DONE: 目标未退出` | `test_ctrl_c_signal` | 未修复，待查。链路为 SendInput(Ctrl+C) → WT → mediator → DLL → 目标 SIGINT；怀疑点是 `\x03` 到 `CTRL_C_EVENT` 的转换条件（与 `ENABLE_PROCESSED_INPUT` 的关系，对照 LIM-001） |
 | LIM-007 | ConPTY 托管的目标若**本身是全屏 TUI**（如 WT 里跑 vim），注入时会按"流式 shell"处理（BUG-013 的取舍）：屏幕被重放一帧、且不补发 `?1049h`。TUI 收到注入的 resize 事件后自己整屏重绘会覆盖该帧，观感正常；但它的 `ESC[2J` 落在目标终端**主屏**上，可能把视口推进 scrollback（偶发一次滚动条）。控制在控制台层无法区分：ConPTY 下备用屏与主缓冲的 `dwSize` 恒等于窗口尺寸，`input_mode` 又随 PSReadLine 之类读写循环波动（BUG-013 实测） | WT 里跑 vim → 注入到另一 WT → 偶发滚动条 / 一次重绘过渡 | 无（未纳入断言） | 已知取舍——有意选择"偶发滚动条"而非"普通 shell 永久空白"；如需提升可跟踪应用自身输出流里的 `?1049h/l`（能覆盖"注入后切换"，"注入前已在备用屏"仍不可知） |
+| BUG-018 | **注入前已在运行的后代进程不被接管**（用户报告 2026-09-27：开 WT → 在 WT 里跑 `taskboard.py`（Textual TUI）→ 劫持承载它的 shell 到新 WT，新 WT 上画面不刷新、键盘鼠标无反应）。用户"记得 08-30 是正常的"的确切原因：`e443bb0`（2026-08-30）修的是**反过来的顺序** —— 先在 WT 里劫持 shell、**之后**再在它里面起 TUI，那时 TUI 是注入**之后**由 `CreateProcess` 钩子接管的后代。根因：接管链路只覆盖「注入目标本身」与「注入**之后**由它 `CreateProcess` 出来的子进程」（`ProcessHooks` 的 `CreateProcessW/A` Detour），注入前已在同一控制台上的后代永远不会进入链路 —— 它的输出仍写旧 ConHost，新 WT 只停在 `LazyInit` 从共享 ConHost 快照重放的**那一帧**（DLL 日志 `screen content replayed to WT`），之后再无任何字节；DLL 日志同时证明输入其实已到达（`VtInput processed` + 鼠标序列），只是没有输出通路 ⇒ 看起来就是"不刷新 + 无法输入" | 真 WT 双窗 + UIA 读屏：`wt -w ti_src -- cmd /k python taskboard.py` → mediator `--target-pid <cmd>` 注入 cmd → 新 WT 时钟停在注入时刻（源 WT 仍在走）、键入无反应；对照：注入 python 本身则一切正常 | `test_adopt_console_process`（新增） | **已修复**（2026-09-27）：新增 `ProcessHooks::AdoptConsoleDescendants`（由 DllMain 懒加载 worker 在 `KickStart` 之后调用）—— `GetConsoleProcessList` 取同控制台进程 + Toolhelp32 父子表沿 PPID 回溯，只接管父链能到本进程的后代（不碰祖先/无关进程），按深度升序走与 CreateProcess 完全同一套流程（`NotifyMediatorAndInject`）。两条护栏：注入前查 `injected.dll`/`relay32.dll` 模块避免重复接管（二次 `RemotePipeSetup` 会让子会话连到第二条管道、顶掉原会话）；只对 `IsTargetProcess` 生效且只执行一次（否则后代反向枚举祖先会互相注入成环）。注：`docs/2026-09-23-child-injection-32bit-report.md` §4.2"轮询补注入不可行"测的是**创建→首行输出的竞态**（64~80ms vs 注入 59ms），与本修复的"已运行进程定向补接管"不是同一问题。实测新 WT 里 TUI 持续重绘、键入字符到达 TUI；`test_adopt_console_process` PASS，lifecycle / line_editor / modes / vt_output / vt_passthrough 回归无新增 FAIL |
 
 修复方式建议：属性→SGR 转换处按位重映射（bit2=红→ANSI 1、bit0=蓝→ANSI 4、bit1=绿→ANSI 2），INTENSITY→bold 或 90-97。
 

@@ -99,6 +99,12 @@ injected_dll（运行时独立编译注入）
 **KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`/`ReadConsoleInputW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则唤醒键残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。
 唤醒事件按目标当前读模式选择：熟模式（`ENABLE_LINE_INPUT`，如 cmd 的 `ReadConsoleW`）只在收到 `\r` 时返回，必须写回车（shell 会当成一次空回车，经典 ConHost 下由 LazyInit 行首覆盖处理）；原始模式（如 PSReadLine 的 `ReadConsoleInputW`）任意事件即返回，改用无字符的 F24 键（按下+抬起），shell 忽略它、不产生空命令行回显（否则注入后凭空多出一行 prompt）。
 
+**同控制台后代接管（`ProcessHooks::AdoptConsoleDescendants`）**：`CreateProcess` Hook 只能覆盖注入【之后】新起的子进程，而用户的常见顺序是反的 —— 先在 WT 里把 TUI 跑起来，再把承载它的 shell 劫持到新 WT；那时 TUI 早已在运行，永远不会被注入，其输出仍写旧 ConHost，新 WT 只停在注入瞬间重放的一帧（表现为"画面不刷新、无法输入"）。处理方式：注入目标进程在 `KickStart` 之后用 `GetConsoleProcessList` 取同控制台进程，再用 Toolhelp32 父子表沿 PPID 回溯，**只**接管父链能到本进程的后代，按深度升序走与 `CreateProcess` 完全同一套流程（`NotifyMediatorAndInject`：建子会话 + 按位数注入）。三条约束：
+
+1. **只注入后代**：同控制台上的祖先（父 shell）或无关进程不属于本链路，接管后会与目标争同一个 `RouteInput` 前台。
+2. **深度升序**：`RouteInput` 取"最后加入的活跃子会话"为前台，最深者（真正的 TUI）必须最后注入才拿得到输入。
+3. **幂等**：注入前用 `FindChildModuleByPath` 查 `injected.dll`/`relay32.dll`，已在链路上的跳过 —— 二次 `RemotePipeSetup` 会让子会话连到第二条管道，顶掉原会话。
+
 ## 5. Hook 体系
 
 - **库**：MinHook（inline hook，支持 x64，可在 DllMain 初始化）。
@@ -113,7 +119,7 @@ injected_dll（运行时独立编译注入）
 | `ModeHooks` | Get/SetConsoleMode、Get/SetConsoleCP、Get/SetConsoleTitle 等 |
 | `BufferHooks` | SetActiveScreenBuffer（Alt Buffer）、SetConsoleScreenBufferSize、SetConsoleWindowInfo 等 |
 | `SignalHooks` | SetConsoleCtrlHandler、GenerateConsoleCtrlEvent（Ctrl+C/Ctrl+Break 传递） |
-| `ProcessHooks` | CreateProcessW/A（子进程自动注入；32 位子进程改由 `relay32inject.exe` 注入 `relay32.dll`）、CreateProcessAsUser 等 |
+| `ProcessHooks` | CreateProcessW/A（子进程自动注入；32 位子进程改由 `relay32inject.exe` 注入 `relay32.dll`）、CreateProcessAsUser 等；另含同控制台后代接管（`AdoptConsoleDescendants`，见 §4） |
 | `ProtectionHooks` | AttachConsole、FreeConsole、AllocConsole、GetConsoleWindow、CloseHandle（假句柄拦截） |
 | `WaitHooks` | WaitForSingleObject/Ex、WaitForMultipleObjects（假句柄 → 手动重置事件映射，防假死） |
 | `FontHooks` | SetConsoleFont 等字体相关 |
