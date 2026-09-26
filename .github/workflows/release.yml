@@ -1,0 +1,125 @@
+# 打 tag（v*）触发：构建 C++ 产物 + PyInstaller 打包 GUI，发布 GitHub Release
+#
+# 发布物（与 v1.2 保持一致，另补 relay32 中继对）：
+#   terminal-injector-x64.zip     build/bin/Release 四个二进制 + gui/ 源码
+#   terminal-injector-gui.exe     PyInstaller onefile，内嵌二进制 + WT 便携版(t/)
+#
+# Release 名取自 tag：v1.3 -> Terminal-Injector_v1.3
+#
+# 手动触发（workflow_dispatch）只构建 + 上传 workflow 产物，不建 Release，
+# 用于打 tag 前先验证 CI 能过。
+#
+# 构建方式说明：C++ 走 cmake configure + cmake --build，而非仓库的 build.ps1。
+# build.ps1 的 VsDevCmd 环境回灌是为绕开本机 IDE 宿主进程的 PATH/Path/path
+# 三重键（MSB6001）；CI 环境块干净，不需要该逻辑。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # 便携版 Windows Terminal：解压后目录改名为 t/，供 backend._find_wt 定位 t\wt.exe
+  WT_URL: https://github.com/microsoft/terminal/releases/download/v1.24.11911.0/Microsoft.WindowsTerminal_1.24.11911.0_x64.zip
+
+jobs:
+  build:
+    runs-on: windows-2025   # VS 2026 / MSVC 14.51，与 README 要求一致；勿用 windows-latest 防镜像漂移
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ---------- C++：x64 主产物 ----------
+      - name: Configure (x64)
+        run: cmake -S . -B build -A x64
+
+      - name: Build x64
+        run: cmake --build build --config Release --parallel
+
+      # ---------- C++：32 位中继（单独构建树，产物拷进 build/bin/Release）----------
+      - name: Build relay32
+        run: ./build_relay.ps1
+
+      # ---------- 打 terminal-injector-x64.zip ----------
+      - name: Stage zip contents
+        shell: pwsh
+        run: |
+          $stage = 'dist/zip'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          # 只取四个运行时二进制，不含 pdb
+          foreach ($f in 'terminal_injector.exe', 'injected.dll', 'relay32.dll', 'relay32inject.exe') {
+            Copy-Item "build/bin/Release/$f" $stage
+          }
+          # gui/ 源码整目录（解压后 python gui\gui.py 即可运行）
+          Copy-Item gui "$stage/gui" -Recurse
+          Get-ChildItem $stage -Recurse -Directory -Filter '__pycache__' |
+            Remove-Item -Recurse -Force
+          Get-ChildItem "$stage/gui/logs" -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force
+
+      - name: Create terminal-injector-x64.zip
+        shell: pwsh
+        run: Compress-Archive -Path 'dist/zip/*' -DestinationPath 'terminal-injector-x64.zip' -Force
+
+      # ---------- 下载并解压便携版 WT 到 t/ ----------
+      - name: Download Windows Terminal portable
+        shell: pwsh
+        run: |
+          curl.exe -L --fail --retry 3 -o wt.zip "$env:WT_URL"
+          Expand-Archive wt.zip -DestinationPath wt-extract
+          # zip 内是 terminal-<版本>\ 子目录，改名为 t/（backend.py 找 t\wt.exe）
+          $inner = Get-ChildItem wt-extract -Directory | Select-Object -First 1
+          if (-not (Test-Path "$($inner.FullName)/wt.exe")) {
+            throw "wt.exe not found in $($inner.FullName)"
+          }
+          Move-Item $inner.FullName t
+          if (-not (Test-Path 't/wt.exe')) { throw 't/wt.exe missing after move' }
+
+      # ---------- PyInstaller 打包 GUI ----------
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build terminal-injector-gui.exe
+        shell: pwsh
+        run: |
+          $rel = 'build/bin/Release'
+          python -m PyInstaller --onefile --noconfirm --windowed `
+            --name terminal-injector-gui `
+            --add-data "$rel/terminal_injector.exe;." `
+            --add-data "$rel/injected.dll;." `
+            --add-data "$rel/relay32.dll;." `
+            --add-data "$rel/relay32inject.exe;." `
+            --add-data "t;t" `
+            gui/gui.py
+          # onefile 直接输出到 dist/ 根，无子目录
+          if (-not (Test-Path 'dist/terminal-injector-gui.exe')) {
+            throw 'PyInstaller output missing'
+          }
+
+      # ---------- 产物 ----------
+      - name: Upload artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-injector
+          path: |
+            terminal-injector-x64.zip
+            dist/terminal-injector-gui.exe
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Terminal-Injector_${{ github.ref_name }}
+          files: |
+            terminal-injector-x64.zip
+            dist/terminal-injector-gui.exe
