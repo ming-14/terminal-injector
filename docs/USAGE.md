@@ -156,8 +156,6 @@ terminal_injector.exe --list-targets --json
 
 目标程序用 `CreateProcess` 启动的子进程（如 cmd 里再起 python、vim）会被 CreateProcess Hook 自动注入接管，无需逐个子进程手动注入。
 
-**注入前已在运行的子进程也会被接管**：常见用法是先在 WT 里跑起一个 TUI（如 `python taskboard.py`），再把承载它的 shell 劫持到新 WT —— 那时 TUI 早已在运行，CreateProcess Hook 不可能看到它。注入时目标进程会枚举同一控制台，只对「父链能回溯到自己」的后代补做接管，所以新 WT 里 TUI 正常刷新、键盘鼠标可用。反向不成立：**祖先或同控制台的无关进程不会被接管**。
-
 ### 5.3 多会话
 
 每个会话独立成对：`inject + mediator + 管道名`。多开不同目标/多 Tab 互不干扰（管道名随机、mediator 按目标 PID 分日志文件）。

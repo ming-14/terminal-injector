@@ -37,12 +37,10 @@
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <algorithm>
 #include <cwctype>
 
-#include <psapi.h>     // EnumProcessModulesEx / GetModuleFileNameExW
-#include <tlhelp32.h>  // CreateToolhelp32Snapshot（同控制台后代判定的父子表）
+#include <psapi.h>   // EnumProcessModulesEx / GetModuleFileNameExW
 #pragma comment(lib, "psapi.lib")
 
 namespace terminjector::hooks {
@@ -331,52 +329,6 @@ static bool InjectRelayInto32BitChild(uint32_t childPid,
 }
 
 // ============================================================
-// 通知 mediator + 按位数注入
-// ============================================================
-// CreateProcess 捕获路径与「接管同控制台已有后代」路径共用：
-//   1. 生成子会话随机管道名（名字不可预测，防同会话进程预创建抢占）
-//   2. 判对端位数（决定注入 injected.dll 还是 relay32.dll，也决定 mediator
-//      用哪种握手），必须在上报 mediator 之前定
-//   3. 通知 mediator 创建子会话管道实例 + 等待连接
-//   4. 按位数分派注入
-// pid/hProcess：目标后代进程；hProcess 需已具备注入权限
-//               （32 位走外部助手，只需 pid 与位数判定）
-static bool NotifyMediatorAndInject(uint32_t pid, HANDLE hProcess) {
-    // 取本进程注入参数（随机管道名 + mediatorPid）
-    // 子 DLL 的校验目标与父 DLL 相同（同一 mediator）；
-    // 参数未就绪时 mediatorPid=0（跳过校验）
-    PipeParams parentParams{};
-    const bool haveParams = GetPipeParams(parentParams);
-
-    const std::wstring childPipe = MakeRandomPipeName(pid);
-
-    const ProcessBitness bits = QueryProcessBitness(hProcess);
-    const bool peerIsRelay = (bits == ProcessBitness::X86);
-
-    protocol::ChildProcessNotifyPayload notify{};
-    notify.childPid = pid;
-    notify.parentPid = GetCurrentProcessId();
-    wcsncpy_s(notify.pipeName, sizeof(notify.pipeName) / sizeof(wchar_t),
-              childPipe.c_str(), _TRUNCATE);
-    notify.peerIsRelay = peerIsRelay ? 1u : 0u;
-    SendToMediator(&notify, sizeof(notify), protocol::MessageType::ChildProcessNotify);
-
-    const uint32_t mediatorPid = haveParams ? parentParams.mediatorPid : 0;
-    if (peerIsRelay) {
-        // 32 位：本 DLL 是 64 位，跨位数注入不可能，由 32 位的
-        // relay32inject.exe 注入 relay32.dll（中继捕获它拉起的子进程；
-        // 32 位程序本体接管是 TODO(32bit-target)）
-        return InjectRelayInto32BitChild(pid, childPipe, mediatorPid);
-    }
-    if (bits == ProcessBitness::Unknown) {
-        // 位数判不出来（拿不到镜像路径等）：沿用旧行为按 64 位处理，
-        // 失败也只是进程不被注入，与无注入时一致
-        LOG_WARN("NotifyMediatorAndInject: pid=%u bitness unknown, assuming 64-bit", pid);
-    }
-    return InjectDllToChild(hProcess, pid, childPipe, mediatorPid);
-}
-
-// ============================================================
 // 子进程创建后处理
 // ============================================================
 // 通知 mediator + 注入 DLL + 恢复线程
@@ -384,10 +336,56 @@ static bool NotifyMediatorAndInject(uint32_t pid, HANDLE hProcess) {
 // lpPi       子进程信息（PID、句柄）
 // needResume 是否需要恢复主线程（原始 flags 无 SUSPENDED 时为 true）
 static void OnChildProcessCreated(LPPROCESS_INFORMATION lpPi, bool needResume) {
-    // 0. 通知 mediator + 按位数注入（与「接管同控制台已有后代」共用同一流程）
+    // 0. 取本进程注入参数（随机管道名 + mediatorPid）
+    //    子 DLL 的校验目标与父 DLL 相同（同一 mediator）；
+    //    参数未就绪时 mediatorPid=0（跳过校验），pipeName 为空（不注入参数）
+    PipeParams parentParams{};
+    const bool haveParams = GetPipeParams(parentParams);
+
+    // 0.5 生成子会话随机管道名（名字不可预测，防同会话进程预创建抢占）
+    //    父 DLL 既上报 mediator 创建服务端，又传给子 DLL 连接，两侧一致
+    const std::wstring childPipe = MakeRandomPipeName(lpPi->dwProcessId);
+
+    // 0.6 判子进程位数，定下"注入哪个 DLL"
+    //     必须在上报 mediator 之前定：子会话的对端是 relay32.dll 还是
+    //     injected.dll 决定 mediator 用哪种握手（RelayHello / Hello）
+    const ProcessBitness bits = QueryProcessBitness(lpPi->hProcess);
+    const bool peerIsRelay = (bits == ProcessBitness::X86);
+
+    // 1. 通知 mediator：子进程已创建 + 随机管道名，请创建管道实例
+    //    mediator 收到后创建对应名字的管道并等待连接
+    protocol::ChildProcessNotifyPayload notify{};
+    notify.childPid = lpPi->dwProcessId;
+    notify.parentPid = GetCurrentProcessId();
+    wcsncpy_s(notify.pipeName, sizeof(notify.pipeName) / sizeof(wchar_t),
+              childPipe.c_str(), _TRUNCATE);
+    notify.peerIsRelay = peerIsRelay ? 1u : 0u;
+    SendToMediator(&notify, sizeof(notify), protocol::MessageType::ChildProcessNotify);
+
+    // 2. 按位数分派注入
     //    注入后子进程 DllMain 执行（LazyInit 懒加载，不阻塞）
     //    子进程首个 Console API 调用时触发 LazyInit，连接管道
-    const bool injected = NotifyMediatorAndInject(lpPi->dwProcessId, lpPi->hProcess);
+    const uint32_t mediatorPid = haveParams ? parentParams.mediatorPid : 0;
+    bool injected = false;
+    if (peerIsRelay) {
+        // 32 位子进程（如 C:\Windows\py.exe）：本 DLL 是 64 位，跨位数注入不可能，
+        // 由 32 位的 relay32inject.exe 注入 relay32.dll。
+        // 中继只做"捕获它拉起的子进程"，不接管 Console（32 位程序本体接管是
+        // TODO(32bit-target)）。
+        LOG_INFO("OnChildProcessCreated: child %u is 32-bit, injecting relay32 via helper",
+                 lpPi->dwProcessId);
+        injected = InjectRelayInto32BitChild(lpPi->dwProcessId, childPipe, mediatorPid);
+    } else if (bits == ProcessBitness::X64) {
+        injected = InjectDllToChild(lpPi->hProcess, lpPi->dwProcessId, childPipe,
+                                    mediatorPid);
+    } else {
+        // 位数判不出来（拿不到镜像路径等）：沿用旧行为按 64 位处理，
+        // 失败也只是子进程不被注入，与无注入时一致
+        LOG_WARN("OnChildProcessCreated: child %u bitness unknown, assuming 64-bit",
+                 lpPi->dwProcessId);
+        injected = InjectDllToChild(lpPi->hProcess, lpPi->dwProcessId, childPipe,
+                                    mediatorPid);
+    }
     if (!injected) {
         LOG_WARN("OnChildProcessCreated: inject failed pid=%u, child runs without hooks",
                  lpPi->dwProcessId);
@@ -398,137 +396,6 @@ static void OnChildProcessCreated(LPPROCESS_INFORMATION lpPi, bool needResume) {
     //    即使注入失败也要 Resume，否则子进程永远挂起
     if (needResume) {
         ResumeThread(lpPi->hThread);
-    }
-}
-
-// ============================================================
-// 接管同控制台上「注入前已存在」的后代进程
-// ============================================================
-namespace {
-
-// 进程父子关系表（Toolhelp32）。用 PPID 而不是别的信号：
-// 同一个控制台上可能同时挂着 shell 与它拉起的 TUI，只有父子链能区分
-// 「目标的后代」（要接管）与「目标的祖先/无关进程」（不能接管）。
-// 注：Windows 不保证 PPID 一定可用（父进程退出后可能残留），此处只用于
-// 过滤与排序，即使表不准也只是多注入/少注入一个进程，不影响已接管链路。
-using ParentMap = std::unordered_map<uint32_t, uint32_t>;
-
-ParentMap BuildParentMap() {
-    ParentMap map;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) {
-        LOG_WARN("Adopt: CreateToolhelp32Snapshot failed err=%lu", GetLastError());
-        return map;
-    }
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(pe);
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            map[pe.th32ProcessID] = pe.th32ParentProcessID;
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-    return map;
-}
-
-// 从 pid 沿父链回溯到 self 所需的层数；不是 self 的后代返回 -1。
-// 深度上限防父链成环（异常数据）导致死循环。
-int DescendantDepth(const ParentMap& map, uint32_t pid, uint32_t self) {
-    uint32_t cur = pid;
-    for (int depth = 1; depth <= 32; ++depth) {
-        const auto it = map.find(cur);
-        if (it == map.end()) return -1;
-        const uint32_t parent = it->second;
-        if (parent == 0 || parent == cur) return -1;  // 0/自环 = 链断
-        cur = parent;
-        if (cur == self) return depth;
-    }
-    return -1;
-}
-
-} // namespace
-
-void AdoptConsoleDescendants() {
-    // 仅注入目标进程执行：后代进程是子会话（isTarget=0），不重复接管。
-    // 否则每个后代都会反过来枚举并注入它的祖先，互相注入成环。
-    if (!IsTargetProcess()) {
-        return;
-    }
-    // 幂等：重复注入会二次下发管道参数（子会话连到第二条管道）
-    static LONG s_adoptStarted = 0;
-    if (InterlockedCompareExchange(&s_adoptStarted, 1, 0) != 0) {
-        return;
-    }
-
-    const DWORD self = GetCurrentProcessId();
-
-    // 1. 取同控制台进程表。返回值 > 容量时表示所需数量，扩容重试一次。
-    //    GetConsoleProcessList 作用于【调用进程所属控制台】，本进程已被注入、
-    //    正挂在目标控制台上，所以拿到的正是用户看到的那个会话。
-    std::vector<DWORD> pids(64);
-    DWORD count = GetConsoleProcessList(pids.data(), static_cast<DWORD>(pids.size()));
-    if (count == 0) {
-        LOG_WARN("Adopt: GetConsoleProcessList returned 0 (no console?) err=%lu",
-                 GetLastError());
-        return;
-    }
-    if (count > pids.size()) {
-        pids.resize(count);
-        count = GetConsoleProcessList(pids.data(), static_cast<DWORD>(pids.size()));
-        if (count > pids.size()) {
-            count = static_cast<DWORD>(pids.size());  // 静态截断，注入已取到的部分
-        }
-    }
-
-    // 2. 只取本进程的后代（“为什么按 PPID 过滤”见 DescendantDepth 注释），
-    //    按深度升序注入（“为什么升序”见头文件）。
-    const ParentMap parents = BuildParentMap();
-    struct Candidate {
-        DWORD pid;
-        int depth;
-    };
-    std::vector<Candidate> candidates;
-    candidates.reserve(count);
-    for (DWORD i = 0; i < count; ++i) {
-        if (pids[i] == self) continue;
-        const int depth = DescendantDepth(parents, pids[i], self);
-        if (depth < 0) {
-            LOG_INFO("Adopt: skip pid=%lu (not a descendant of target)", pids[i]);
-            continue;
-        }
-        candidates.push_back({pids[i], depth});
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) { return a.depth < b.depth; });
-
-    LOG_INFO("Adopt: console has %lu process(es), %zu descendant(s) to take over",
-             count, candidates.size());
-
-    for (const Candidate& c : candidates) {
-        HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION |
-                               PROCESS_VM_WRITE | PROCESS_VM_READ |
-                               PROCESS_QUERY_INFORMATION, FALSE, c.pid);
-        if (h == nullptr) {
-            LOG_WARN("Adopt: OpenProcess failed pid=%u err=%lu (runs without hooks)",
-                     c.pid, GetLastError());
-            continue;
-        }
-        // 已在接管链路里的不能再来一次：二次 LoadLibrary 会二次下发管道参数，
-        // 子会话连到第二条管道，原会话被顶掉。
-        // （并发场景：adopt 与 CreateProcess 钩子可能同时命同一个进程）
-        if (FindChildModuleByPath(h, L"injected.dll") != nullptr ||
-            FindChildModuleByPath(h, L"relay32.dll") != nullptr) {
-            LOG_INFO("Adopt: skip pid=%u (already injected)", c.pid);
-            CloseHandle(h);
-            continue;
-        }
-        const bool injected = NotifyMediatorAndInject(c.pid, h);
-        LOG_INFO("Adopt: pid=%u depth=%d injected=%d", c.pid, c.depth, injected ? 1 : 0);
-        if (!injected) {
-            LOG_WARN("Adopt: inject failed pid=%u, it keeps drawing to the old ConHost",
-                     c.pid);
-        }
-        CloseHandle(h);
     }
 }
 

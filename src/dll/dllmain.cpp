@@ -129,10 +129,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
                     if (terminjector::IsLazyInitialized() &&
                         terminjector::IsTargetProcess()) {
                         terminjector::hooks::KickStartBlockedReaders();
-                        // 接管「注入前已存在于同一控制台」的后代进程（见 ProcessHooks.h）。
-                        // 放在 KickStart 之后：目标会话（重放/光标同步）先就绪，
-                        // 随后接管的后代才把输出接到同一条链路。
-                        terminjector::hooks::AdoptConsoleDescendants();
                     }
                     return 0;
                 },

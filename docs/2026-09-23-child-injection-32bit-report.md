@@ -125,13 +125,6 @@ Reloc     rva=0x000BA000 size=5852← 有重定位表
 > 注：后续重复注入同一进程仅 0.2~1.6 ms，是因为 DLL 已加载、`LoadLibraryW` 只加引用计数；
 > 首次加载的 ~59 ms 才是真实成本。
 
-> 补充（2026-09-27）：本节排除的是**进程创建→首行输出的竞态**（晚一步就把首帧丢在 ConHost），
-> 它**不**适用于另一种情况：目标进程早已在运行并**持续输出**（典型：WT 里先跑着 TUI，
-> 再把承载它的 shell 劫持到新 WT）。那里没有竞态可言，晚注入只是多丢一帧（LazyInit
-> 会从共享 ConHost 快照重放当前画面），之后逐帧都是活的。据此新增
-> `ProcessHooks::AdoptConsoleDescendants`：注入时枚举同一控制台的后代并逐个补接管，
-> 详见 `docs/TECHNICAL.md` §4 与 `tests/e2e/docs/PHASES.md` BUG-018。
-
 ---
 
 ## 5. 解法选项

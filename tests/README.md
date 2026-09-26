@@ -99,7 +99,7 @@ e2e/
 
 类别与阶段映射见 `docs/PHASES.md`（如 Phase 8 = mouse、Phase 13 = lifecycle）。
 
-值得单独说明的三个用例：
+值得单独说明的两个用例：
 
 - `lifecycle/test_conpty_hosted_target.py`：**目标进程自身跑在终端（ConPTY）里**时的
   注入回归。用 pywezterm 的 ConPTY 作目标宿主（与 WT 同属伪控制台，但能直接断言字节、
@@ -107,10 +107,6 @@ e2e/
   的 BUG-013（误判全屏 TUI）与 BUG-014（控制台输入模式被冻结）。
 - `lifecycle/test_launcher_chain.py`：32/64 位跨位数启动链的逐环断言，失败会直接指出
   断在哪一环。
-- `lifecycle/test_adopt_console_process.py`：**注入前就在运行的子进程也能被接管**的
-  回归（先跑 TUI 再劫持承载它的 shell）。用递增标记而不是画面断言"注入后仍有**新**
-  输出"——注入时会重放共享 ConHost 的当前屏幕，旧标记会混进目标终端，只数标记数量
-  会被重放帧直接满足。背景见 `docs/PHASES.md` 的 BUG-018。
 
 ### 三层验证方式
 
