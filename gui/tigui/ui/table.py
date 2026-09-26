@@ -13,17 +13,20 @@
 #   4. 选中行会被系统高亮色(蓝底白字)覆盖,自定义底色在选中时不可见
 # 着色优先级:
 #   前景:不可注入灰字 > 进程名色(cmd 黑 / pwsh 蓝 / bash 橙 / python 黄 / 其余蓝)
-#   背景:已注入标准绿 > GUI 启动后新起进程浅绿
+#   背景:工具自身紫 > 已注入标准绿 > GUI 启动后新起进程浅绿
 #   状态不再用前景色表达:可注入/已注入的区分改由文字内容 + 绿底承担。
 
+import os
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
 
 from ..i18n import REASON_TEXT, STATUS_TEXT, _t
+from ..paths import EXE_NAME
 
 # ---------- 行着色配色 ----------
 FG_REJECTED = "#8a8a8a"   # 不可注入:灰字淡化(压过进程名色)
+BG_TOOL = "#e5daf7"       # 工具自身(GUI / 注入器)-> 紫,最高优先(压过两种绿底)
 BG_INJECTED = "#cdebd4"   # 已注入 -> 标准绿
 BG_NEW = "#eaf7ee"        # GUI 启动之后才起的进程 -> 浅绿(次优先)
 
@@ -60,6 +63,38 @@ def name_tag(name: str) -> str:
     if key.endswith(".exe"):
         key = key[:-4]
     return _fg_tag(NAME_COLOR.get(key, DEFAULT_NAME_COLOR))
+
+
+def is_tool_process(target) -> bool:
+    """本行是否为『工具自身』(标紫,最高优先):GUI 自身或注入器
+
+    - GUI 自身按 PID(os.getpid())判定,源码态(python.exe)与打包态
+      (terminal-injector-gui.exe)通吃;不能按名字匹配,否则源码态会把
+      系统里所有 python 进程一起标紫(实测同机可有多个 python.exe)。
+    - 注入器按进程名匹配 EXE_NAME(大小写不敏感),覆盖 WT 里常驻的
+      --mediator 实例;正在跑 --list-targets 的那个子进程由 C++ 侧
+      自我排除(ProcessHelper.cpp),本就不出现在列表里。
+    """
+    if target.get("pid") == os.getpid():
+        return True
+    return (target.get("name") or "").lower() == EXE_NAME
+
+
+def configure_tags(tree):
+    """给 Treeview 配置行标签 —— 调用顺序即优先级(实测,见模块头):
+
+    紫底(工具自身)最先,压过标准绿与浅绿;灰字先于进程名色;
+    标准绿先于浅绿。前景/背景两个维度各自取先配置者。
+    _render_table 已用互斥分支保证每行至多一个背景标签,这里的顺序
+    是第二道保险:将来一行若同时挂上多个背景标签,仍是紫 > 绿 > 浅绿。
+    进程名色之间每行只挂一个,互不冲突,按色值去重后配置。
+    """
+    tree.tag_configure("tool", background=BG_TOOL)
+    tree.tag_configure("rejected", foreground=FG_REJECTED)
+    for color in dict.fromkeys([*NAME_COLOR.values(), DEFAULT_NAME_COLOR]):
+        tree.tag_configure(_fg_tag(color), foreground=color)
+    tree.tag_configure("injected", background=BG_INJECTED)
+    tree.tag_configure("new", background=BG_NEW)
 
 
 class TableMixin:
@@ -99,15 +134,8 @@ class TableMixin:
 
         self._build_columns_menu()  # 表格列就绪后构建『显示列』菜单
 
-        # tag_configure 调用顺序即标签优先级(实测):
-        # 灰字先配以压过进程名色,标准绿先配以压过浅绿。
-        # 进程名色之间每行只挂一个,互不冲突,按色值去重后配置即可。
-        self.tree.tag_configure("rejected", foreground=FG_REJECTED)
-        for color in dict.fromkeys(
-                [*NAME_COLOR.values(), DEFAULT_NAME_COLOR]):
-            self.tree.tag_configure(_fg_tag(color), foreground=color)
-        self.tree.tag_configure("injected", background=BG_INJECTED)
-        self.tree.tag_configure("new", background=BG_NEW)
+        # 行标签:顺序即优先级,集中配置在 configure_tags
+        configure_tags(self.tree)
 
         self.tree.bind("<Double-1>", self._show_detail)
         self.tree.bind("<Button-3>", self._show_context_menu)
@@ -173,13 +201,15 @@ class TableMixin:
                 status = STATUS_TEXT["rejected"]
             reason = "" if t["injectable"] else REASON_TEXT.get(
                 t["reason"], t["reason"] or "")
-            # 多标签叠加:前景(灰字或进程名色)与背景(绿底)相互独立,
-            # 优先级由 tag_configure 顺序决定,与本 tags 列表顺序无关。
+            # 多标签叠加:前景(灰字或进程名色)与背景(紫/绿底)相互独立,
+            # 优先级由 configure_tags 的配置顺序决定,与本 tags 列表顺序无关。
             tags = [name_tag(t["name"]) if t["injectable"] else "rejected"]
-            if injected:
-                tags.append("injected")            # 标准绿,优先
+            if is_tool_process(t):
+                tags.append("tool")                # 紫底,最高优先
+            elif injected:
+                tags.append("injected")            # 标准绿,次之
             elif self._is_new_since_launch(t):
-                tags.append("new")                 # 浅绿,次优先
+                tags.append("new")                 # 浅绿,再次
             self.tree.insert(
                 "", "end", iid=str(t["pid"]),
                 values=(t["pid"], t["name"], status,
