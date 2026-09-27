@@ -58,7 +58,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe dual-mode entry point
 ├── tests/
-│   ├── e2e/                    # end-to-end test suite (run_all.py + 14 categories, 118 test files)
+│   ├── e2e/                    # end-to-end test suite (run_all.py + 14 categories, 119 test files)
 │   │   ├── common/             # test infrastructure (injector / input_sim / vt_capture / paths)
 │   │   ├── _targets/           # self-check scripts running inside target processes
 │   │   └── docs/PHASES.md      # test suite design doc
@@ -129,7 +129,7 @@ After the WT tab is closed: pipe disconnects → the DLL automatically removes a
 
 ### Testing
 
-e2e suite (118 test files across 14 categories), requires the `build/bin/Release` artifacts + Python 3.8+ / pywin32 / psutil:
+e2e suite (119 test files across 14 categories), requires the `build/bin/Release` artifacts + Python 3.8+ / pywin32 / psutil:
 
 ```powershell
 cd tests/e2e
@@ -150,7 +150,8 @@ Results are aggregated into `tests/e2e/results/summary.json`; category mapping i
 - [docs/phases/00-overview.md](docs/phases/00-overview.md): architecture overview, data flow, directory conventions, phase breakdown
 - [docs/phases/01-scaffold.md](docs/phases/01-scaffold.md) ~ [19-vt-cursor-tracker.md](docs/phases/19-vt-cursor-tracker.md): per-phase design docs
 - [tests/README.md](tests/README.md): e2e suite usage & extension
-- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md): test suite design, feature matrix, known issues
+- [docs/working/BUGS.md](docs/working/BUGS.md): **the** bug & limitation register — `BUG` / `LIM` / `TRAP` / `PIT` + disproved hypotheses; single source of truth for defects
+- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md): test suite design, feature matrix (known issues live in docs/working/BUGS.md)
 
 ### Known Limitations
 
@@ -214,7 +215,7 @@ terminal-injector/
 │   │   └── lineedit/           # LineEditor / TabCompleter
 │   └── app/                    # terminal-injector.exe 双模式入口
 ├── tests/
-│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 118 个测试文件）
+│   ├── e2e/                    # 端到端测试套件（run_all.py + 14 类 119 个测试文件）
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
@@ -280,7 +281,7 @@ terminal_injector.exe --list-targets [--json] [--all]
 
 ## 测试
 
-e2e 套件（118 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
+e2e 套件（119 个测试文件，覆盖 14 个类别），依赖 `build/bin/Release` 产物 + Python 3.8+ / pywin32 / psutil：
 
 ```powershell
 cd tests/e2e
@@ -300,8 +301,9 @@ python run_all.py --phase 6          # 按 PHASES.md 阶段运行
 - [docs/TECHNICAL.md](docs/TECHNICAL.md)：技术说明——架构与数据流、Hook/状态/翻译器/协议、卸载机制、已知限制
 - [docs/phases/00-overview.md](docs/phases/00-overview.md)：架构总览、数据流、目录规范、Phase 划分
 - [docs/phases/01-scaffold.md](docs/phases/01-scaffold.md) ~ [19-vt-cursor-tracker.md](docs/phases/19-vt-cursor-tracker.md)：各 Phase 设计
+- [docs/working/BUGS.md](docs/working/BUGS.md)：**缺陷与限制登记表（唯一权威）** —— `BUG` 工程缺陷 / `LIM` 架构限制 / `TRAP` 排查陷阱 / `PIT` 平台坑 / `F` 已证伪假设，每条含现象、根因、修法、判据与回归用例
 - [tests/README.md](tests/README.md)：e2e 测试套件使用与扩展
-- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md)：测试套件设计、特性矩阵、已知问题清单
+- [tests/e2e/docs/PHASES.md](tests/e2e/docs/PHASES.md)：测试套件设计、特性矩阵（缺陷与限制清单已迁至 docs/working/BUGS.md）
 
 ## 已知限制
 

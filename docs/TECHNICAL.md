@@ -96,8 +96,26 @@ injected_dll（运行时独立编译注入）
 4. 中继**不接管 Console**（启动器本身不产出终端内容）；"32 位程序本体被接管"记为 `TODO(32bit-target)`。
 5. 中继的接收循环必须用 `PeekNamedPipe` 轮询而非阻塞 `RecvPacket` —— 同步管道句柄上挂起的 `ReadFile` 会堵住同句柄的 `WriteFile`，使上报帧永远发不出去（详见 §8 与 `tests/_probe/pipe_io_serialize_probe.py`）。
 
-**KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`/`ReadConsoleInputW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则唤醒键残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。
+**KickStart**：注入目标进程（非子进程）注入前可能已阻塞在旧 `ReadConsoleW`/`ReadConsoleInputW`，握手后需 KickStart 唤醒使其改走 Hook 链路；子进程由父进程 CreateProcess 创建、Hook 已就位，禁止 KickStart（否则唤醒键残留队列被误读）——由 `HelloAckPayload.isTarget` 区分。**被接管的后代（见下）同样需要 KickStart**：它在注入前就已经在跑，与注入目标同性质；由 `PipeParams.flags` 的 `kPipeFlagAdopted` 标记区分（三类进程：目标 / 被接管后代 / CreateProcess 捕获的子进程）。
 唤醒事件按目标当前读模式选择：熟模式（`ENABLE_LINE_INPUT`，如 cmd 的 `ReadConsoleW`）只在收到 `\r` 时返回，必须写回车（shell 会当成一次空回车，经典 ConHost 下由 LazyInit 行首覆盖处理）；原始模式（如 PSReadLine 的 `ReadConsoleInputW`）任意事件即返回，改用无字符的 F24 键（按下+抬起），shell 忽略它、不产生空命令行回显（否则注入后凭空多出一行 prompt）。
+
+**接管注入前已存在的同控制台后代（`ProcessHooks::AdoptConsoleDescendants`）**：`CreateProcess` Hook 只能覆盖**注入之后**新起的子进程。用户先在 WT 里跑起 TUI、再劫持承载它的 shell 时，TUI 是注入**之前**就存在的后代 —— 它的输出继续写原 ConHost（新 WT 只停在注入瞬间重放的那一帧），输入虽然转发进来却没有输出通路能证明它通了（表象就是"画面不刷新、无法输入"）。做法：握手 + KickStart 之后，用 `GetConsoleProcessList` 取同控制台的进程，按 Toolhelp32 父子表只留本进程的**后代**，逐个走与 `CreateProcess` 捕获路径同一套流程接管（通知 mediator 建子会话 + 注入 `injected.dll`）。
+
+筛选条件（每条都对应一类「不该接管」的进程）：
+
+| 条件 | 排除掉的是 |
+|---|---|
+| 父链能回溯到本进程（PPID 链） | 同控制台上的祖先与无关进程 |
+| **没有可见顶层窗口**（`EnumWindows`+`IsWindowVisible`） | GUI 程序（典型：从同一个 shell 里启动的 tkinter 管理界面）。它有窗口 ⇒ 既不画终端也不读终端，接管它只会抢走输入路由，还会连它的 `CreateProcess` 一起 Hook（它再拉起 `wt.exe` 就会被顺带注入）。**2026-09-27 首版修法正是因为这个原因被回滚** |
+| 必须是 x64 | 32 位后代只有中继可注（中继不接管 Console），对"本体接管"无意义 |
+| 不在工具链自身黑名单 | `terminal_injector.exe` / `relay32inject.exe` / `wt.exe` / `WindowsTerminal.exe` / `conhost.exe` / `OpenConsole.exe` 等（自我嵌套、劫持承载自己的宿主） |
+| 模块表里没有 `injected.dll` / `relay32.dll` | 已在接管链路里的进程（二次 `LoadLibrary` 会二次下发管道参数，子会话连到第二条管道） |
+
+顺序：按**深度升序、同深度按创建时间升序**注入 —— mediator 的 `RouteInput` 取「最后加入的活跃子会话」为前台（与 `CreateProcess` 捕获路径"最后创建的子进程即前台"同一约定），所以最深、最新的那个（真正的屏幕占用者）必须最后加入才拿得到输入。仅对注入目标执行且只执行一次（后代自己是子会话 `isTarget=0`，反向枚举祖先会互相注入成环）。
+
+**共享 ConHost 的卸载恢复只做一次**：被接管的后代与注入目标在同一块 ConHost 上，两者卸载时都会走 `Unloader::ReplaySessionToConHost()`（恢复注入几何 + 会话 VT 重放）。但只有**目标**掌握"注入前几何"（它的快照取自注入瞬间），后代的快照是注入之后（已被目标 resize 成 WT 尺寸）的值 —— 两个都恢复会把视口改回会话尺寸、覆盖目标刚恢复好的几何。实测该竞态：`test_tui_unload_restore` 三次里有一次停在会话尺寸 68x30 而非注入前的 100x36。故被接管的后代在卸载时**跳过** `ReplaySessionToConHost`（它的 Hook 卸掉后继续正常往 ConHost 绘制，画面由它自己恢复）。
+
+**鼠标意图判据要看 `ENABLE_MOUSE_INPUT`（2026-09-27 修正）**：Phase 20 的"往 WT 重发鼠标启用序列"原本只要求注入瞬间的 `inputMode` 含 `ENABLE_VIRTUAL_TERMINAL_INPUT(0x200)`，而 `vt::kEnableMouse` 里是 `?1003h`（**任何鼠标移动都上报**）。0x200 只说明该进程在 raw 读键，不代表它要鼠标（termtest 的 `run.py` 实测就是 `0x200`：纯读键、从不用鼠标），而控制台输入模式是**共享**的（同一控制台上每个进程都读到同一份）⇒ 整个会话被未请求的鼠标报文淹没（实测用户会话 438 条输入事件里 396 条是鼠标报文、其中 317 条是纯移动；termtest 自己就报 `收到未被请求的鼠标报文`）。判据改为**同时**含 `ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_MOUSE_INPUT(0x0010)`（与 mediator 侧 `ApplyInitialMouseReport`/`OnModeChange` 一致）。实测区分度（真 WT）：Textual 系 TUI `0x3b0`（含 0x10）→ 仍启用，鼠标能力不变；termtest `0x200`、shell `0x1f7`/`0x1e4` → 跳过；真 WT 复现里 `?1003h` 的发送次数与 b=35 纯移动报文数都从 317 降到 **0**。注意：**该判据涉及模式位，必须在真 WT 下验证** —— 同一个 termtest 在 pywezterm 的 ConPTY 里是 `0x3b0`、在真 WT 里是 `0x200`（两套 ConHost 的初始模式不同），只在 ConPTY 里验证会得出相反结论。
 
 ## 5. Hook 体系
 
@@ -214,6 +232,9 @@ Detour 是"透明代理"：除被 Hook 的那个 API 的返回值/出参外，**
    - 重放终点截断到最后一次 prompt 写入起点（`PromptTracker` 写-读序列语义：行编辑读入口之前的最后一次内容写入即该读的 prompt，无内容猜测）→ prompt 文本不进 ConHost；重放前确定性擦除快照 prompt 行。
    - 光标归位后 **`preReplayCur` 记录归位后光标**（2026-08-10 修复：此前记录归位前位置，空会话 SGR 重放不移动光标 → 惰性判定恒失败 → 每轮 prompt 下移一行、空行累积，`test_blankline_accumulation` 回归覆盖）。
    - 惰性重放（空会话，重放前后光标未动）：光标抬到擦除行上一行，KickStart 回车回显 `\r\n` 恰好把 cmd 新 prompt 推回注入前原位。
+9. **释放前置条件：所有阻塞 Detour 必须已返回**（`Unloader::DoUnload` 在启动 FreeLibrary 助手之前判定）。两类阻塞 Detour 各有进出计数，卸载时**唤醒 + 等归零**，排不空就**跳过 FreeLibrary**（保持 DLL 加载，宁可泄漏也不让目标崩）：
+   - 读类（`ReadConsole*` / `ReadFile`）：`ActiveReadDetours()`，计数保持到 Detour 真正返回（2026-09-26 修：阻塞型 pass-through 不提前 release，否则计数归零时线程仍在 orig 里，等待失效）。
+   - **等待类（`WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)`）：`ActiveWaitDetours()`（2026-09-27 补）**。这四个 Detour 把输入句柄换成 InputQueue 事件后**直接调 orig 等待** —— 调用线程停在 kernel32 内，**我们 Detour 的栈帧仍挂着**，一旦被唤醒（用户按键）就返回进 Detour 尾。此前卸载只等读类，于是这个 parked 线程的返回地址落在已 FreeLibrary 的代码里 → AV。WER 实证：2026-09-23 起 19 次 `pwsh.exe 0xc0000005`，**错误模块 `injected.dll_unloaded`**、偏移落在 `WaitForMultipleObjectsEx_Detour` 内；触发条件固定为"劫持 → 卸载 → 回旧终端按键"。修后卸载日志出现 `waiting 1 wait detour(s) to exit` → `all wait detours exited (waited 10ms)`，即卸载时确实存在 parked 等待且被安全排空。
 
 ## 11. 自保护（Phase 9）
 

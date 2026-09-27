@@ -210,7 +210,7 @@ terminal_injector.exe --list-targets --json
 
 ## 8. 自动化测试
 
-e2e 套件（118 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
+e2e 套件（119 个测试，14 个类别）使用方式见 [tests/README.md](../tests/README.md)：
 
 ```powershell
 cd tests/e2e

@@ -37,6 +37,8 @@
 | `suspended32_probe.py` | 挂起的 WOW64 进程能否枚举出 32 位模块表 |
 | `mapping_base_probe.py` | 用 `VirtualQueryEx`+`GetMappedFileNameW` 取挂起进程内 DLL 基址（不依赖 KnownDLL 同址） |
 | `t_sgr_colon_probe.py` | 真彩色冒号写法 `CSI 38:2::r:g:b` 端到端验证（真 ConPTY 承载 mediator + `pywezterm.Terminal` 解析对照）—— 冒号空保留位 bug 的回归证据 |
+| `t_hijack_order_probe.py` | ★「先跑起 TUI 再劫持承载它的 shell」的输出/输入通路取证。A 组 target=shell（复现"画面定格 + 无法输入"）、B 组 target=TUI 自身（对照，正常）、C 组再放一个 GUI 型后代（验证它不被接管）。含 `--calib` 模式标定按键判据（taskboard 焦点在过滤框，可打印字符会上屏 → 用独有标记串判定输入到达） |
+| `t_termtest_hijack_probe.py` | termtest(`run.py`) 在劫持下的屏幕形态与输入取证：ctrl（不注入）/ A（run.py 是注入前就存在的后代）/ C（注入后敲出来）。除查询探测、输入回显、空行/空格形态外，还回放**鼠标报文洪水**（复现 2026-09-27「不能输入」的候选机制）。注意：**涉及模式位的判据必须回真 WT 验**（同一 termtest 在 ConPTY 里 `0x3b0`、真 WT 里 `0x200`） |
 | `t_readfile_gt2.py` / `t_echo_rules.py` | 测定 ConHost 下 `ReadFile(stdin)`（LINE+ECHO）的按键回显与返回字节规则：Enter → `\r\n`（空行也补）、Ctrl+C → `b""`（成功非 EOF）—— 2026-09-25 行编辑回显修复的判据 |
 | `child_echo_position_probe.py`（见上表） | 行编辑回显落在屏幕第几行第几列，验证 `EmitLineEcho` 是否推进 `VtCursorTracker` |
 | `t_enterecho_consistency.py` | 端到端对照：注入链跑 termlib 交互尾部，Enter 回显的空行是否与 ConHost 一致 —— 空行丢失修复的验收探针（需 `TI_TERMTEST_DIR` 指向 termlib 目录） |
