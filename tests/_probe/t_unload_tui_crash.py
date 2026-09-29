@@ -1,5 +1,29 @@
 # -*- coding: utf-8 -*-
-r"""t_unload_tui_crash.py —— 【端到端】跑过 TUI 再卸载后，目标 shell 是否崩溃
+r"""t_unload_tui_crash.py —— 【端到端】跑过 TUI 再卸载后，目标终端是否收到残留模式序列
+
+⚠ 命名与初版描述的勘误（2026-09-29）
+------------------------------------
+本文件**测不出"崩溃"**，别被文件名误导：
+
+  - 它用的是 `pywezterm.Pty`（**ConPTY**），链路上**没有真 WT**，
+    而初版头部声称"只有真 WT 崩" —— 那这个 harness 在结构上就不可能复现该崩溃。
+  - 它的**实际判据**是第 162~171 行：卸载后目标终端**是否收到**那些
+    面向 WT 的终端模式 / 键盘协议序列（`?1004h` / `?2004h` / `?1049h` /
+    `>1u` / 鼠标上报 等）。这是 `StripTerminalModeSequences` 的有效回归判据，
+    与"崩不崩"是两件事。
+  - 初版头部把 09-26 的 `0xc0000005` 归因于 `>1u` → WT 改用 Kitty 编码。
+    **该归因已证伪**（WT 1.24 无任何 kitty 实现，Kitty 是 Preview 1.25 才引入；
+    `pywezterm.Terminal` 也不实现）—— 见 `docs/working/BUGS.md` 的 F-005。
+
+卸载后 `0xc0000005` 的**真根因**是"卸载时 Wait 类 Detour 线程仍停在 DLL 代码里"，
+其复现与回归用例在：
+
+  - 报告：`docs/report/2026-09-29-unload-crash-0xc0000005-report.md`
+  - 用例：`tests/e2e_v2/lifecycle/test_unload_settle_crash.py`（显式跨 3.0s 阈值）
+  - 隔离/取证探针：`tests/_probe/scan_unload_settle.py` / `isolate_unload_crash.py` /
+    `cdb_confirm_wait_detour.py`
+
+下面保留初版描述（含其未验证的归因），以便对照排查轨迹。
 
 用户现象（2026-09-26）
 ---------------------
@@ -9,9 +33,8 @@ r"""t_unload_tui_crash.py —— 【端到端】跑过 TUI 再卸载后，目标
 
 判据
 ----
-  - 对照轨（不跑 TUI）：卸载后敲命令，目标 shell 存活
-  - 触发轨（跑过 TUI）：卸载后敲命令，目标 shell 是否崩溃
-  两轨对照即可定位「跑过 TUI」这一前提条件留下的残余状态。
+  - 对照轨（不跑 TUI）：卸载后目标终端不应收到 WT 专属模式序列
+  - 触发轨（跑过 TUI）：卸载后目标终端是否收到这些序列（修复前会收到）
 
 用法
 ----

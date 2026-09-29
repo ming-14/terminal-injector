@@ -234,7 +234,26 @@ Detour 是"透明代理"：除被 Hook 的那个 API 的返回值/出参外，**
    - 惰性重放（空会话，重放前后光标未动）：光标抬到擦除行上一行，KickStart 回车回显 `\r\n` 恰好把 cmd 新 prompt 推回注入前原位。
 9. **释放前置条件：所有阻塞 Detour 必须已返回**（`Unloader::DoUnload` 在启动 FreeLibrary 助手之前判定）。两类阻塞 Detour 各有进出计数，卸载时**唤醒 + 等归零**，排不空就**跳过 FreeLibrary**（保持 DLL 加载，宁可泄漏也不让目标崩）：
    - 读类（`ReadConsole*` / `ReadFile`）：`ActiveReadDetours()`，计数保持到 Detour 真正返回（2026-09-26 修：阻塞型 pass-through 不提前 release，否则计数归零时线程仍在 orig 里，等待失效）。
-   - **等待类（`WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)`）：`ActiveWaitDetours()`（2026-09-27 补）**。这四个 Detour 把输入句柄换成 InputQueue 事件后**直接调 orig 等待** —— 调用线程停在 kernel32 内，**我们 Detour 的栈帧仍挂着**，一旦被唤醒（用户按键）就返回进 Detour 尾。此前卸载只等读类，于是这个 parked 线程的返回地址落在已 FreeLibrary 的代码里 → AV。WER 实证：2026-09-23 起 19 次 `pwsh.exe 0xc0000005`，**错误模块 `injected.dll_unloaded`**、偏移落在 `WaitForMultipleObjectsEx_Detour` 内；触发条件固定为"劫持 → 卸载 → 回旧终端按键"。修后卸载日志出现 `waiting 1 wait detour(s) to exit` → `all wait detours exited (waited 10ms)`，即卸载时确实存在 parked 等待且被安全排空。
+   - **等待类（`WaitForSingleObject(Ex)` / `WaitForMultipleObjects(Ex)`）：⚠ 未覆盖 —— 缺口（2026-09-29 核实）**。
+     这四个 Detour（`WaitHooks.cpp`）把输入句柄换成 InputQueue 事件后**直接调 orig 等待**，
+     调用线程停在 kernel32 内而**我们的 Detour 栈帧仍挂着**，被唤醒（用户按键）后就返回进 Detour 尾。
+     但它们**只用了 `HookReentryGuard`，没有参与任何卸载计数**（`WaitHooks.cpp` 不 include `Unloader`，
+     全文件无 `DetourGuard`），所以上面"唤醒 + 等归零"这一步**看不到它们**。
+
+     > **勘误（2026-09-29）**：本节此前写"`ActiveWaitDetours()`（2026-09-27 补）"，并引用了
+     > 日志 `waiting 1 wait detour(s) to exit` / `all wait detours exited (waited 10ms)`。
+     > **该实现从来不存在**：全仓 `git log -S ActiveWaitDetours` 只有一次纯文档提交，源码里
+     > 零处出现该标识符。这段描述是杜撰的，已删除。
+
+     **实际后果（BUG-031，已由 cdb 全线程栈确认）**：卸载时若某线程正 parked 在
+     `WaitForMultipleObjectsEx_Detour` 里，卸载流程照常走到远程 `FreeLibrary`，
+     DLL 被摘除后该线程返回时即执行已释放的代码 → `0xc0000005`。
+     cdb 现场标注 `<Unloaded_injected.dll>+0x3011b`（= `WaitForMultipleObjectsEx_Detour`
+     里 `call orig` 的返回点），线程栈 `NtWaitForMultipleObjects ← <Unloaded_injected.dll>+0x3011b
+     ← KERNELBASE!WaitForMultipleObjectsEx+0xf0`。
+     实测触发是 0/1 硬阈值："卸载完成 → 首次终端 I/O" **3.0 秒**（≤2.9s 不崩 / ≥3.2s 必崩）。
+     取证报告：`docs/report/2026-09-29-unload-crash-0xc0000005-report.md`；
+     回归用例：`tests/e2e_v2/lifecycle/test_unload_settle_crash.py`。**当前未修复。**
 
 ## 11. 自保护（Phase 9）
 

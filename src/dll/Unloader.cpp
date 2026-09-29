@@ -403,18 +403,37 @@ void Unloader::DoUnload() {
 
 // 从重放字节流中剔除「面向 WT 的终端模式 / 键盘协议」序列。
 //
-// 背景（2026-09-26 修复：卸载后旧 WT 的 shell 崩溃 0xc0000005）
+// 背景（2026-09-26）
 //   VtReplayBuffer 记录的是**面向 WT 的**原始 VT 输出。会话期应用（如 Textual）
 //   会发出成组的终端模式序列，实测启动输出即：
 //       ?1049h ?1000h ?1003h ?1015h ?1006h ?25l ?1004h >1u ?2004h
 //   卸载重放把这些原样写进目标 ConHost 后，**旧 WT 会照单执行**，于是：
-//     - `>1u`（Kitty 键盘协议）→ **WT 改用 Kitty 编码所有按键**，目标 shell 收到的
-//       不再是普通按键 → PSReadLine/.NET 解析异常输入 → ACCESS_VIOLATION
-//       （这正是"只有真 WT 才崩、ConPTY 不崩"的原因：ConPTY 不支持 `>1u`）
-//     - `?1049h`（备用屏）/ `?2004h`（括号粘贴）/ `?1004h`（焦点上报）等
-//       同样会改变旧 WT 的输入编码与缓冲状态
+//     - `?1049h`（备用屏）/ `?2004h`（括号粘贴）/ `?1004h`（焦点上报）
+//       会改变旧 WT 的输入编码与缓冲状态
 //     - 鼠标上报 `?1000h ?1003h ?1015h ?1006h` 让旧 WT 上报目标从未请求的鼠标
-//   这些序列只服务 **WT 侧输入语义**，与 ConHost 画面恢复无关，必须剔除。
+//     - `>1u`（Kitty 键盘协议 push）——**归因已于 2026-09-29 修正，见下**
+//   这些序列只服务 **WT 侧输入语义**，与 ConHost 画面恢复无关，剔除它们是对的
+//   （保守策略：不会误删画面恢复所需的内容字节）。
+//
+// ★ 2026-09-29 归因修正（原注释称"`>1u` → WT 改用 Kitty 编码所有按键"是错的）
+//   实测结论（探针 tests/_probe/kitty_kbd_layer_probe.py）：
+//     1. `>1u` 的兑现方确实是**终端侧输入编码器**，ConPTY 内核只透传不兑现
+//        （目标发 `>1u`，宿主原样收到 `\x1b[>1u\x1b[=1u`）。这一点原注释是对的。
+//     2. 但断言"WT 前端支持 `>1u`"**在 WT 1.24 上不成立**：逐字节扫描
+//        Microsoft.Terminal.Control.dll / WindowsTerminal.exe / TerminalApp.dll /
+//        OpenConsole.exe，`kitty` 与 `>Nu` **零命中**。Kitty 键盘协议是
+//        **Windows Terminal Preview 1.25** 才引入的（稳定版 1.24 没有）。
+//     3. wezterm-term（pywezterm.Terminal）也不实现：`get_keyboard_encoding()`
+//        恒为 `xterm`，喂 `>1u` / `=0u` / `<u` 均不变。
+//   ⇒ 所以「WT 改用 Kitty 编码按键」这个环节**在 1.24 及更早版本上不成立**，
+//     不能再用它解释崩溃。该不该剔除 `>1u` 与"哪个 bug 因此被修好"无关
+//     （见下条），剔除本身仍然正确。
+//
+// ★ 该函数**没有**修掉"卸载后旧 WT 的 shell 崩溃 0xc0000005"
+//   崩溃的真正根因是**卸载时 Wait 类 Detour 线程仍停在 DLL 代码里**
+//   （`WaitForMultipleObjectsEx_Detour` 的 `call orig` 返回地址落在已 FreeLibrary
+//   的代码上）。详见 docs/report/2026-09-29-unload-crash-0xc0000005-report.md。
+//   本函数只负责"别把 WT 专属序列灌进共享 ConHost"，两件事互不替代。
 //
 // 剔除范围：
 //   1. `CSI ? <n>[;<n>...] h|l`，n ∈ 终端模式白名单（鼠标/焦点/备用屏/括号粘贴/光标）
@@ -715,8 +734,9 @@ void Unloader::ReplaySessionToConHost() {
     // 4.2 分块重放（WriteFile 字节流，ConHost VT 模式按 UTF-8 解析）
     //     先剔除「面向 WT 的终端模式 / 键盘协议」序列（鼠标上报、Kitty 键盘
     //     `>1u`、备用屏 `?1049h`、括号粘贴 `?2004h` 等）——它们会被旧 WT 照单
-    //     执行，改变其输入编码，导致目标 shell 收到异常输入而崩溃。
-    //     见 StripTerminalModeSequences 注释。
+    //     执行，改变其输入编码，并上报目标从未请求的鼠标/焦点事件。
+    //     见 StripTerminalModeSequences 注释（含 2026-09-29 的归因修正：
+    //     它们**不是**"卸载后 0xc0000005"的原因，那个真因在 Wait 类 Detour 的卸载时序）。
     std::string replayBytes;
     StripTerminalModeSequences(vt.data(), replayEnd, replayBytes);
     const size_t strippedBytes = replayEnd - replayBytes.size();

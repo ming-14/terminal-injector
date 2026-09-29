@@ -49,15 +49,28 @@ ConHost，cmd 被 KickStart 回车唤醒后又自绘一个新 prompt → 每次�
    - 已截断 + 惰性重放（重放前后光标未动 = 空会话无可视内容）：光标抬到
      擦除行上一行（`(0, injCur.Y - 1)`，下限 0）。
 
-## 3.1 重放必须剔除「面向 WT 的终端模式 / 键盘协议」序列（2026-09-26 修复）
+## 3.1 重放必须剔除「面向 WT 的终端模式 / 键盘协议」序列（2026-09-26 实现）
 
-**现象**：开 WT → 劫持到新 WT → 运行 Textual TUI（taskboard.py）→ 卸载 → 回旧 WT 输入任意
-内容回车 → **旧 WT 的 pwsh 崩溃 `0xc0000005`**（.NET 栈落在 `WaitHandle.WaitOne` →
-`PipelineBase.Invoke` → PSReadLine 的 `TryInvokeUserDefinedReadLine`）；**不跑 TUI 直接卸载则不崩**。
-且**只有真 WT 崩，测试 harness 的 ConPTY 不崩** —— 这一条是定位的关键。
+> **⚠ 归因勘误（2026-09-29）**：本节原先把 2026-09-26 的"卸载后旧 WT shell 崩
+> `0xc0000005`"归因于 `>1u` 让 WT 改用 Kitty 编码按键。**该归因已证伪**：
+> 本机 WT **1.24** 的 `Microsoft.Terminal.Control.dll` / `WindowsTerminal.exe` /
+> `TerminalApp.dll` / `OpenConsole.exe` 里 `kitty` 与 `>Nu` **零命中** —— Kitty 键盘
+> 协议是 **Windows Terminal Preview 1.25** 才引入的，1.24 及更早版本上
+> "WT 改用 Kitty 编码按键"这个环节根本不存在（`pywezterm.Terminal` 的
+> `get_keyboard_encoding()` 也恒为 `xterm`）。实测探针：`tests/_probe/kitty_kbd_layer_probe.py`。
+> **`0xc0000005` 的真正根因是卸载时 Wait 类 Detour 线程仍停在 DLL 代码里**，
+> 与 `>1u` 无关，且**至今未修** —— 见 `docs/report/2026-09-29-unload-crash-0xc0000005-report.md`。
+> 下面"剔除序列"这个改动本身仍然正确且必要（理由见下），只是它**没有**（也不可能）
+> 修掉那个崩溃。
 
-**根因**：`VtReplayBuffer` 记录的是**面向 WT 的原始 VT 输出**。会话期应用（Textual）启动时会发出
-成组的终端模式序列，实测其启动输出为：
+**现象**（原始记录，含当时未验证的归因，保留以示排查轨迹）：开 WT → 劫持到新 WT → 运行
+Textual TUI（taskboard.py）→ 卸载 → 回旧 WT 输入任意内容回车 → **旧 WT 的 pwsh 崩溃
+`0xc0000005`**（.NET 栈落在 `WaitHandle.WaitOne` → `PipelineBase.Invoke` → PSReadLine 的
+`TryInvokeUserDefinedReadLine`）；**不跑 TUI 直接卸载则不崩**。
+且**只有真 WT 崩，测试 harness 的 ConPTY 不崩**。
+
+**真实问题（剔除序列要解决的）**：`VtReplayBuffer` 记录的是**面向 WT 的原始 VT 输出**。
+会话期应用（Textual）启动时会发出成组的终端模式序列，实测其启动输出为：
 
 ```
 ?1049h ?1000h ?1003h ?1015h ?1006h ?25l ?1004h >1u ?2004h
@@ -68,12 +81,16 @@ ConHost，cmd 被 KickStart 回车唤醒后又自绘一个新 prompt → 每次�
 `WriteFile` 进 **hOut = 共享 ConHost**（子进程与目标 shell 共用同一 ConHost）→
 **旧 WT 照单执行这些序列**，于是：
 
-- **`>1u`（Kitty 键盘协议）→ WT 改用 Kitty 编码所有按键**，目标 shell 收到的不再是普通按键
-  → PSReadLine / .NET 解析异常输入 → ACCESS_VIOLATION。
-  **这正是"只有真 WT 才崩"的原因：ConPTY 不支持 `>1u`，所以本地 harness 复现不出来。**
-- `?1049h`（备用屏）/ `?2004h`（括号粘贴）/ `?1004h`（焦点上报）同样会改变旧 WT 的
-  输入编码与缓冲状态。
+- `?1049h`（备用屏）/ `?2004h`（括号粘贴）/ `?1004h`（焦点上报）会改变旧 WT 的
+  输入编码与缓冲状态 —— 这些序列描述的是"会话里的应用想要什么"，而目标 shell
+  已经回到原生行编辑，模式与需求不再匹配，属于**状态污染**。
 - `?1000h ?1003h ?1015h ?1006h`（鼠标上报）让旧 WT 上报目标从未请求的鼠标。
+- `>1u`（Kitty 键盘协议 push）同理属于"面向已消失的会话"的模式残留 ——
+  在支持该协议的终端上会造成同样的状态污染（1.24 不支持，故当时未显现）。
+
+> 关于"只有真 WT 崩、ConPTY 不崩"：ConPTY 与真 WT 是**两套不同的 ConHost 实现**
+> （初始控制台模式、序列支持面都不同，参见 TRAP-007），两者行为必然有差异 ——
+> 但**不等于**"崩溃由版本特性差异造成"。该差异的完整解释属于上面那条真根因。
 
 **修复**：`Unloader.cpp` 的 `StripTerminalModeSequences()`，在写 ConHost 前剔除三类序列：
 1. `CSI ? <n>[;<n>...] h|l`，n ∈ {25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1049, 2004, 2026}
