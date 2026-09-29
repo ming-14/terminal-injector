@@ -212,11 +212,22 @@ tests/e2e_v2/
     ├── test_child_injection.py         # host=conhost + 子进程注入
     ├── test_conpty_hosted_target.py    # host=conpty（双 Pty，目标 pwsh）
     ├── test_conpty_hosted_cmd.py       # host=conpty（双 Pty，目标 cmd = "WT 里开的 cmd"）
+    ├── test_unload_settle_crash.py     # ★ 卸载后跨时间阈值再输入，源 shell 不能崩（BUG-031）
+    ├── test_unload_tui_shell_alive.py  # 历史现象记录（判据已被上一条取代，见 §8.6）
     └── test_screen_matches_native.py   # 差分诊断：注入屏幕 vs 原生屏幕
 ```
 
-五个试点 + 一个自检用例 **全量 6 PASS / 59 断言 / 31.9s / 0 残留进程**（跑前跑后进程快照对比），
-每个用例再各自连跑 3 轮稳定。单例耗时：
+九个用例（一个自检 + 八个 lifecycle）当前全量结果：**PASS=5 / FAIL=3 / UNSUPPORTED=0 / ERROR=0**，
+断言总数 63，耗时约 143s。三个 FAIL 都是**已知缺陷的回归用例在正常报红**，
+不是脚手架问题：
+
+| FAIL 用例 | 对应缺陷 |
+|---|---|
+| `test_adopt_tui_input_alive` | BUG-030（接管后代后鼠标未启用） |
+| `test_unload_settle_crash` | **BUG-031**（卸载后跨阈值输入 → 源 shell AV） |
+| `test_unload_tui_shell_alive` | BUG-031（同缺陷，旧判据） |
+
+单例耗时：
 
 | 用例 | v2 耗时 | 说明 |
 |---|---|---|
@@ -226,6 +237,7 @@ tests/e2e_v2/
 | `test_screen_matches_native` | ~18s | 3 个场景 ×（原生基准 2 遍 + 注入 1 遍） |
 | `test_conpty_hosted_target` | ~9s | 源终端 drain 4s + 重放等待（目标 pwsh） |
 | `test_conpty_hosted_cmd` | ~2s | 双 Pty，目标 cmd（"WT 里开的 cmd"） |
+| `test_unload_settle_crash` | ~30s | 2 场景 ×（TUI + 卸载 + 显式等 3.5s 跨阈值） |
 
 对照：v1 同类用例以十秒计（大头是 wt.exe 起窗口与焦点切换），且需要"别碰鼠标"。
 
@@ -325,6 +337,46 @@ tests/e2e_v2/
 - **机制类事实**（`conptyHosted` / `Adopt: pid=` / `peerIsRelay`）—— 注入侧独有，原生腿没有对手
 - **目标自检结果文件** —— 那是"程序内部的账"（DLL 虚拟状态）
 - **注入侧故意偏离原生的行为**（如 ConPTY 托管目标不做行首覆盖）—— 差分必然"不等"，且不等才是对的
+
+---
+
+## 8.6 卸载类用例：必须跨过"卸载完成 → 首次终端 I/O"的时间阈值
+
+**这条是踩出来的，不是推出来的。** BUG-031（卸载后源 shell 崩 `0xc0000005`，对应
+真实现场退出码 3221225477）的复现判据**不是"按什么键"，而是"等多久"**：
+
+实测（`tests/_probe/scan_unload_settle.py`）固定动作为 `echo x` + 回车，
+只扫"卸载完成 → 首次输入"的等待时间：
+
+| settle | 复现 / 总数 |
+|---|---|
+| 0 / 1 / 1.5 / 2 / 2.5 / 2.7 / 2.9 s | **0 / 3**（全绿） |
+| **3.2 s** | **3 / 3**（全崩） |
+
+⇒ **0/1 硬阈值卡在 3.0 秒整**，中间没有概率性；空白 Enter、裸字符**都不触发**
+（必须是真实的终端 I/O）。
+
+三条结论直接决定怎么写卸载类用例：
+
+1. **判据必须显式跨过阈值**：卸载后等 **≥3.5s** 再做输入断言。
+   `close_mediator()` 自带 `sleep(2.5)`，用例再随手 `sleep(2.0)` 就 echo
+   ⇒ 恰好落在 3 秒以内，**永远测不到这个缺陷**（旧用例 `test_unload_tui_shell_alive`
+   就是这么误判 PASS 的，见 §8 目录树里的说明）。
+2. **别把"某个按键"当触发条件**。现场描述成"按回车就崩"会误导排查方向 ——
+   要用隔离用例逐项排除变量（`tests/_probe/isolate_unload_crash.py` 的 A~E 五组）。
+3. **同一用例时崩时不崩 ≠ flaky**。先怀疑落在阈值边界上，用"扫参数 + 多轮重复"
+   确认是 0/1 还是真概率，别直接判抖动。
+
+根因（cdb 全线程栈实证）：目标线程阻塞在 `WaitForMultipleObjectsEx_Detour` 内部，
+而 `Unloader::DoUnload` 第 5.5 步只等 Read 类 detour 退出
+（`ActiveReadDetours()`，只有 `ReadDetourGuard` 计数；`WaitHooks.cpp` 的 detour
+只用 `HookReentryGuard`，**不在计数内**）⇒ 等待被"已归零"骗过 → 远程 `FreeLibrary`
+→ 线程返回时弹回已卸载的代码 → AV。cdb 现场标注为 `<Unloaded_injected.dll>+0x3011b`。
+完整证据链：`docs/report/2026-09-29-unload-crash-0xc0000005-report.md`。
+
+> 取证技巧：cdb 会把"已卸载模块的地址"按**最近的已加载模块**错标
+> （本次错标成 `Microsoft_PowerShell_Commands_Utility+0x13011b`）。
+> **看到尖括号 `<Unloaded_xxx.dll>+0x...` 才是真归属**，再用加载时的 `ModLoad:` 基址范围核对。
 
 ---
 
