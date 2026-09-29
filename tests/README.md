@@ -1,6 +1,20 @@
 # terminal-injector 测试
 
-本目录包含两套测试：**`e2e/`**（现行端到端测试套件，日常使用）与 **`legacy/`**（早期阶段测试与调试脚本归档，仅调试参考）。
+本目录包含测试与排查工具，按**验证手段**和**生命周期**分块：
+
+| 目录 | 定位 |
+|---|---|
+| `e2e/` | **现行端到端回归套件**（`run_all.py` 驱动），日常全量跑这套 |
+| `e2e_v2/` | 以 pywezterm 为宿主的下一代 e2e（零焦点依赖），脚手架阶段，按类别分批迁移 |
+| `_probe/` | 只读排查探针，**不进回归套件**，用于把现象量成可复读的数字/字节 |
+| `live/` | 真实 TUI 程序（termtest / textual / winui / opentui），作为注入目标素材 |
+| `unit/` | C++ 单元测试（`VtSgrFilter` 隔离自测） |
+| `vendor/` | 测试外部依赖（pywezterm / wezterm / Windows Terminal 发行包 + 下载脚本） |
+
+各目录的详细说明见其自身 README（`e2e_v2/README.md`、`_probe/README.md`、`live/winui/README.md`）。
+
+> 2026-09-29：原 `legacy/`（早期 Phase 测试与调试脚本归档）已删除，
+> 其 cdb 附加/卸载诊断等脚本不再随仓库分发。
 
 ---
 
@@ -146,21 +160,7 @@ e2e/
 
 ---
 
-## 二、legacy 测试与调试脚本（归档）
-
-早期阶段测试，**不作为回归套件**，仅排查历史问题时参考：
-
-- `legacy/runners/`：按 Phase 划分的早期 e2e（test_phase8 ~ phase18），手工驱动较多
-- `legacy/helpers/`：调试工具（cdb 附加/转储、注入诊断、卸载诊断、pty_agent 等）
-- `legacy/manual/`：手工验证脚本（光标位置、ConHost 内容等）
-- `legacy/targets/`：早期目标脚本
-
-如需调试崩溃/卸载问题，`legacy/helpers/diag_*.py` 与 cdb 附加脚本仍可用（cdb 位于
-`legacy/paths.cdb_tools()`，可用 `TI_CDB_TOOLS` 环境变量覆盖）。
-
----
-
-## 三、快速上手
+## 二、快速上手
 
 ```powershell
 # 1. 构建

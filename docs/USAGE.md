@@ -195,7 +195,7 @@ terminal_injector.exe --list-targets --json
 | `TI_INJECTED_LOG_DIR` | 覆盖 DLL 日志目录（默认 `exe所在目录\logs`） |
 | `TI_LOG_LEVEL` | DLL 日志级别：`TRACE/DEBUG/INFO/WARN/ERROR/FATAL`（默认 `DEBUG`） |
 | `TI_PROJECT_ROOT` | e2e 测试用：覆盖项目根目录（默认由 tests/e2e 路径推导） |
-| `TI_CDB_TOOLS` | legacy 调试脚本用：cdb 工具目录 |
+| `TI_CDB_TOOLS` | cdb 工具目录（调试崩溃/卸载问题时附加用） |
 
 ### 7.3 常见排查
 

@@ -62,7 +62,11 @@ terminal-injector/
 │   │   ├── common/             # test infrastructure (injector / input_sim / vt_capture / paths)
 │   │   ├── _targets/           # self-check scripts running inside target processes
 │   │   └── docs/PHASES.md      # test suite design doc
-│   └── legacy/                 # archived early-phase tests and debug scripts
+│   ├── e2e_v2/                 # pywezterm-hosted e2e suite (zero focus dependency, in migration)
+│   ├── _probe/                 # read-only diagnostic probes (not part of regression)
+│   ├── live/                   # real TUI programs used as injection targets
+│   ├── unit/                   # C++ unit tests
+│   └── vendor/                 # external test deps (pywezterm / wezterm / WT)
 ├── docs/
 │   ├── USAGE.md                # detailed usage manual (full CLI reference, scenarios, troubleshooting)
 │   ├── TECHNICAL.md            # technical notes (architecture, mechanisms, protocol, limitations)
@@ -219,7 +223,11 @@ terminal-injector/
 │   │   ├── common/             # 测试基建（injector / input_sim / vt_capture / paths）
 │   │   ├── _targets/           # 目标进程内自检脚本
 │   │   └── docs/PHASES.md      # 测试套件设计文档
-│   └── legacy/                 # 早期阶段测试与调试脚本归档
+│   ├── e2e_v2/                 # pywezterm 承载的 e2e 套件（零焦点依赖，迁移中）
+│   ├── _probe/                 # 只读排查探针（不进回归套件）
+│   ├── live/                   # 真实 TUI 程序（注入目标素材）
+│   ├── unit/                   # C++ 单元测试
+│   └── vendor/                 # 测试外部依赖（pywezterm / wezterm / WT）
 ├── docs/
 │   ├── USAGE.md                # 详细使用手册（CLI 全参数、场景、故障排查）
 │   ├── TECHNICAL.md            # 技术说明（架构、机制、协议、限制）
